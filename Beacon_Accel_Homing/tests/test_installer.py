@@ -1513,6 +1513,26 @@ class UninstallFixture(unittest.TestCase):
     def manifest(self, backup):
         return json.loads((backup / "manifest.json").read_text())
 
+    def _assert_manual_thresholds_preserved_by_install_and_update(self, section):
+        values = "threshold: 0.25\nx_threshold: 0.5\ny_threshold: 0.001\n"
+        self.config.write_bytes((CONFIG + "\n[" + section + "]\n" + values + SAVED).encode())
+        self.install("manual-first")
+        installed = self.config.read_bytes()
+        self.assertIn(values.encode(), installed)
+        self.assertTrue(installed.endswith(SAVED.encode()))
+        self.install("manual-update")
+        self.assertEqual(self.config.read_bytes(), installed)
+        graph = installer.ConfigGraph(self.config)
+        plugin = graph.one(section)
+        self.assertEqual([plugin.get(name) for name in ("threshold", "x_threshold", "y_threshold")],
+                         ["0.25", "0.5", "0.001"])
+
+    def test_manual_values_below_three_survive_current_section_install_and_update(self):
+        self._assert_manual_thresholds_preserved_by_install_and_update("accel_homing")
+
+    def test_manual_values_below_three_survive_legacy_section_install_and_update(self):
+        self._assert_manual_thresholds_preserved_by_install_and_update("beacon_accel_homing")
+
     def test_install_and_uninstall_preserve_safe_z_probe_and_saved_config_bytes(self):
         probe_home, _saved = HostFixture.cartographer_safe_z_fixture(self)
         original = self.capture()

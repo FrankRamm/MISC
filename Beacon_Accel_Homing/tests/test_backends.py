@@ -744,7 +744,7 @@ class StreamIntegrityTest(unittest.TestCase):
     def test_rate_and_range_are_checked_at_startup(self):
         with self.assertRaisesRegex(ConfigError, "below min_sample_rate"):
             generic(rate=800)
-        with self.assertRaisesRegex(ConfigError, "below 6.4 g"):
+        with self.assertRaisesRegex(ConfigError, "at most 6.4 g"):
             generic("mpu9250 toolhead", {"threshold": 8})
         obj = generic("mpu9250 toolhead")
         self.assertEqual(obj.threshold_g, {"x": 4.0, "y": 4.0})
