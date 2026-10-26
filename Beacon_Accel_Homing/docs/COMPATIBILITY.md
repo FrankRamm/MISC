@@ -35,6 +35,48 @@ the previous reporting interval on completion/failure. Beacon retains its
 direct raw path and existing trigger dispatch. Both rely on host/transport
 scheduling and cannot guarantee a hard end-to-end stop latency.
 
+## Pre-motion stationary preparation
+
+Motor enable and current setup can produce an acceleration transient that
+resembles a stop impact. Both Beacon and generic paths therefore acquire a
+new quiet reference before every homing pass, including normal `G28`, workflow
+homes, already enabled motors and second touches.
+
+The preparation order is:
+
+1. Enable any disabled motors required for the active axis, including both
+   CoreXY drives. Queue `enable_settle_time` after a new enable (0.25 s by
+   default; finite values from 0 to 2 s). A zero delay does not bypass the
+   stationary-data requirement.
+2. At `homing_move_begin`, flush step generation and wait for queued setup,
+   enable settling, plugin backoff and any homing retract to complete. This
+   check precedes the upcoming homing move; it does not prohibit the earlier
+   configured backoff or retract.
+3. Establish a new sensor-time cutoff after that wait. Discard buffered
+   samples from before the cutoff and require at least 50 fresh,
+   contiguous samples spanning `baseline_time` (default 0.1 s). On each of
+   the three sensor axes, peak-to-peak variation must not exceed 20% of the
+   active pass's impact threshold, including a calibration candidate.
+4. Freeze the validated reference before `home_start` arms trigger dispatch.
+   The first valid impact at or after arming remains eligible, including
+   samples delivered in the batch that crosses the arming boundary. There is
+   no post-arm blanking interval or minimum-travel impact filter.
+
+Acquisition has a `baseline_time + 0.5 s` deadline measured after queued setup
+and settling finish. Persistent vibration or no sample flow fails with
+`no_baseline` before trigger dispatch is armed. Stale, future, nonmonotonic,
+gapped, clipped, saturated or scale-changed data also aborts preparation.
+The reference is accumulated in constant storage; `baseline_batches` does
+not determine whether this new interval is long enough.
+
+The 20% quiet limit is an engineering policy checked by synthetic fixtures,
+not a physically validated boundary between vibration and contact. It cannot
+exclude every false home. In particular, a driver's transition from hold
+current to run current on the first step occurs after the stationary check.
+Klipper documents that current changes can themselves move a motor in its
+[`hold_current` guidance](https://www.klipper3d.org/TMC_Drivers.html#prefer-to-not-specify-a-hold_current).
+This preparation does not change TMC currents, modes or other driver settings.
+
 ## Centered calibration
 
 Start or resume with `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`, or `AXIS=Y`
@@ -43,7 +85,8 @@ hand using motor controls appropriate for the machine, with Z supported.
 Both XY axes must be unhomed in Klipper. `CENTERED=1` declares that this manual
 preparation is complete and authorizes movement; it is not a sensor position
 measurement. The workflow does not assign a center coordinate or mark either
-axis homed before the actual home.
+axis homed before the actual home. No further confirmation is requested; the
+first homing pass starts after stationary preparation succeeds.
 
 The first home tests the candidate threshold, starting at 2 g by default.
 One qualifying discovery is followed by ten additional accepted validation
