@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for optional travel policies and unchanged ten-home repeatability",
-  "timestamp_utc": "2026-10-26T19:30:13.294604+00:00",
-  "source_base_commit": "04dfb5e45830b1cbd670f58dd756ac207dfa1f5f",
+  "stage": "completed offline validation for finite-positive manual thresholds and unchanged calibration/model bounds",
+  "timestamp_utc": "2026-10-26T20:13:50.134548+00:00",
+  "source_base_commit": "923a0845c74fe0e1f77e55f641ccd73095d3f356",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 414,
-  "passed": 413,
+  "tests_run": 427,
+  "passed": 426,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,13 +14,14 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 5.988,
+  "elapsed_seconds": 6.837,
   "test_returncode": 0,
-  "installer_tests": 131,
+  "installer_tests": 133,
   "workflow_tests": 75,
   "module_tests": {
     "test_backends": 65,
-    "test_installer": 131,
+    "test_installer": 133,
+    "test_manual_thresholds": 11,
     "test_motion_policy": 43,
     "test_session": 55,
     "test_single_touch": 16,
@@ -40,10 +41,10 @@
   "deployment": false,
   "restart": false,
   "physical_motion": false,
-  "command": "python -m unittest discover -s Beacon_Accel_Homing/tests -v",
+  "command": "python -m unittest discover -s tests -v",
   "log": "tests.txt",
   "shell_syntax_checks": [],
-  "shell_syntax_checks_note": "Not repeated: install.sh, bootstrap.sh and uninstall.sh actual on-disk bytes exactly match the published source base commit, including the locally untracked uninstall.sh.",
+  "shell_syntax_checks_note": "Not repeated: install.sh, bootstrap.sh and uninstall.sh actual on-disk bytes exactly match source_base_commit.",
   "shell_file_content_checks": [
     {
       "file": "install.sh",
@@ -80,6 +81,7 @@
       "tests/harness.py",
       "tests/test_backends.py",
       "tests/test_installer.py",
+      "tests/test_manual_thresholds.py",
       "tests/test_motion_policy.py",
       "tests/test_session.py",
       "tests/test_single_touch.py",
@@ -87,7 +89,7 @@
       "tests/test_workflows.py",
       "uninstaller.py"
     ],
-    "scope": "All production and test Python files in the package",
+    "scope": "All 18 production and test Python files in the package",
     "line_ending_only_files": [
       "tests/test_single_touch.py",
       "tests/test_trigger.py"
@@ -102,12 +104,13 @@
     "accel_homing_charts.py": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_workflows.py": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3",
-    "beacon_accel_homing.py": "7764cc5f07d55aac188474ee953f9b90e48e1bd64b0935d7d47d8895907188f5",
+    "beacon_accel_homing.py": "4745d5e2fe8f26f69b6c627b8959df73912e770ee9dd8f36c2bd72d9b20d4375",
     "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
     "installer.py": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c",
     "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
-    "tests/test_backends.py": "d93a67cdf3f464853d54f348831c7ca393d24f7e2863adcf75fcfd1591d75758",
-    "tests/test_installer.py": "84afaa1da27560a38cb107265de4bafe9587aa0d6e836e40e7eed424f54ceb5f",
+    "tests/test_backends.py": "455624d6f47c1f44fb003d1d196e8618bcfb18ec1fd4c7f080713c7f81ff69a1",
+    "tests/test_installer.py": "6a3c2ff160f478a5316cf26370ba63dd2e74b35c56dbd82b7072df2f995f6864",
+    "tests/test_manual_thresholds.py": "b551a3670369f01b1d96acada9eeef47cd13ae5a180c46777fc480b57add2baf",
     "tests/test_motion_policy.py": "118b013fb56d1493150c753fae7d35815c36afca2c5c333003a1072cb966e297",
     "tests/test_session.py": "c92257be8586d0e654b72e1d259bb6892a1bc7add796d5fdeca4c98df87187b7",
     "tests/test_single_touch.py": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
@@ -147,15 +150,15 @@
     "Explicit advanced travel limits remain bounded to 0.1..2.0 mm reporting and 0.1..5.0 mm startup; these engineering ranges are not physical stopping-distance certifications.",
     "The 1.5 mm rule is a strict ten-validation-home repeatability range per axis, not an impact threshold, sample-latency distance or guaranteed stopping distance."
   ],
-  "git_diff_check_base": "04dfb5e45830b1cbd670f58dd756ac207dfa1f5f",
+  "git_diff_check_base": "923a0845c74fe0e1f77e55f641ccd73095d3f356",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
-  "previous_validation_timestamp_utc": "2026-10-26T19:04:23.087165+00:00",
-  "validation_reason": "One final combined offline run after independent review. Configured sensor report/startup travel policies are disabled when absent, represented by None/null rather than infinity. Default 75 and 100 mm/s plans connect, preflight and prepare without changing configured speed, sample age, interval or acceleration. Explicit finite bounded report/startup settings remain independently enforced with strict comparisons and final preparation rechecks. All effective/derived numeric values must remain finite; status and replay fallbacks handle absent policies without invalid JSON. Actual stale/missing/frozen/data-error and startup no_motion handling, conservative baseline movement/direction proof and raw impacts are unchanged. The workflow source is byte-identical to the published base: calibration still requires ten qualified validation homes with strict max-minus-min travel below 1.5 mm separately per axis. Installer fixtures cover the X75/Y50 target without budget flags, configured-speed preservation, explicit opt-ins, retained-axis checks and valid undo. The harness numeric getter models absent optional defaults without accepting explicit invalid None values. No private user log or raw samples are included.",
+  "previous_validation_timestamp_utc": "2026-10-26T19:30:13.294604+00:00",
+  "validation_reason": "One final combined offline run after independent review of the manual-threshold fix and README cleanup. Shared and independent X/Y manual values in current and legacy sections, plus both SET aliases, accept finite values greater than zero without fixed 3 g or 15 g limits. The existing inclusive 80% guard applies when sensor full-scale is known, including actual active Beacon session ranges; derived trigger limits must remain finite and positive before arming. Focused fixtures cover sub-0.5 g and above-15 g values, invalid numerics, exact range boundaries, unknown native Beacon range behavior, readable small-value feedback and initial-install/update preservation. Calibration/model modules, timing/motion-policy modules, installer/uninstaller and bootstrap bytes are unchanged from the stated public base; calibration still starts at 0.5 g with separate 0.5..15 g model bounds and strict ten-validation-home travel range below 1.5 mm. No private user log or raw samples are included.",
   "host_service_restart_tested": false,
   "live_python_module_reload_tested": false,
   "automatic_restart_fixture_tests": 15,
@@ -163,13 +166,66 @@
   "calibration_start_minimum_g": 0.5,
   "calibration_first_retry_default_g": 1.0,
   "saved_model_minimum_g": 0.5,
-  "manual_threshold_range_g": [
-    3.0,
-    15.0
+  "test_log_sha256": "cfdade8d4cbc1bd30a2a3b0a1c858bbbe96d4cbb51bbe8909125427355d0748c",
+  "suite_completed_utc": "2026-10-26T20:10:05.320041+00:00",
+  "additional_unchanged_file_content_checks": [
+    {
+      "file": "accel_homing.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
+      "source_base_sha256": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f"
+    },
+    {
+      "file": "accel_homing_backends.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
+      "source_base_sha256": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002"
+    },
+    {
+      "file": "accel_homing_charts.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
+      "source_base_sha256": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7"
+    },
+    {
+      "file": "accel_homing_model.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
+      "source_base_sha256": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092"
+    },
+    {
+      "file": "accel_homing_workflows.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3",
+      "source_base_sha256": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3"
+    },
+    {
+      "file": "bootstrap.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
+      "source_base_sha256": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b"
+    },
+    {
+      "file": "installer.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c",
+      "source_base_sha256": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c"
+    },
+    {
+      "file": "uninstaller.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525",
+      "source_base_sha256": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525"
+    }
   ],
-  "test_log_sha256": "2fc02c8c41e314b3c980148e0ab4a2b35e2e7429c1c4d573ccaad9ad8b73976c",
-  "suite_completed_utc": "2026-10-26T19:30:12.919220+00:00",
-  "additional_unchanged_file_content_checks": [],
   "quiet_reference_peak_to_peak_limit_default_g": 0.2,
   "repeatability_fixture_tests": 12,
   "calibration_validation_homes": 10,
@@ -191,10 +247,9 @@
     "scope": "Applies only if the advanced max_startup_travel=3.0 mm policy is explicitly configured."
   },
   "public_g28_safe_z_hop_intercepted": false,
-  "test_log_line_endings": "Raw captured bytes preserved; CRLF normalized only in parser input",
-  "test_log_crlf_count": 419,
-  "suite_started_utc": "2026-10-26T19:30:06.930887+00:00",
-  "source_bytes_unchanged_during_suite": true,
+  "test_log_line_endings": "UTF-8 unittest output captured through subprocess text decoding; CRLF normalized to LF before storage. Hash covers the exact stored bytes.",
+  "test_log_crlf_count": 0,
+  "suite_started_utc": "2026-10-26T20:09:58.216165+00:00",
   "final_validation": true,
   "validated_python_hash_scope": "Actual on-disk bytes; existing source line endings preserved",
   "startup_reporting_speed_ceiling_formula": "Disabled when max_report_travel is absent; otherwise max_report_travel / max_sample_age.",
@@ -206,7 +261,7 @@
   "higher_speed_support": "No default plugin travel/speed ceiling. Finite prepared plans retain firmware velocity limits, actual sample-quality guards and startup no_motion handling; successful physical homing at arbitrary speeds is not established.",
   "quiet_baseline_diagnostics": {
     "retained_after_cleanup": true,
-    "gate_changed": true,
+    "gate_changed": false,
     "results": [
       "acquisition_timeout",
       "expired_before_arm",
@@ -223,7 +278,7 @@
     "supplied_log_physical_cause_established": false,
     "native_stale_oldest_fresh_newest_rejected_before_dispatch": true,
     "ages_are_gate_snapshots_not_live_after_cleanup": true,
-    "gate_change_scope": "Configured batch sensors below 1 g only; native Beacon gate unchanged.",
+    "gate_change_scope": "No quiet-gate change relative to source_base_commit; configured floor and native Beacon gate are unchanged.",
     "effective_limit_and_proof_noise_bound_reported_g": true
   },
   "quiet_reference_peak_to_peak_limit_scope": "Configured sensors at the default 0.5 g calibration candidate use max(20% of the active threshold, baseline_noise_floor); native Beacon retains 0.1 g at 0.5 g. Thresholds at least 1 g retain the previous quiet limit.",
@@ -258,12 +313,32 @@
   },
   "additional_changed_file_content_checks": [
     {
-      "file": "uninstaller.py",
+      "file": "beacon_accel_homing.py",
       "matches_source_base": false,
       "line_endings_normalized": false,
-      "sha256": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525",
-      "source_base_sha256": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23",
-      "reason": "Recognize and validate owned explicit travel-budget overrides during uninstall."
+      "sha256": "4745d5e2fe8f26f69b6c627b8959df73912e770ee9dd8f36c2bd72d9b20d4375",
+      "source_base_sha256": "7764cc5f07d55aac188474ee953f9b90e48e1bd64b0935d7d47d8895907188f5"
+    },
+    {
+      "file": "tests/test_backends.py",
+      "matches_source_base": false,
+      "line_endings_normalized": false,
+      "sha256": "455624d6f47c1f44fb003d1d196e8618bcfb18ec1fd4c7f080713c7f81ff69a1",
+      "source_base_sha256": "d93a67cdf3f464853d54f348831c7ca393d24f7e2863adcf75fcfd1591d75758"
+    },
+    {
+      "file": "tests/test_installer.py",
+      "matches_source_base": false,
+      "line_endings_normalized": false,
+      "sha256": "6a3c2ff160f478a5316cf26370ba63dd2e74b35c56dbd82b7072df2f995f6864",
+      "source_base_sha256": "84afaa1da27560a38cb107265de4bafe9587aa0d6e836e40e7eed424f54ceb5f"
+    },
+    {
+      "file": "tests/test_manual_thresholds.py",
+      "matches_source_base": false,
+      "line_endings_normalized": false,
+      "sha256": "b551a3670369f01b1d96acada9eeef47cd13ae5a180c46777fc480b57add2baf",
+      "source_base_sha256": null
     }
   ],
   "startup_request_travel_limit_scope": "Disabled when absent; advanced explicit opt-in only.",
@@ -308,5 +383,129 @@
   "configured_speed_values_auto_lowered": false,
   "workflow_source_unchanged_from_public_base": true,
   "repeatability_1_5_mm_is_not_a_latency_or_stopping_budget": true,
-  "optional_policy_fixture_tests": 9
+  "optional_policy_fixture_tests": 9,
+  "subprocess_wall_seconds": 7.103875899993,
+  "command_working_directory": "Beacon_Accel_Homing",
+  "manual_threshold_minimum_exclusive_g": 0.0,
+  "manual_threshold_fixed_maximum_g": null,
+  "manual_threshold_finite_required": true,
+  "manual_threshold_known_sensor_maximum_full_scale_ratio": 0.8,
+  "manual_threshold_known_sensor_limit_inclusive": true,
+  "manual_threshold_active_session_range_rechecked": true,
+  "manual_threshold_unknown_native_range": "Preserve existing no-range-limit fallback; finite-positive raw trigger limit remains required before arming.",
+  "manual_threshold_derived_raw_limit_finite_positive": true,
+  "manual_threshold_fixture_tests": 11,
+  "manual_threshold_install_update_fixture_tests": 2,
+  "calibration_threshold_range_g": [
+    0.5,
+    15.0
+  ],
+  "saved_model_threshold_range_g": [
+    0.5,
+    15.0
+  ],
+  "suite_timestamps_source": "Completion from stored log modification time; start derived using recorded subprocess wall duration.",
+  "source_hash_verification_scope": "Final actual on-disk hashes identify reviewed frozen source; no before/after cryptographic snapshot was captured by this suite runner.",
+  "package_file_count": 33,
+  "package_python_file_count": 18,
+  "bootstrap_payload_file_count": 22,
+  "package_files": [
+    ".gitattributes",
+    ".gitignore",
+    "accel_homing.py",
+    "accel_homing_backends.py",
+    "accel_homing_charts.py",
+    "accel_homing_model.py",
+    "accel_homing_workflows.py",
+    "beacon_accel_homing.py",
+    "bootstrap.py",
+    "bootstrap.sh",
+    "docs/COMPATIBILITY.md",
+    "docs/INSTALLATION.md",
+    "examples/accel_homing.cfg",
+    "examples/beacon_accel_homing.cfg",
+    "install.sh",
+    "installer.py",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "TESTING.md",
+    "tests/harness.py",
+    "tests/test_backends.py",
+    "tests/test_installer.py",
+    "tests/test_manual_thresholds.py",
+    "tests/test_motion_policy.py",
+    "tests/test_session.py",
+    "tests/test_single_touch.py",
+    "tests/test_trigger.py",
+    "tests/test_workflows.py",
+    "uninstall.sh",
+    "uninstaller.py",
+    "validation/tests.txt",
+    "validation/VALIDATION.json"
+  ],
+  "bootstrap_payload_files": [
+    "install.sh",
+    "uninstall.sh",
+    "bootstrap.py",
+    "bootstrap.sh",
+    "installer.py",
+    "uninstaller.py",
+    "accel_homing.py",
+    "beacon_accel_homing.py",
+    "accel_homing_backends.py",
+    "accel_homing_workflows.py",
+    "accel_homing_model.py",
+    "accel_homing_charts.py",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "TESTING.md",
+    "docs/INSTALLATION.md",
+    "docs/COMPATIBILITY.md",
+    "examples/accel_homing.cfg",
+    "examples/beacon_accel_homing.cfg",
+    "validation/VALIDATION.json",
+    "validation/tests.txt"
+  ],
+  "source_semantic_changed_paths": [
+    "README.md",
+    "TESTING.md",
+    "beacon_accel_homing.py",
+    "docs/COMPATIBILITY.md",
+    "docs/INSTALLATION.md",
+    "examples/accel_homing.cfg",
+    "examples/beacon_accel_homing.cfg",
+    "tests/test_backends.py",
+    "tests/test_installer.py",
+    "tests/test_manual_thresholds.py",
+    "validation/VALIDATION.json",
+    "validation/tests.txt"
+  ],
+  "source_line_ending_only_paths": [
+    "LICENSE",
+    "tests/test_single_touch.py",
+    "tests/test_trigger.py"
+  ],
+  "source_byte_identical_paths": [
+    ".gitattributes",
+    ".gitignore",
+    "accel_homing.py",
+    "accel_homing_backends.py",
+    "accel_homing_charts.py",
+    "accel_homing_model.py",
+    "accel_homing_workflows.py",
+    "bootstrap.py",
+    "bootstrap.sh",
+    "install.sh",
+    "installer.py",
+    "NOTICE",
+    "tests/harness.py",
+    "tests/test_motion_policy.py",
+    "tests/test_session.py",
+    "tests/test_workflows.py",
+    "uninstall.sh",
+    "uninstaller.py"
+  ],
+  "readme_sha256": "3db9e55283a1505eb398a4de1b4ec7b68e307d71afcd44bc7b5c0923171be8c7"
 }
