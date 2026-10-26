@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -471,6 +472,337 @@ class HostFixture(unittest.TestCase):
         self.assertEqual((self.extras / installer.MODULES[0]).resolve(), self.source / installer.MODULES[0])
         installer.rollback(backup)
         self.assertFalse((self.extras / installer.MODULES[0]).is_symlink())
+
+
+class RestartFixture(unittest.TestCase):
+    """All systemctl/sudo/API operations are synthetic; only temp files change."""
+    plan = HostFixture.plan
+
+    def setUp(self):
+        HostFixture.setUp(self)
+        (self.source / "uninstaller.py").write_bytes((DIRECTORY / "uninstaller.py").read_bytes())
+        self.selected.update(pid=123, start_time="1000", service="kalico-two.service",
+                             service_scope="system", socket=self.home / "klippy.sock",
+                             executable=(self.home / "venv/bin/python").as_posix())
+        self.processes = [dict(self.selected)]
+        executable = self.selected["executable"]
+        command = " ".join(shlex.quote(value) for value in (
+            executable, (self.repo / "klippy/klippy.py").as_posix(), self.config.as_posix(),
+            "-a", self.selected["socket"].as_posix()))
+        self.unit = dict(Id=self.selected["service"], LoadState="loaded", ActiveState="active",
+                         SubState="running", MainPID="123", InvocationID="old-invocation",
+                         ControlGroup="/system.slice/" + self.selected["service"],
+                         ExecStart="{ path=%s ; argv[]=%s ; ignore_errors=no ; pid=123 ; }" % (executable, command),
+                         WorkingDirectory=self.home.as_posix(), FragmentPath="/offline/kalico-two.service",
+                         DropInPaths="", NeedDaemonReload="no", User="fixture", Group="fixture",
+                         CanStart="yes", CanStop="yes", RefuseManualStart="no", RefuseManualStop="no")
+        self.events, self.commands, self.idle_checks = [], [], 0
+        self.states = ["standby"]
+        self.auth_return = self.list_return = self.acquire_return = self.restart_return = 0
+        self.restart_error, self.after_idle = None, None
+        self.info_config = self.config
+        self.start_process = True
+        self.real_plan = installer.make_plan
+        patches = (
+            mock.patch.object(installer, "discover_target", side_effect=lambda _: dict(self.selected)),
+            mock.patch.object(installer, "__file__", str(self.source / "installer.py")),
+            mock.patch.object(installer.os, "geteuid", return_value=1000, create=True),
+            mock.patch.object(installer.shutil, "which", side_effect=lambda name: "/offline/" + name),
+            mock.patch.object(installer, "proc_instances", side_effect=lambda: list(self.processes)),
+            mock.patch.object(installer, "webhook_query", side_effect=self.query),
+            mock.patch.object(installer.subprocess, "run", side_effect=self.command),
+            mock.patch.object(installer, "make_plan", side_effect=self.file_plan),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def file_plan(self, source, selected, args):
+        changes, messages, sensor = self.real_plan(source, selected, args)
+        # Real config/history transaction, with platform-specific symlinks covered
+        # separately by HostFixture and UninstallFixture.
+        return {path: change for path, change in changes.items() if change["kind"] != "symlink"}, messages, sensor
+
+    def command(self, command, **kwargs):
+        self.commands.append(list(command))
+        self.assertNotIn("shell", kwargs)
+        self.assertGreater(kwargs["timeout"], 0)
+        if command[0] == "/offline/systemctl":
+            self.events.append("unit")
+            output = (self.unit["ActiveState"] + "\n" if "--property=ActiveState" in command else
+                      "\n".join("%s=%s" % pair for pair in self.unit.items()))
+            return subprocess.CompletedProcess(command, 0, output, "")
+        self.assertEqual(command[0], "/offline/sudo")
+        if command[1:] == ["-n", "-v"]:
+            self.events.append("auth")
+            return subprocess.CompletedProcess(command, self.auth_return, "", "auth unavailable")
+        if command[1:] == ["-v"]:
+            self.events.append("credentials")
+            if self.acquire_return == 0:
+                self.auth_return = 0
+            return subprocess.CompletedProcess(command, self.acquire_return, "", "credentials denied")
+        if command[1:4] == ["-n", "-l", "--"]:
+            self.events.append("permission")
+            self.assertEqual(command[4:], ["/offline/systemctl", "--system", "--no-ask-password",
+                                           "restart", "--", self.selected["service"]])
+            return subprocess.CompletedProcess(command, self.list_return, "", "restart denied")
+        self.assertEqual(command, ["/offline/sudo", "-n", "--", "/offline/systemctl", "--system",
+                                   "--no-ask-password", "restart", "--", self.selected["service"]])
+        self.assertEqual(json.loads((self.backup() / "manifest.json").read_text())["status"], "installed")
+        self.events.append("restart")
+        if self.restart_error:
+            raise self.restart_error
+        if self.restart_return == 0 and self.start_process:
+            self.unit.update(ActiveState="active", SubState="running", MainPID="124", InvocationID="new-invocation")
+            self.processes = [dict(self.selected, pid=124, start_time="1001")]
+        return subprocess.CompletedProcess(command, self.restart_return, "", "synthetic restart failure")
+
+    def query(self, path, method, params=None):
+        self.assertEqual(path, self.selected["socket"])
+        if method == "info":
+            return dict(state="ready", config_file=str(self.info_config), klipper_path=str(self.repo), process_id=self.selected["pid"])
+        if method == "objects/list":
+            return dict(objects=["idle_timeout", "print_stats", "pause_resume"])
+        self.events.append("idle")
+        state = self.states[min(self.idle_checks, len(self.states) - 1)]
+        self.idle_checks += 1
+        if self.after_idle:
+            self.after_idle(self.idle_checks)
+        return dict(status={"idle_timeout": {"state": "Ready"}, "print_stats": {"state": state},
+                            "pause_resume": {"is_paused": False}})
+
+    def cli(self, *flags):
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                return installer.main(list(flags))
+        finally:
+            self.output = output.getvalue()
+
+    def backup(self):
+        return next((self.config.parent / ".accel_homing_backups").iterdir())
+
+    def receipt(self):
+        return json.loads((self.backup() / "activation.json").read_text())
+
+    def test_default_install_restarts_exact_instance_after_commit_and_fresh_idle(self):
+        self.auth_return = 1  # Listing policy alone must never bypass authentication.
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.events.count("restart"), 1)
+        self.assertEqual(self.events.count("idle"), 2)
+        self.assertLess(self.events.index("credentials"), self.events.index("idle"))
+        self.assertEqual(self.events[self.events.index("restart") - 1], "idle")
+        self.assertEqual(self.receipt()["status"], "restarted")
+        self.assertEqual(self.receipt()["pid"], 124)
+        self.assertIn("Ready/module behavior", self.output)
+        self.assertEqual(json.loads((self.backup() / "manifest.json").read_text())["status"], "installed")
+
+    def test_live_environment_based_unit_uses_process_provenance_without_shell(self):
+        self.unit["ExecStart"] = "{ path=%s ; argv[]=%s $KLIPPER_ARGS ; ignore_errors=no ; pid=123 ; }" % ((self.selected["executable"],) * 2)
+        self.unit["EnvironmentFiles"] = "/offline/klipper.env (ignore_errors=no)"
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.receipt()["status"], "restarted")
+
+    def test_unavailable_auth_or_exact_command_permission_refuses_before_idle_and_writes(self):
+        for auth, acquire, permission in ((1, 1, 0), (0, 0, 1)):
+            with self.subTest(auth=auth, permission=permission):
+                self.auth_return, self.acquire_return, self.list_return = auth, acquire, permission
+                with self.assertRaises(installer.InstallError):
+                    self.cli()
+                self.assertNotIn("idle", self.events)
+                self.assertNotIn("restart", self.events)
+                self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
+
+    def test_prewrite_printing_and_failed_plan_or_write_never_restart(self):
+        self.states = ["printing"]
+        with self.assertRaisesRegex(installer.InstallError, "printing/paused/unknown"):
+            self.cli()
+        self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
+        self.assertNotIn("restart", self.events)
+        self.events.clear()
+        with mock.patch.object(installer, "make_plan", side_effect=installer.InstallError("invalid plan")):
+            with self.assertRaisesRegex(installer.InstallError, "invalid plan"):
+                self.cli()
+        self.assertEqual(self.events, [])
+        self.states = ["standby"]
+        with mock.patch.object(installer, "apply_plan", side_effect=installer.InstallError("disk transaction failed")):
+            with self.assertRaisesRegex(installer.InstallError, "disk transaction failed"):
+                self.cli()
+        self.assertNotIn("restart", self.events)
+
+    def test_print_started_after_install_blocks_restart_and_preserves_installed_receipt(self):
+        self.states = ["standby", "printing"]
+        with self.assertRaisesRegex(installer.InstallError, "Files are installed.*was blocked"):
+            self.cli()
+        self.assertIn("endstop_pin: accel_homing:x", self.axes.read_text())
+        self.assertEqual(self.receipt()["status"], "blocked")
+        self.assertFalse(self.receipt()["restart_attempted"])
+        self.assertNotIn("restart", self.events)
+
+    def test_auth_expiry_after_install_is_noninteractive_and_retains_changes(self):
+        self.after_idle = lambda count: setattr(self, "auth_return", 1) if count == 1 else None
+        with self.assertRaisesRegex(installer.InstallError, "Files are installed.*blocked"):
+            self.cli()
+        self.assertEqual(self.receipt()["status"], "blocked")
+        self.assertNotIn("credentials", self.events)
+        self.assertNotIn("restart", self.events)
+
+    def test_postwrite_socket_identity_or_pause_rejection_preserves_installed_files(self):
+        good_query = self.query
+        for change in ("config", "pause"):
+            with self.subTest(change=change):
+                self.idle_checks = 0
+                self.info_config = self.config
+                self.events.clear()
+                self.axes.write_text(self.axes.read_text().replace("homing_retract_dist: 0", "homing_retract_dist: 2"))
+                def query(path, method, params=None):
+                    response = good_query(path, method, params)
+                    if method == "objects/query":
+                        if change == "config" and self.idle_checks == 1:
+                            self.info_config = self.home / "wrong-socket-config.cfg"
+                        elif change == "pause" and self.idle_checks == 2:
+                            response["status"]["pause_resume"]["is_paused"] = True
+                    return response
+                with mock.patch.object(installer, "webhook_query", side_effect=query):
+                    with self.assertRaisesRegex(installer.InstallError, "Files are installed.*blocked") as failure:
+                        self.cli()
+                self.assertNotIn("no files changed", str(failure.exception))
+                self.assertIn("endstop_pin: accel_homing:x", self.axes.read_text())
+                self.assertNotIn("restart", self.events)
+
+    def test_pid_reuse_or_unit_change_after_install_blocks_activation(self):
+        for change in ("start_time", "definition", "state"):
+            with self.subTest(change=change):
+                self.events.clear()
+                self.idle_checks = 0
+                self.processes = [dict(self.selected)]
+                self.unit.update(User="fixture", ActiveState="active")
+                def change_identity(count):
+                    if count == 1:
+                        if change == "start_time":
+                            self.processes[0]["start_time"] = "reused-pid"
+                        elif change == "definition":
+                            self.unit["User"] = "changed-user"
+                        else:
+                            self.unit["ActiveState"] = "deactivating"
+                self.after_idle = change_identity
+                # Each subcase gets a real additional file transaction.
+                self.axes.write_text(self.axes.read_text().replace("homing_retract_dist: 0", "homing_retract_dist: 2"))
+                with self.assertRaisesRegex(installer.InstallError, "Files are installed.*blocked"):
+                    self.cli()
+                self.assertNotIn("restart", self.events)
+
+    def test_restart_failure_or_timeout_keeps_transaction_and_truthful_activation_failure(self):
+        self.restart_return = 1
+        with self.assertRaisesRegex(installer.InstallError, "Files are installed.*failed"):
+            self.cli()
+        backup = self.backup()
+        manifest = (backup / "manifest.json").read_bytes()
+        self.assertEqual(self.receipt()["status"], "failed")
+        self.assertTrue(self.receipt()["restart_attempted"])
+        self.assertIn("endstop_pin: accel_homing:x", self.axes.read_text())
+        self.restart_error = subprocess.TimeoutExpired(["mocked-sudo"], 45)
+        with self.assertRaisesRegex(installer.InstallError, "no automatic rollback"):
+            self.cli()  # Unchanged existing installation still attempts activation.
+        self.assertEqual((backup / "manifest.json").read_bytes(), manifest)
+        self.assertEqual(self.receipt()["status"], "failed")
+        self.restart_error, self.restart_return = None, 0
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.receipt()["status"], "restarted")
+        self.assertEqual(list((self.config.parent / ".accel_homing_backups").iterdir()), [backup])
+
+    def test_zero_exit_without_new_active_process_does_not_claim_activation(self):
+        self.start_process = False
+        with mock.patch.object(installer.time, "monotonic", side_effect=[0, 11]):
+            with self.assertRaisesRegex(installer.InstallError, "new matching active host process"):
+                self.cli()
+        self.assertEqual(self.receipt()["status"], "failed")
+
+    def test_postrestart_wait_handles_type_simple_exec_delay(self):
+        plan = installer.prepare_restart(self.selected)
+        after = dict(plan["identity"], pid=124, start_time="1001")
+        with mock.patch.object(installer, "service_identity", side_effect=[installer.ServiceStarting("exec pending"), after]), \
+             mock.patch.object(installer.time, "sleep") as sleep:
+            self.assertEqual(installer.restarted_process(self.selected, plan), after)
+        sleep.assert_called_once_with(0.1)
+
+    def test_wrong_effective_instance_user_manager_or_pending_reload_refuses_before_writes(self):
+        original = dict(self.unit)
+        for change in ("config", "socket", "user", "reload", "option", "unknown"):
+            with self.subTest(change=change):
+                self.unit = dict(original)
+                self.selected.update(service_scope="system", service="kalico-two.service")
+                if change in ("config", "socket"):
+                    path = self.config if change == "config" else self.selected["socket"]
+                    self.unit["ExecStart"] = self.unit["ExecStart"].replace(path.as_posix(), (self.home / "wrong").as_posix())
+                elif change == "user":
+                    self.selected["service_scope"] = "user"
+                elif change == "reload":
+                    self.unit["NeedDaemonReload"] = "yes"
+                elif change == "option":
+                    self.selected["service"] = "--wrong.service"
+                else:
+                    self.selected["service"] = None
+                with self.assertRaises(installer.InstallError):
+                    self.cli()
+                self.assertNotIn("restart", self.events)
+                self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
+
+    def test_stopped_literal_service_starts_but_stopped_environment_unit_requires_opt_out(self):
+        self.selected.update(pid=None, start_time=None)
+        self.processes = []
+        self.unit.update(ActiveState="inactive", SubState="dead", MainPID="0", InvocationID="")
+        literal = self.unit["ExecStart"]
+        self.unit["ExecStart"] = "{ path=%s ; argv[]=%s $KLIPPER_ARGS ; ignore_errors=no ; }" % ((self.selected["executable"],) * 2)
+        with self.assertRaisesRegex(installer.InstallError, "matching live main process"):
+            self.cli()
+        self.assertNotIn("restart", self.events)
+        self.unit["ExecStart"] = literal
+        self.assertEqual(self.cli(), 0)
+        self.assertEqual(self.receipt()["status"], "restarted")
+        self.assertEqual(self.idle_checks, 0)
+
+    def test_dry_run_no_restart_uninstall_and_rollback_never_dispatch_automatic_activation(self):
+        self.assertEqual(self.cli("--dry-run"), 0)
+        self.assertEqual(self.events, [])
+        self.selected["service_scope"] = "user"
+        self.unit["ActiveState"] = "inactive"  # User unit is absent from the system manager.
+        self.assertEqual(self.cli("--no-restart"), 0)
+        self.assertEqual(self.receipt()["status"], "skipped")
+        self.assertIn("systemctl --user restart -- kalico-two.service", self.output)
+        self.assertNotIn("sudo systemctl restart", self.output)
+        backup = self.backup()
+        self.assertEqual(self.cli("--rollback", str(backup)), 0)
+        self.assertNotIn("restart", self.events)
+        self.assertNotIn("auth", self.events)
+        self.assertEqual(self.cli("--no-restart"), 0)
+        self.assertEqual(self.cli("--uninstall"), 0)
+        self.assertNotIn("restart", self.events)
+        self.assertNotIn("auth", self.events)
+
+    def test_malformed_live_status_and_socket_pid_must_not_prove_idle(self):
+        good_query = self.query
+        for broken in ("print_stats", "pause_resume", "paused_type", "paused_true", "print_paused", "process_id"):
+            with self.subTest(broken=broken):
+                def query(path, method, params=None):
+                    response = good_query(path, method, params)
+                    if method == "info" and broken == "process_id":
+                        response["process_id"] = 999
+                    elif method == "objects/query" and broken != "process_id":
+                        if broken == "paused_type":
+                            response["status"]["pause_resume"]["is_paused"] = 0
+                        elif broken == "paused_true":
+                            response["status"]["pause_resume"]["is_paused"] = True
+                        elif broken == "print_paused":
+                            response["status"]["print_stats"]["state"] = "paused"
+                        else:
+                            response["status"].pop(broken)
+                    return response
+                with mock.patch.object(installer, "webhook_query", side_effect=query):
+                    with self.assertRaises(installer.InstallError):
+                        self.cli()
+                self.assertNotIn("restart", self.events)
+                self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
 
 
 class BootstrapFixture(unittest.TestCase):

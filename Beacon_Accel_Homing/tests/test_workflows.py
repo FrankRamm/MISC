@@ -739,7 +739,7 @@ class CalibrationTests(unittest.TestCase):
         rig.toolhead.position[:2] = [12.0, 19.0]
         rig.calibrate(save=0)
         first = rig.home_calls[0]
-        self.assertEqual(first["threshold"], 2.0)
+        self.assertEqual(first["threshold"], 1.0)
         self.assertEqual(first["homed_axes"], "z")
         self.assertEqual(first["position"], [12.0, 19.0, 40.0, 6.0])
         self.assertEqual(first["attempt"], 1)
@@ -758,6 +758,7 @@ class CalibrationTests(unittest.TestCase):
         for axis in "XY":
             rig = Rig()
             rig.calibrate(axis)
+            self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 11)
             self.assertEqual(rig.scripts, ["G28 " + axis] * 11 + ["SAVE_CONFIG"])
             self.assertEqual(len(rig.toolhead.moves), 10)
             index = "XY".index(axis)
@@ -789,8 +790,8 @@ class CalibrationTests(unittest.TestCase):
             run = session["run_id"]
             self.assertEqual(rig.toolhead.moves, [])
             self.assertEqual(rig.scripts, ["G28 X"])
-            self.assertEqual(rig.home_calls[0]["threshold"], 2.0)
-            self.assertEqual(session["candidate"], 2.5)
+            self.assertEqual(rig.home_calls[0]["threshold"], 1.0)
+            self.assertEqual(session["candidate"], 1.5)
             self.assertEqual(session["successes"], 0)
             self.assertEqual(session["attempts"], 1)
             self.assertEqual(session["state"], "waiting")
@@ -805,12 +806,12 @@ class CalibrationTests(unittest.TestCase):
             self.assertFalse(any("ACCEL_HOMING_CONFIRM" in text or "TOKEN" in text
                                  for text in rig.output))
             rig.calibrate()
-            self.assertEqual(rig.home_calls[1]["threshold"], 2.5)
+            self.assertEqual(rig.home_calls[1]["threshold"], 1.5)
             self.assertEqual(rig.home_calls[1]["attempt"], 2)
             self.assertEqual(rig.home_calls[1]["homed_axes"], "z")
             self.assertEqual(rig.scripts, ["G28 X"] * 12 + ["SAVE_CONFIG"])
             self.assertEqual(rig.workflow.last_result["run_id"], run)
-            self.assertEqual(rig.workflow.last_result["threshold_g"], 2.5)
+            self.assertEqual(rig.workflow.last_result["threshold_g"], 1.5)
 
     def test_pressed_result_is_never_a_success_even_with_apparent_step_travel(self):
         rig = Rig()
@@ -818,7 +819,7 @@ class CalibrationTests(unittest.TestCase):
         rig.calibrate()
         self.assertEqual(rig.workflow.session["successes"], 0)
         self.assertEqual(rig.toolhead.moves, [])
-        self.assertEqual(rig.workflow.session["candidate"], 2.5)
+        self.assertEqual(rig.workflow.session["candidate"], 1.5)
 
     def test_success_count_resets_after_threshold_changes(self):
         rig = Rig()
@@ -830,7 +831,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(rig.workflow.session["attempts"], 3)
         rig.calibrate()
         self.assertEqual(rig.workflow.last_result["successes"], 10)
-        self.assertEqual(rig.workflow.last_result["threshold_g"], 2.5)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 1.5)
         self.assertEqual(len(rig.scripts), 15)
 
     def test_suspicious_long_travel_or_no_motion_abort_without_threshold_escalation(self):
@@ -848,9 +849,9 @@ class CalibrationTests(unittest.TestCase):
 
     def test_threshold_ceiling_and_attempt_ceiling_abort(self):
         for ceiling in ("threshold", "sensor_scale", "attempts"):
-            rig = Rig({"calibration_max_threshold": 2.0} if ceiling == "threshold" else {})
+            rig = Rig({"calibration_max_threshold": 1.0} if ceiling == "threshold" else {})
             if ceiling == "sensor_scale":
-                rig.owner.full_scale_g = 2.5
+                rig.owner.full_scale_g = 1.25
             if ceiling == "attempts":
                 rig.home_results.append({"travel_mm": 2.0})
                 rig.calibrate()
@@ -890,13 +891,14 @@ class CalibrationTests(unittest.TestCase):
                 self.assertEqual(rig.workflow.last_result["result"], "calibrated")
 
     def test_configured_start_remains_editable_above_minimum_and_is_used_first(self):
-        for threshold in (2.0, 2.5, 4.0):
+        for threshold in (1.0, 1.5, 2.0, 2.5, 4.0):
             with self.subTest(threshold=threshold):
                 rig = Rig({"calibration_start_threshold": threshold})
                 rig.calibrate(save=0)
                 self.assertEqual([call["threshold"] for call in rig.home_calls],
                                  [threshold] * 11)
-        for threshold in (1.5, 15.1):
+        for threshold in (0.999, 0.0, -1.0, 15.1,
+                          float("nan"), float("inf"), float("-inf")):
             with self.subTest(threshold=threshold), self.assertRaises(ConfigError):
                 Rig({"calibration_start_threshold": threshold})
 
@@ -1179,7 +1181,10 @@ class ModelTests(unittest.TestCase):
                     calibrated.calibrate(axis.upper())
                     if early:
                         calibrated.calibrate(axis.upper())
-                    threshold = 2.5 if early else 2.0
+                    threshold = 1.5 if early else 1.0
+                    self.assertEqual(calibrated.home_calls[0]["threshold"], 1.0)
+                    if early:
+                        self.assertEqual(calibrated.home_calls[1]["threshold"], 1.5)
                     self.assertEqual(calibrated.scripts[-1], "SAVE_CONFIG")
                     options = {key: value for (section, key), value
                                in calibrated.configfile.saved.items()}
@@ -1225,16 +1230,27 @@ class ModelTests(unittest.TestCase):
         rig = Rig({"threshold": 8.0}, sections=sections)
         self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
 
+    def test_saved_models_keep_accepting_previous_thresholds(self):
+        for axis in "xy":
+            for threshold in (2.0, 2.5, 4.0, 15.0):
+                with self.subTest(axis=axis, threshold=threshold):
+                    model = AccelHomingModel(Config(None, {
+                        axis + "_threshold": threshold, axis + "_successes": 10},
+                        "accel_homing_model test"))
+                    self.assertEqual(model.thresholds, {axis: threshold})
+
     def test_model_rejects_unqualified_threshold_or_bad_metadata(self):
-        for options in ({"x_threshold": 4.0, "x_successes": 9},
-                        {"x_threshold": 1.5, "x_successes": 10},
-                        {"x_threshold": 15.1, "x_successes": 10},
-                        {"x_metadata": "[]"}, {"x_metadata": "invalid"},
-                        {"x_threshold": float("nan"), "x_successes": 10},
-                        {"x_metadata": '{"invalid": NaN}'},
-                        {"x_metadata": '{"nested": [1e999]}'}):
-            with self.assertRaises(ConfigError):
-                AccelHomingModel(Config(None, options, "accel_homing_model test"))
+        for axis in "xy":
+            invalid = [{axis + "_threshold": 4.0, axis + "_successes": 9},
+                       {axis + "_metadata": "[]"}, {axis + "_metadata": "invalid"},
+                       {axis + "_metadata": '{"invalid": NaN}'},
+                       {axis + "_metadata": '{"nested": [1e999]}'}]
+            invalid.extend({axis + "_threshold": threshold, axis + "_successes": 10}
+                           for threshold in (0.999, 0.0, -1.0, 15.1,
+                                             float("nan"), float("inf"), float("-inf")))
+            for options in invalid:
+                with self.subTest(axis=axis, options=options), self.assertRaises(ConfigError):
+                    AccelHomingModel(Config(None, options, "accel_homing_model test"))
 
     def test_saving_one_axis_keeps_other_axis_model(self):
         rig = Rig()

@@ -460,7 +460,7 @@ class EnablePreparationTest(unittest.TestCase):
     def session(self, options=None, enabled=(False, False, False)):
         obj = make_homing(options=options)
         # This is the actual first calibration candidate, not a preparatory home.
-        obj.threshold_g["x"] = 2.0
+        obj.threshold_g["x"] = 1.0
         endstop = with_endstops(obj)["x"]
         log = []
         lines = {name: EnableLine(log, name, state) for name, state in
@@ -490,7 +490,7 @@ class EnablePreparationTest(unittest.TestCase):
         self.assertIsNone(obj.preparation)
         self.assertEqual(obj.toolhead.accel, 20000.0)
 
-    def test_corexy_enable_settle_really_completes_before_fresh_2g_trial(self):
+    def test_corexy_enable_settle_really_completes_before_fresh_1g_trial(self):
         obj, endstop, log, lines = self.session()
         self.assertEqual(log, [("stepper_x", 10.0), ("stepper_y", 10.0)])
         self.assertFalse(lines["stepper_z"].enabled)
@@ -503,7 +503,7 @@ class EnablePreparationTest(unittest.TestCase):
         when = round(obj.reactor.now * 1000.0) / 1000.0 + 0.005
         endstop.home_start(when, 0, 0, 0)
         self.assertEqual(len(endstop._dispatch.started), 1)
-        self.assertEqual(obj.attempt.limit_raw * obj.attempt.count_g, 2.0)
+        self.assertEqual(obj.attempt.limit_raw * obj.attempt.count_g, 1.0)
         # The only post-arm sample is a real 3 g contact. The pre-arm 15 g
         # enable peak must neither trigger nor hide that first sample.
         obj._inspect(batch(round(when * 1000) - 7,
