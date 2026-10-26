@@ -49,6 +49,10 @@ class AccuracyChartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             axes = {"x": simulated_axis(temp, "simulated", travels=(175.0, 175.2)),
                     "y": simulated_axis(temp, "simulated", "y", (176.0, 176.4), attempt_start=4)}
+            before = set(Path(temp).iterdir())
+            checked = charts.validate_accuracy(temp, "simulated", axes, simulated=True)
+            self.assertTrue(checked["x"]["complete"])
+            self.assertEqual(set(Path(temp).iterdir()), before)
             paths = charts.write_accuracy(temp, "simulated", axes, "complete", simulated=True)
             metadata = json.loads(Path(paths["json"]).read_text(encoding="utf-8"))
             stats = metadata["axes"]["x"]["statistics"]
@@ -196,6 +200,202 @@ class AccuracyChartTests(unittest.TestCase):
                 charts.write_capture(temp, 'fault', 'x', {'samples': [(1., 0., 0., 1.)],
                                      'baseline_g': (0., 0., 1.), 'fault': 'data_error'}, {})
             self.assertEqual(list(Path(temp).iterdir()), [])
+
+
+def simulated_noise_window(directory, run_id, iteration, peak=0.2, sensor="adxl345 toolhead", full_scale=16.0):
+    """A one-second stationary fixture, with a separate mean on every window."""
+    origin = 10.0 + iteration * 2.0
+    resting = (.2 + iteration * .1, -.1 + iteration * .2, 1.0 + iteration * .01)
+    samples = []
+    for index in range(51):
+        pulse = peak if index == 25 else -peak if index == 26 else 0.0
+        samples.append((origin + index / 50.0, resting[0] + pulse,
+                        resting[1] - pulse / 2.0, resting[2] + pulse / 4.0))
+    baseline = tuple(math.fsum(row[index] for row in samples) / len(samples) for index in (1, 2, 3))
+    values = {axis: [row[index] - baseline[index - 1] for row in samples]
+              for index, axis in enumerate("xyz", 1)}
+    record = {"run_id": run_id, "noise_iteration": iteration,
+              "duration_s": samples[-1][0] - samples[0][0], "sample_count": len(samples),
+              "first_sample_time_s": samples[0][0], "last_sample_time_s": samples[-1][0],
+              "baseline_g": dict(zip("xyz", baseline)),
+              "noise_peak_g": {axis: max(abs(value) for value in rows) for axis, rows in values.items()},
+              "noise_peak_to_peak_g": {axis: max(rows) - min(rows) for axis, rows in values.items()},
+              "noise_rms_g": {axis: math.sqrt(math.fsum(value * value for value in rows) / len(rows))
+                              for axis, rows in values.items()},
+              "sensor": sensor, "backend": "generic", "full_scale_g": full_scale,
+              "axis_context": "machine-mapped XYZ after configured axes_map"}
+    capture = {"samples": samples, "baseline_g": baseline, "dropped": 0, "fault": None}
+    paths = charts.write_noise_capture(directory, run_id, iteration, capture, record, simulated=True)
+    return {"record": record, "capture_paths": paths}, capture
+
+
+def simulated_noise_run(directory, run_id, peaks=(.1, .3, 2.0), ceiling=12.0, sensor="adxl345 toolhead", full_scale=16.0):
+    iterations = [simulated_noise_window(directory, run_id, index, peak, sensor, full_scale)[0]
+                  for index, peak in enumerate(peaks, 1)]
+    largest = {axis: max(item["record"]["noise_peak_g"][axis] for item in iterations) for axis in "xyz"}
+    candidates, unavailable = {}, []
+    for axis in "xy":
+        candidate = .5 + math.ceil((max(.5, largest[axis] * 1.2, largest[axis] + .1) - .5) / .5) * .5
+        candidates[axis] = candidate if ceiling is not None and candidate <= ceiling else None
+        if ceiling is None or candidate > ceiling:
+            unavailable.append(axis)
+    recommendation = {"source": "stationary_noise", "method": "initial_candidate_heuristic",
+                      "noise_peak_g": largest, "start_threshold_g": candidates,
+                      "margin_factor": 1.2, "margin_g": .1, "candidate_step_g": .5,
+                      "configured_start_g": .5, "threshold_limit_g": ceiling,
+                      "unavailable_axes": unavailable, "clamped": False}
+    return iterations, recommendation
+
+
+class NoiseChartTests(unittest.TestCase):
+    def test_three_windows_preserve_raw_signed_xyz_metrics_and_distinct_candidate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            iterations, recommendation = simulated_noise_run(temp, "noise")
+            paths = charts.write_noise(temp, "noise", iterations, recommendation, "complete", simulated=True)
+            metadata = json.loads(Path(paths["json"]).read_text(encoding="utf-8"))
+            self.assertEqual(metadata["result"], "complete")
+            self.assertEqual(metadata["requested_windows"], 3)
+            self.assertEqual(metadata["requested_window_duration_s"], 1.)
+            self.assertEqual(metadata["recommendation"]["start_threshold_g"]["x"], 2.5)
+            self.assertEqual(metadata["recommendation"]["noise_peak_g"]["x"], 2.)
+            self.assertEqual(metadata["data_source"], "SIMULATED - NOT PRINTER MEASUREMENT")
+            self.assertNotIn(str(Path(temp).resolve()), Path(paths["json"]).read_text(encoding="utf-8"))
+            for iteration, item in enumerate(iterations, 1):
+                record = metadata["iterations"][iteration - 1]["record"]
+                self.assertEqual(record["noise_iteration"], iteration)
+                self.assertEqual(record["sample_count"], 51)
+                self.assertAlmostEqual(record["noise_rms_g"]["x"], record["noise_peak_g"]["x"] * math.sqrt(2 / 51))
+                with open(item["capture_paths"]["csv"], newline="", encoding="utf-8") as stream:
+                    rows = list(csv.DictReader(stream))
+                self.assertEqual(len(rows), 51)
+                self.assertAlmostEqual(float(rows[25]["raw_z_g"]), record["baseline_g"]["z"] + record["noise_peak_g"]["z"])
+                self.assertAlmostEqual(float(rows[25]["delta_x_g"]), record["noise_peak_g"]["x"])
+                self.assertAlmostEqual(float(rows[26]["delta_x_g"]), -record["noise_peak_g"]["x"])
+                self.assertNotIn("threshold (configured trigger)", Path(item["capture_paths"]["svg"]).read_text())
+            page = Path(paths["html"]).read_text(encoding="utf-8")
+            self.assertEqual(page.count('<svg '), 3)
+            self.assertEqual(page.count('<details open>'), 3)
+            self.assertIn("NOT a calibrated impact threshold", page)
+            self.assertIn("Initial calibration candidate", page)
+            self.assertIn("20% or 0.1 g", page)
+            self.assertIn("SIMULATED / NOT PRINTER MEASUREMENT", page)
+            self.assertIn("motor-enable or motion transients", page)
+            self.assertIn("RMS (g)", page)
+            self.assertNotIn('<script', page)
+            self.assertNotIn('http://', page.replace('http://www.w3.org/2000/svg', ''))
+            root = ET.parse(paths["svg"]).getroot()
+            self.assertEqual(len(list(root.iter('{http://www.w3.org/2000/svg}polyline'))), 9)
+            panels = list(root.iter('{http://www.w3.org/2000/svg}svg'))[1:]
+            self.assertEqual(len(panels), 3)
+            self.assertTrue(all(panel.get('width') == '1100' and panel.get('height') == '445'
+                                for panel in panels))
+            with open(paths["csv"], newline="", encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(len(rows), 9)
+            self.assertEqual(rows[0]["initial_calibration_candidate_g"], "2.5")
+            self.assertTrue(all(row["candidate_is_calibrated_impact_threshold"] == "False" for row in rows))
+
+    def test_over_ceiling_keeps_all_three_charts_without_a_downward_clamped_seed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            iterations, recommendation = simulated_noise_run(temp, "loud", peaks=(.1, .3, 2.), ceiling=1.)
+            paths = charts.write_noise(temp, "loud", iterations, recommendation, "complete", simulated=True)
+            metadata = json.loads(Path(paths["json"]).read_text(encoding="utf-8"))
+            self.assertIsNone(metadata["recommendation"]["start_threshold_g"]["x"])
+            self.assertIsNone(metadata["recommendation"]["start_threshold_g"]["y"])
+            self.assertEqual(metadata["recommendation"]["unavailable_axes"], ["x", "y"])
+            self.assertEqual(len(metadata["iterations"]), 3)
+            page = Path(paths["html"]).read_text(encoding="utf-8")
+            self.assertEqual(page.count('<svg '), 3)
+            self.assertIn('unavailable: exceeds calibration ceiling', page)
+            recommendation["start_threshold_g"]["x"] = 1.
+            with self.assertRaisesRegex(ValueError, 'do not clamp'):
+                charts.write_noise(temp, "loud", iterations, recommendation, "complete", simulated=True)
+
+    def test_partial_or_faulted_run_is_explicit_and_cannot_recommend(self):
+        with tempfile.TemporaryDirectory() as temp:
+            iterations, recommendation = simulated_noise_run(temp, "partial", peaks=(.1, .2))
+            before = set(Path(temp).iterdir())
+            with self.assertRaisesRegex(ValueError, 'three valid windows'):
+                charts.write_noise(temp, "partial", iterations, recommendation, "complete", simulated=True)
+            with self.assertRaisesRegex(ValueError, 'cannot recommend'):
+                charts.write_noise(temp, "partial", iterations, recommendation, "failed", simulated=True)
+            self.assertEqual(set(Path(temp).iterdir()), before)
+            paths = charts.write_noise(temp, "partial", iterations, None, "failed",
+                                       reason='<script>alert("sensor fault")</script>', simulated=True)
+            self.assertIsNone(json.loads(Path(paths["json"]).read_text())["recommendation"])
+            page = Path(paths["html"]).read_text(encoding="utf-8")
+            self.assertIn('INCOMPLETE / FAILED', page)
+            self.assertIn('no calibration candidate is recommended', page)
+            self.assertIn('&lt;script&gt;alert(', page)
+            self.assertNotIn('<script>alert(', page)
+            self.assertNotIn('COMPLETE: all three', page)
+
+    def test_unknown_sensor_range_preserves_windows_without_an_unverifiable_seed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            iterations, recommendation = simulated_noise_run(temp, 'unknown', ceiling=None, full_scale=None)
+            paths = charts.write_noise(temp, 'unknown', iterations, recommendation, 'complete', simulated=True)
+            metadata = json.loads(Path(paths['json']).read_text(encoding='utf-8'))
+            self.assertIsNone(metadata['recommendation']['threshold_limit_g'])
+            self.assertEqual(metadata['recommendation']['start_threshold_g'], {'x': None, 'y': None})
+            self.assertEqual(len(metadata['iterations']), 3)
+            self.assertIn('unavailable: sensor range unknown', Path(paths['html']).read_text(encoding='utf-8'))
+            recommendation['start_threshold_g']['x'] = .5
+            with self.assertRaisesRegex(ValueError, 'Unknown sensor range'):
+                charts.write_noise(temp, 'unknown', iterations, recommendation, 'complete', simulated=True)
+
+    def test_rejects_bad_measurements_and_record_metadata_without_partial_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            item, capture = simulated_noise_window(temp, "source", 1)
+            for name in ('peak', 'rms', 'count', 'duration', 'fault', 'overflow', 'time', 'nan', 'baseline'):
+                with self.subTest(name=name):
+                    record, broken = copy.deepcopy(item["record"]), copy.deepcopy(capture)
+                    record["run_id"] = name
+                    if name == 'peak': record['noise_peak_g']['x'] += .01
+                    elif name == 'rms': record['noise_rms_g']['z'] += .01
+                    elif name == 'count': record['sample_count'] -= 1
+                    elif name == 'duration': record['duration_s'] = .9
+                    elif name == 'fault': broken['fault'] = 'saturated'
+                    elif name == 'overflow': broken['dropped'] = 1
+                    elif name == 'time': broken['samples'][1] = broken['samples'][0]
+                    elif name == 'nan': broken['samples'][1] = (12.02, float('nan'), 0., 1.)
+                    elif name == 'baseline': broken['baseline_g'] = (0., 0., 0.)
+                    with self.assertRaises(ValueError):
+                        charts.write_noise_capture(temp, name, 1, broken, record, simulated=True)
+                    self.assertFalse((Path(temp) / ('accel_homing_noise_%s_i01' % name)).exists())
+            with self.assertRaisesRegex(ValueError, 'already exists'):
+                charts.write_noise_capture(temp, 'source', 1, capture, item['record'], simulated=True)
+
+    def test_same_run_identity_sensor_context_and_passive_svg_are_required(self):
+        with tempfile.TemporaryDirectory() as temp:
+            iterations, recommendation = simulated_noise_run(temp, "identity", sensor='<img src=x onerror="bad">')
+            changed = copy.deepcopy(iterations)
+            changed[1]['record']['noise_iteration'] = 1
+            with self.assertRaisesRegex(ValueError, 'complete current-run'):
+                charts.write_noise(temp, 'identity', changed, recommendation, 'complete', simulated=True)
+            changed = copy.deepcopy(iterations)
+            changed[1]['record']['backend'] = 'different'
+            with self.assertRaisesRegex(ValueError, 'context changed'):
+                charts.write_noise(temp, 'identity', changed, recommendation, 'complete', simulated=True)
+            changed = copy.deepcopy(iterations)
+            changed[1]['record']['first_sample_time_s'] = changed[0]['record']['first_sample_time_s']
+            changed[1]['record']['last_sample_time_s'] = changed[0]['record']['last_sample_time_s']
+            with self.assertRaisesRegex(ValueError, 'overlap or repeat'):
+                charts.write_noise(temp, 'identity', changed, recommendation, 'complete', simulated=True)
+            changed = copy.deepcopy(iterations)
+            changed[0]['capture_paths']['svg'] = iterations[1]['capture_paths']['svg']
+            with self.assertRaisesRegex(ValueError, 'does not belong'):
+                charts.write_noise(temp, 'identity', changed, recommendation, 'complete', simulated=True)
+            paths = charts.write_noise(temp, 'identity', iterations, recommendation, 'complete', simulated=True)
+            page = Path(paths['html']).read_text(encoding='utf-8')
+            self.assertIn('&lt;img src=x onerror=', page)
+            self.assertNotIn('<img src=', page)
+            with self.assertRaisesRegex(ValueError, 'already exists'):
+                charts.write_noise(temp, 'identity', iterations, recommendation, 'complete', simulated=True)
+            unsafe, _recommendation = simulated_noise_run(temp, 'unsafe')
+            svg = Path(unsafe[0]['capture_paths']['svg'])
+            svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"><script>bad()</script></svg>', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'unsupported SVG'):
+                charts.write_noise(temp, 'unsafe', unsafe, None, 'failed', simulated=True)
 
 
 if __name__ == '__main__':

@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import accel_homing_charts as charts_module
 from accel_homing_charts import write_capture
 from accel_homing_model import AccelHomingModel
-from harness import CommandError, ConfigError, FakeReactor
+from harness import CommandError, ConfigError, FakeReactor, plugin
 
 
 class ConsoleMessages(list):
@@ -235,6 +235,7 @@ class Toolhead:
         self.rig, self.kin = rig, Kin()
         self.position = [150.0, 100.0, 40.0, 6.0]
         self.moves, self.dwells = [], []
+        self.accel, self.accel_log = 50000.0, []
         self.busy = (0.0, 10.0, True)
 
     def get_position(self):
@@ -248,6 +249,14 @@ class Toolhead:
 
     def get_kinematics(self):
         return self.kin
+
+    def get_max_velocity(self):
+        return 500.0, self.accel
+
+    def set_max_velocities(self, velocity, accel, scv, mcr):
+        if accel is not None:
+            self.accel = accel
+            self.accel_log.append(accel)
 
     def get_status(self, stamp):
         return self.kin.get_status(stamp)
@@ -328,11 +337,16 @@ class Rig:
             printer=self, reactor=self.reactor, toolhead=self.toolhead, name="accel_homing",
             threshold_g={"x": 8.0, "y": 9.0}, impact_sign={"x": 0, "y": 0},
             homing_accel=5000.0, back_off_dist=5.0, full_scale_g=16.0,
-            homing_active=False, attempt=None, last={}, endstops={"x": object(), "y": object()},
+            homing_active=False, attempt=None, last={}, operation_generation=0, saved_accel=None,
+            endstops={"x": object(), "y": object()},
             rails_by_axis={"x": Rail(), "y": Rail(bounds=(0.0, 200.0))},
             sensor_name="simulated", start_capture=self.start_capture, stop_capture=self.stop_capture,
             preflight_motion_policy=self.preflight_motion_policy,
             _end_session=self.end_session, cmd_STATUS=lambda g: g.respond_info("core status"))
+        self.owner._homed = lambda axis: axis in self.toolhead.kin.get_status(0)["homed_axes"]
+        for method in ("_retract_completed_home", "release_workflow_home", "_limit_accel",
+                       "_restore_accel", "_set_accel"):
+            setattr(self.owner, method, types.MethodType(getattr(plugin.BeaconAccelHoming, method), self.owner))
         self.workflow = AccelHomingWorkflows(self.owner, self.config)
         self.owner.workflows = self.workflow
 
@@ -538,7 +552,7 @@ class SafeZHomingWorkflowTests(unittest.TestCase):
         self.assertEqual(safe.calls, ["G28 Z"])
         self.assertEqual(len(rig.z_homes), 1)
         self.assertEqual(rig.z_homes[0].params, {"Z": "0"})
-        self.assertEqual(rig.toolhead.moves[1:], [([None, None, 50.0], 15.0),
+        self.assertEqual(rig.toolhead.moves[2:], [([None, None, 50.0], 15.0),
                                                 ([140.0, 90.0], 50.0),
                                                 ([None, None, 50.0], 15.0)])
         self.assertEqual(rig.gcode.gcode_handlers["G28"], handler)
@@ -768,13 +782,16 @@ class CalibrationTests(unittest.TestCase):
             rig.calibrate(axis)
             self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 11)
             self.assertEqual(rig.scripts, ["G28 " + axis] * 11 + ["SAVE_CONFIG"])
-            self.assertEqual(len(rig.toolhead.moves), 10)
+            self.assertEqual(len(rig.toolhead.moves), 11)
             index = "XY".index(axis)
-            for coords, speed in rig.toolhead.moves:
+            for coords, speed in rig.toolhead.moves[:-1]:
                 self.assertEqual(coords[2], None)
                 self.assertEqual(coords[1 - index], None)
                 self.assertEqual(coords[index], (150.0, 100.0)[index])
                 self.assertEqual(speed, 50.0)
+            terminal = [None, None, None]
+            terminal[index] = 5.0
+            self.assertEqual(rig.toolhead.moves[-1], (terminal, 100.0))
             values = rig.configfile.saved
             self.assertEqual(values[("accel_homing_model default", axis.lower() + "_successes")], "10")
             self.assertNotIn(("accel_homing_model default", "XY"[1 - index].lower() + "_threshold"), values)
@@ -978,7 +995,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 rig.home_results.extend([{}] + [{"travel_mm": 150.0}] * 9 + [{"travel_mm": high}])
                 rig.calibrate(save=save)
                 self.assertEqual(len(rig.home_calls), 11)
-                self.assertEqual(len(rig.toolhead.moves), 10)
+                self.assertEqual(len(rig.toolhead.moves), 11)
                 metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
                 self.assertEqual(metadata["min_commanded_travel_mm"], 150.0)
                 self.assertEqual(metadata["max_commanded_travel_mm"], high)
@@ -1593,7 +1610,8 @@ class TestAndChartWorkflowTests(unittest.TestCase):
                 self.assertEqual([call["axis"] for call in rig.home_calls], ["x", "y"])
                 self.assertEqual(rig.home_calls[0]["position"], [12.0, 19.0, 40.0, 6.0])
                 self.assertEqual(rig.home_calls[0]["homed_axes"], "z")
-                self.assertEqual(rig.toolhead.moves, [([150.0, None, None], 50.0)])
+                self.assertEqual(rig.toolhead.moves, [([150.0, None, None], 50.0),
+                                                     ([None, 5.0, None], 100.0)])
                 self.assertEqual(rig.disabled, [])
                 self.assertEqual(rig.toolhead.dwells, [])
                 self.assertEqual(rig.workflow.last_result["result"], "complete")

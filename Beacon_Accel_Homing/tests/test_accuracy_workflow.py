@@ -137,7 +137,8 @@ class AccuracyWorkflowTests(unittest.TestCase):
             self.assertEqual(stats["variance_definition"], "population (divide by N)")
             self.assertEqual([r["workflow_phase"] for r in result["records"]],
                              ["discovery", "measurement", "measurement", "measurement"])
-            self.assertEqual(len(rig.toolhead.moves), 3)
+            self.assertEqual(len(rig.toolhead.moves), 4)
+            self.assertEqual(rig.toolhead.moves[-1], ([5.0, None, None], 100.0))
             self.assertEqual(len(result["paths"]), 4)
             summary = json.loads(Path(result["summary_paths"]["json"]).read_text(encoding="utf-8"))
             self.assertEqual(summary["result"], "complete")
@@ -156,7 +157,8 @@ class AccuracyWorkflowTests(unittest.TestCase):
                     rig.accuracy(axis=requested)
                     self.assertEqual(rig.scripts, ["G28 X"] * 3 + ["G28 Y"] * 3)
                     self.assertEqual(safe.calls, [])
-                    self.assertEqual(len(rig.toolhead.moves), 5)
+                    self.assertEqual(len(rig.toolhead.moves), 6)
+                    self.assertEqual(rig.toolhead.moves[-1], ([None, 5.0, None], 100.0))
                     self.assertEqual(rig.home_calls[3]["position"][0], 150.0)
                     self.assertEqual(rig.home_calls[3]["position"][1], 100.0)
                     result = rig.workflow.last_result
@@ -195,7 +197,8 @@ class AccuracyWorkflowTests(unittest.TestCase):
                 if samples is not None:
                     arguments["SAMPLES"] = samples
                 with mock.patch.object(workflow_module, "write_capture", return_value={}), \
-                        mock.patch.object(workflow_module, "write_accuracy", return_value={}):
+                        mock.patch.object(workflow_module, "write_accuracy", return_value={}), \
+                        mock.patch.object(workflow_module, "validate_accuracy", return_value={}):
                     rig.workflow.cmd_ACCURACY(GCmd(**arguments))
                 self.assertEqual(len(rig.home_calls), expected)
                 self.assertEqual(rig.capture_stops, expected)
