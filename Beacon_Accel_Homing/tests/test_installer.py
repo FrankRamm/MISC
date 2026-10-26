@@ -73,6 +73,14 @@ SAVED = """
 #*# [accel_homing_model default]
 #*# x_threshold = 6.5
 """
+SAFE_Z_HOME = """# Preserve the operator's probe homing setup
+[safe_z_home]
+home_xy_position: 175, 175
+speed: 90
+z_hop: 15
+z_hop_speed: 8
+move_to_previous: True
+"""
 
 
 class HostFixture(unittest.TestCase):
@@ -102,6 +110,16 @@ class HostFixture(unittest.TestCase):
 
     def plan(self, *flags):
         return installer.make_plan(self.source, self.selected, installer.arguments(list(flags)))
+
+    def cartographer_safe_z_fixture(self):
+        probe_home = self.config.parent / "probe-home.cfg"
+        probe_home.write_bytes(SAFE_Z_HOME.replace("\n", "\r\n").encode())
+        config = CONFIG.replace("[beacon]", "[scanner]")
+        config += ("\n[adxl345 toolhead]\ncs_pin: fixture:None\n"
+                   "[include probe-home.cfg]\n")
+        saved = SAVED.replace("[beacon model default]", "[scanner model default]")
+        self.config.write_bytes((config + saved).encode())
+        return probe_home, saved
 
     def require_symlinks(self):
         link = self.home / "symlink-test"
@@ -257,12 +275,36 @@ class HostFixture(unittest.TestCase):
         with self.assertRaisesRegex(installer.InstallError, "Cartographer/scanner"):
             self.plan()
 
-    def test_homing_overrides_and_safe_z_home_fail_closed(self):
-        for section in ("homing_override", "safe_z_home", "gcode_macro G28"):
+    def test_custom_homing_overrides_and_macros_still_require_acknowledgement(self):
+        for section in ("homing_override", "gcode_macro G28"):
             self.config.write_text(CONFIG + "\n[" + section + "]\ngcode:\n    G28\n")
             with self.assertRaisesRegex(installer.InstallError, "Custom homing path"):
                 self.plan()
             self.plan("--acknowledge-homing-override")
+
+    def test_safe_z_home_with_cartographer_and_accelerometer_needs_no_bypass_flag(self):
+        probe_home, saved = self.cartographer_safe_z_fixture()
+        original = {path: path.read_bytes() for path in (self.config, self.axes, probe_home)}
+        changes, messages, sensor = self.plan()
+        self.assertEqual(sensor, "adxl345 toolhead")
+        self.assertNotIn(probe_home, changes)
+        main = changes[self.config]["data"].decode()
+        self.assertIn("[scanner]\nserial: /dev/serial/by-id/fixture-only", main)
+        self.assertTrue(main.endswith(saved))
+        self.assertIn("[include probe-home.cfg]", main)
+        self.assertTrue(any("[safe_z_home]" in message and "z_hop" in message for message in messages))
+        for path, content in original.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
+
+    def test_safe_z_home_does_not_exempt_custom_g28_and_duplicate_sections(self):
+        for section in ("homing_override", "gcode_macro G28"):
+            self.config.write_text(CONFIG + SAFE_Z_HOME + "\n[" + section + "]\ngcode:\n    G28\n")
+            with self.assertRaisesRegex(installer.InstallError, "Custom homing path"):
+                self.plan()
+        self.config.write_text(CONFIG + SAFE_Z_HOME + "\n" + SAFE_Z_HOME)
+        with self.assertRaisesRegex(installer.InstallError, "exactly one \\[safe_z_home\\]"):
+            self.plan()
 
     def test_incomplete_package_fails_without_changes(self):
         (self.source / installer.MODULES[-1]).unlink()
@@ -619,6 +661,29 @@ class UninstallFixture(unittest.TestCase):
 
     def manifest(self, backup):
         return json.loads((backup / "manifest.json").read_text())
+
+    def test_install_and_uninstall_preserve_safe_z_probe_and_saved_config_bytes(self):
+        probe_home, _saved = HostFixture.cartographer_safe_z_fixture(self)
+        original = self.capture()
+        probe_original = probe_home.read_bytes()
+        self.install()
+        self.assertEqual(probe_home.read_bytes(), probe_original)
+        self.assertIn(b"[scanner]", self.config.read_bytes())
+        self.uninstall()
+        self.assertEqual(self.capture(), original)
+        self.assertEqual(probe_home.read_bytes(), probe_original)
+
+    def test_uninstall_preserves_later_safe_z_settings_and_probe_model_edits(self):
+        probe_home, _saved = HostFixture.cartographer_safe_z_fixture(self)
+        self.install()
+        edited_probe = probe_home.read_bytes().replace(b"z_hop: 15", b"z_hop: 20")
+        probe_home.write_bytes(edited_probe)
+        self.config.write_bytes(self.config.read_bytes().replace(b"model_coef = 1.234", b"model_coef = 9.876"))
+        self.uninstall()
+        self.assertEqual(probe_home.read_bytes(), edited_probe)
+        self.assertIn(b"[scanner model default]", self.config.read_bytes())
+        self.assertIn(b"model_coef = 9.876", self.config.read_bytes())
+        self.assertNotIn(b"[include accel_homing.cfg]", self.config.read_bytes())
 
     def test_full_history_two_upgrades_preserves_unrelated_edits_and_is_idempotent(self):
         original = self.capture()

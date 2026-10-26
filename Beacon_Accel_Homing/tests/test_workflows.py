@@ -1,7 +1,9 @@
 """Offline state-machine tests: simulated G28 results never touch a printer."""
 import collections
+import contextlib
 import copy
 import csv
+import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -12,9 +14,9 @@ import xml.etree.ElementTree as ET
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import accel_homing_charts as charts_module
 from accel_homing_charts import write_capture
 from accel_homing_model import AccelHomingModel
-from accel_homing_workflows import AccelHomingWorkflows
 from harness import CommandError, ConfigError, FakeReactor
 
 
@@ -59,8 +61,15 @@ class Config:
 class GCmd:
     error = CommandError
 
-    def __init__(self, **params):
+    def __init__(self, command=None, commandline=None, **params):
         self.params, self.responses = params, []
+        self.command, self.commandline = command, commandline
+
+    def get_command(self):
+        return self.command
+
+    def get_commandline(self):
+        return self.commandline
 
     def get(self, name, default=None):
         return self.params.get(name, default)
@@ -73,6 +82,84 @@ class GCmd:
 
     def respond_info(self, message):
         self.responses.append(message)
+
+
+class StockHoming:
+    """Synthetic stock owner; its bound handler emits the rig's homing events."""
+    def __init__(self, printer):
+        self.printer = printer
+
+    def cmd_G28(self, gcmd):
+        try:
+            return self.printer.stock_home(gcmd)
+        except CommandError:
+            # Match stock PrinterHoming's fatal motor_off cleanup. Workflows
+            # must propagate this error without promising Z stays enabled.
+            for line in self.printer.lines.values():
+                line.motor_disable(0.0)
+            self.printer.toolhead.kin.clear_homing_state("xyz")
+            raise
+
+
+class SafeZHoming:
+    """Synthetic built-in wrapper: z_hop deliberately precedes axis selection."""
+    def __init__(self, printer):
+        self.printer, self.gcode = printer, printer.gcode
+        self.prev_G28 = printer.objects["homing"].cmd_G28
+        self.z_hop, self.z_hop_speed = 50.0, 15.0
+        self.home_x_pos, self.home_y_pos, self.speed = 140.0, 90.0, 50.0
+        self.calls = []
+
+    def cmd_G28(self, gcmd):
+        self.calls.append(gcmd.get_commandline())
+        toolhead = self.printer.toolhead
+        homed = toolhead.kin.get_status(0)["homed_axes"]
+        if self.z_hop:
+            if "z" not in homed:
+                position = toolhead.get_position()
+                position[2] = 0.0
+                toolhead.set_position(position, homing_axes="z")
+                toolhead.manual_move([None, None, self.z_hop], self.z_hop_speed)
+                toolhead.kin.clear_homing_state("z")
+            elif toolhead.position[2] < self.z_hop:
+                toolhead.manual_move([None, None, self.z_hop], self.z_hop_speed)
+        axes = {axis: "0" for axis in "XYZ" if gcmd.get(axis, None) is not None}
+        if not axes:
+            axes = {axis: "0" for axis in "XYZ"}
+        xy = {axis: value for axis, value in axes.items() if axis in "XY"}
+        if xy:
+            self.prev_G28(self.gcode.create_gcode_command("G28", "G28", xy))
+        if "Z" in axes:
+            homed = toolhead.kin.get_status(0)["homed_axes"]
+            if not all(axis in homed for axis in "xy"):
+                raise gcmd.error("Must home X and Y axes first")
+            toolhead.manual_move([self.home_x_pos, self.home_y_pos], self.speed)
+            self.prev_G28(self.gcode.create_gcode_command("G28", "G28", {"Z": "0"}))
+            if self.z_hop and toolhead.position[2] < self.z_hop:
+                toolhead.manual_move([None, None, self.z_hop], self.z_hop_speed)
+
+
+def load_workflow_fixture():
+    """Exercise real relative identity imports using isolated synthetic modules."""
+    package_name = "accel_homing_workflow_fixture"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(Path(__file__).resolve().parent.parent)]
+    homing = types.ModuleType(package_name + ".homing")
+    homing.PrinterHoming = StockHoming
+    safe = types.ModuleType(package_name + ".safe_z_home")
+    safe.SafeZHoming = SafeZHoming
+    name = package_name + ".accel_homing_workflows"
+    spec = importlib.util.spec_from_file_location(name, Path(package.__path__[0]) / "accel_homing_workflows.py")
+    module = importlib.util.module_from_spec(spec)
+    with mock.patch.dict(sys.modules, {package_name: package, name: module,
+                                     homing.__name__: homing, safe.__name__: safe,
+                                     package_name + ".accel_homing_charts": charts_module}):
+        spec.loader.exec_module(module)
+    return module
+
+
+workflow_module = load_workflow_fixture()
+AccelHomingWorkflows = workflow_module.AccelHomingWorkflows
 
 
 class Line:
@@ -144,6 +231,12 @@ class Toolhead:
     def get_position(self):
         return list(self.position)
 
+    def set_position(self, position, homing_axes=""):
+        self.position = list(position)
+        for index, axis in enumerate("xyz"):
+            if axis in homing_axes:
+                self.kin.limits[index] = (0.0, 500.0)
+
     def get_kinematics(self):
         return self.kin
 
@@ -193,6 +286,7 @@ class Rig:
         self.reactor = FakeReactor()
         self.handlers = collections.defaultdict(list)
         self.output, self.scripts, self.disabled, self.home_calls = [], [], [], []
+        self.dispatched_scripts, self.created_commands, self.homing_events, self.z_homes = [], [], [], []
         self.end_sessions = 0
         self.idle_state, self.print_state = "Ready", "standby"
         self.paused, self.sd_active, self.shutdown = False, False, False
@@ -206,8 +300,10 @@ class Rig:
         self.configfile = Configfile()
         self.gcode = types.SimpleNamespace(
             ready_gcode_handlers={}, register_command=self.register_command,
-            respond_info=self.output.append, run_script_from_command=self.run_script)
-        homing = types.SimpleNamespace(cmd_G28=self.stock_home)
+            respond_info=self.output.append, run_script_from_command=self.run_script,
+            create_gcode_command=self.create_gcode_command)
+        self.gcode.gcode_handlers = self.gcode.ready_gcode_handlers
+        homing = StockHoming(self)
         self.gcode.ready_gcode_handlers["G28"] = homing.cmd_G28
         self.objects = {
             "gcode": self.gcode, "toolhead": self.toolhead,
@@ -270,18 +366,47 @@ class Rig:
                             (0.002, -4.0, -5.0, 1.0), (0.003, 0.0, 0.0, 1.0)],
                 "dropped": 0, "baseline_g": (0.0, 0.0, 1.0)}
 
-    def stock_home(self, gcmd):
-        raise AssertionError("the simulated run_script handles G28 explicitly")
+    def create_gcode_command(self, command, commandline, params):
+        self.created_commands.append((command, commandline, dict(params)))
+        return GCmd(command, commandline, **params)
+
+    def use_safe_z_home(self):
+        safe = SafeZHoming(self)
+        self.objects["safe_z_home"] = safe
+        self.gcode.ready_gcode_handlers["G28"] = safe.cmd_G28
+        return safe
 
     def run_script(self, script):
+        self.dispatched_scripts.append(script)
+        if script.startswith("G28"):
+            params = {axis: "" for axis in script.split()[1:]}
+            return self.gcode.gcode_handlers["G28"](self.create_gcode_command("G28", script, params))
         self.scripts.append(script)
         if script == "SAVE_CONFIG":
             if self.save_error:
                 raise CommandError("simulated SAVE_CONFIG include conflict")
             return
-        if not script.startswith("G28 ") or script not in ("G28 X", "G28 Y"):
-            raise AssertionError("unexpected movement command " + script)
-        axis = script[-1].lower()
+        raise AssertionError("unexpected command " + script)
+
+    def stock_home(self, gcmd):
+        axes = [axis.lower() for axis in "XYZ" if gcmd.get(axis, None) is not None]
+        if not axes:
+            raise AssertionError("unexpected all-axis stock G28")
+        if axes == ["z"] and self.workflow.session is None:
+            self.z_homes.append(gcmd)
+            self.toolhead.position[2] = 0.0
+            self.toolhead.kin.limits[2] = (0.0, 500.0)
+            return
+        if len(axes) != 1 or axes[0] not in "xy":
+            raise AssertionError("unexpected stock G28 axes " + str(axes))
+        axis = axes[0]
+        self.scripts.append("G28 " + axis.upper())
+        if self.workflow.session is None:
+            self.toolhead.kin.limits["xy".index(axis)] = self.owner.rails_by_axis[axis].get_range()
+            return
+        self.homing_events.append(("begin", axis))
+        for callback in self.handlers["homing:home_rails_begin"]:
+            callback(axis)
         self.workflow.check_home_axes({axis: self.owner.rails_by_axis[axis]})
         self.home_calls.append({"axis": axis, "threshold": self.owner.threshold_g[axis],
                                 "homed_axes": self.toolhead.kin.get_status(0)["homed_axes"],
@@ -305,6 +430,9 @@ class Rig:
         self.toolhead.kin.limits[index] = self.owner.rails_by_axis[axis].get_range()
         self.toolhead.position[index] = self.owner.rails_by_axis[axis].info.position_endstop
         self.workflow.check_home_result(record)
+        self.homing_events.append(("end", axis))
+        for callback in self.handlers["homing:home_rails_end"]:
+            callback(axis)
         self.idle_state = "Printing"
 
     def calibrate(self, axis="X", save=None, **params):
@@ -322,6 +450,8 @@ class Rig:
     def effects(self):
         return copy.deepcopy({
             "scripts": self.scripts, "moves": self.toolhead.moves,
+            "dispatched_scripts": self.dispatched_scripts, "created_commands": self.created_commands,
+            "homing_events": self.homing_events, "z_homes": len(self.z_homes),
             "dwells": self.toolhead.dwells, "disabled": self.disabled,
             "enabled": {name: line.enabled for name, line in self.lines.items()},
             "position": self.toolhead.position, "limits": self.toolhead.kin.limits,
@@ -330,6 +460,276 @@ class Rig:
             "saved": self.configfile.saved, "output": self.output,
             "end_sessions": self.end_sessions, "capture_stops": self.capture_stops,
             "capture_active": self.capture_active, "timers": list(self.reactor.timers.values())})
+
+
+class SafeZHomingWorkflowTests(unittest.TestCase):
+    def test_nonzero_hop_is_omitted_for_each_workflow_and_both_z_homed_states(self):
+        for mode in ("calibrate_x", "calibrate_y", "test", "charts"):
+            for z_homed in (False, True):
+                with self.subTest(mode=mode, z_homed=z_homed), tempfile.TemporaryDirectory() as temp:
+                    rig = Rig({"charts_directory": temp})
+                    rig.toolhead.kin.limits[2] = (20.0, 480.0) if z_homed else (1.0, -1.0)
+                    safe = rig.use_safe_z_home()
+                    registries = (rig.gcode.ready_gcode_handlers, rig.gcode.gcode_handlers)
+                    registered = dict(registries[0])
+                    previous = safe.prev_G28
+                    z_limit = rig.toolhead.kin.limits[2]
+                    events = []
+                    observer = lambda axis: events.append(axis)
+                    rig.register_event_handler("homing:home_rails_begin", observer)
+                    if mode.startswith("calibrate"):
+                        axis = mode[-1]
+                        rig.calibrate(axis.upper(), save=0)
+                        expected = [axis.upper()] * 11
+                    else:
+                        getattr(rig.workflow, "cmd_TEST" if mode == "test" else "cmd_CHARTS")(GCmd())
+                        rig.confirm()
+                        expected = ["X", "Y"]
+                    self.assertEqual(safe.calls, [])
+                    self.assertEqual(rig.dispatched_scripts, [])
+                    self.assertEqual(rig.created_commands,
+                                     [("G28", "G28 " + axis, {axis: ""}) for axis in expected])
+                    self.assertEqual(events, [axis.lower() for axis in expected])
+                    self.assertIn(observer, rig.handlers["homing:home_rails_begin"])
+                    self.assertEqual(rig.toolhead.position[2:], [40.0, 6.0])
+                    self.assertEqual(rig.toolhead.kin.limits[2], z_limit)
+                    self.assertTrue(rig.lines["stepper_z"].enabled)
+                    self.assertTrue(rig.lines["stepper_z1"].enabled)
+                    self.assertTrue(all(coords[2] is None for coords, _speed in rig.toolhead.moves))
+                    self.assertEqual(rig.z_homes, [])
+                    self.assertIs(safe.prev_G28, previous)
+                    self.assertEqual(safe.z_hop, 50.0)
+                    self.assertIs(rig.objects["safe_z_home"], safe)
+                    self.assertIs(rig.gcode.ready_gcode_handlers, registries[0])
+                    self.assertIs(rig.gcode.gcode_handlers, registries[1])
+                    self.assertEqual(rig.gcode.ready_gcode_handlers, registered)
+                    self.assertIsNone(rig.workflow.session)
+
+    def test_normal_xy_g28_still_runs_wrapper_hop_for_homed_and_unhomed_z(self):
+        for z_homed in (False, True):
+            rig = Rig()
+            if not z_homed:
+                rig.toolhead.kin.limits[2] = (1.0, -1.0)
+            safe = rig.use_safe_z_home()
+            rig.run_script("G28 X")
+            self.assertEqual(safe.calls, ["G28 X"])
+            self.assertEqual(rig.toolhead.moves, [([None, None, 50.0], 15.0)])
+            self.assertEqual(rig.toolhead.position[2], 50.0)
+            self.assertEqual("z" in rig.toolhead.kin.get_status(0)["homed_axes"], z_homed)
+
+    def test_normal_z_path_and_probe_object_remain_available_after_workflow(self):
+        rig = Rig()
+        probe = object()  # Probe implementation is external to this synthetic fixture.
+        rig.objects["probe"] = rig.objects["cartographer"] = probe
+        safe = rig.use_safe_z_home()
+        handler = rig.gcode.gcode_handlers["G28"]
+        rig.workflow.cmd_TEST(GCmd())
+        rig.confirm()
+        rig.run_script("G28 Z")
+        self.assertEqual(safe.calls, ["G28 Z"])
+        self.assertEqual(len(rig.z_homes), 1)
+        self.assertEqual(rig.z_homes[0].params, {"Z": "0"})
+        self.assertEqual(rig.toolhead.moves[1:], [([None, None, 50.0], 15.0),
+                                                ([140.0, 90.0], 50.0),
+                                                ([None, None, 50.0], 15.0)])
+        self.assertEqual(rig.gcode.gcode_handlers["G28"], handler)
+        self.assertIs(rig.objects["probe"], probe)
+        self.assertIs(rig.objects["cartographer"], probe)
+
+    def test_unknown_and_nested_predecessors_are_rejected_before_side_effects(self):
+        for kind in ("function", "other_owner", "nested", "missing"):
+            with self.subTest(kind=kind):
+                rig = Rig()
+                safe = rig.use_safe_z_home()
+                if kind == "function":
+                    safe.prev_G28 = lambda gcmd: None
+                elif kind == "other_owner":
+                    safe.prev_G28 = StockHoming(rig).cmd_G28
+                elif kind == "nested":
+                    safe.prev_G28 = SafeZHoming(rig).cmd_G28
+                else:
+                    del safe.prev_G28
+                before = rig.effects()
+                with self.assertRaisesRegex(CommandError, "G28 predecessor"):
+                    rig.calibrate(save=0)
+                self.assertEqual(rig.effects(), before)
+                self.assertEqual(safe.calls, [])
+
+    def test_custom_safe_wrapper_owner_type_and_methods_are_rejected(self):
+        class SafeSubclass(SafeZHoming):
+            pass
+
+        for kind in ("subclass", "object", "owner", "dispatcher", "instance_method", "class_method"):
+            with self.subTest(kind=kind):
+                rig = Rig()
+                safe = rig.use_safe_z_home()
+                if kind == "subclass":
+                    safe = SafeSubclass(rig)
+                    rig.objects["safe_z_home"] = safe
+                    rig.gcode.ready_gcode_handlers["G28"] = safe.cmd_G28
+                elif kind == "object":
+                    rig.objects["safe_z_home"] = types.SimpleNamespace(
+                        printer=rig, gcode=rig.gcode, cmd_G28=safe.cmd_G28, prev_G28=safe.prev_G28)
+                elif kind == "owner":
+                    safe.printer = object()
+                elif kind == "dispatcher":
+                    safe.gcode = object()
+                elif kind == "instance_method":
+                    safe.cmd_G28 = lambda gcmd: None
+                before = rig.effects()
+                context = mock.patch.object(SafeZHoming, "cmd_G28", lambda obj, gcmd: None) \
+                    if kind == "class_method" else contextlib.nullcontext()
+                with context, self.assertRaisesRegex(CommandError, "G28"):
+                    rig.calibrate(save=0)
+                self.assertEqual(rig.effects(), before)
+                self.assertEqual(safe.calls, [])
+
+    def test_unknown_stock_owners_and_patched_stock_methods_are_rejected(self):
+        class StockSubclass(StockHoming):
+            pass
+
+        for kind in ("subclass", "object", "instance_method", "class_method", "missing_import"):
+            with self.subTest(kind=kind):
+                rig = Rig()
+                if kind == "subclass":
+                    rig.objects["homing"] = StockSubclass(rig)
+                elif kind == "object":
+                    rig.objects["homing"] = types.SimpleNamespace(printer=rig, cmd_G28=rig.stock_home)
+                elif kind == "instance_method":
+                    rig.objects["homing"].cmd_G28 = rig.stock_home
+                before = rig.effects()
+                if kind == "class_method":
+                    context = mock.patch.object(StockHoming, "cmd_G28", lambda obj, gcmd: None)
+                elif kind == "missing_import":
+                    context = mock.patch.object(workflow_module, "_PrinterHoming", None)
+                else:
+                    context = contextlib.nullcontext()
+                with context, self.assertRaisesRegex(CommandError, "stock G28"):
+                    rig.calibrate(save=0)
+                self.assertEqual(rig.effects(), before)
+
+    def test_missing_or_divergent_handler_registries_fail_closed(self):
+        for wrapped in (False, True):
+            for kind in ("ready_missing", "active_missing", "ready_empty", "active_empty",
+                         "unknown_ready", "unknown_active", "inactive_wrapper"):
+                with self.subTest(wrapped=wrapped, kind=kind):
+                    rig = Rig()
+                    if wrapped:
+                        rig.use_safe_z_home()
+                    if kind == "ready_missing":
+                        del rig.gcode.ready_gcode_handlers
+                    elif kind == "active_missing":
+                        del rig.gcode.gcode_handlers
+                    elif kind == "ready_empty":
+                        rig.gcode.ready_gcode_handlers = {}
+                    elif kind == "active_empty":
+                        rig.gcode.gcode_handlers = {}
+                    elif kind == "unknown_ready":
+                        rig.gcode.ready_gcode_handlers = {"G28": lambda gcmd: None}
+                    elif kind == "unknown_active":
+                        rig.gcode.gcode_handlers = {"G28": lambda gcmd: None}
+                    else:
+                        rig.use_safe_z_home()
+                        rig.gcode.ready_gcode_handlers["G28"] = rig.objects["homing"].cmd_G28
+                    before = rig.effects()
+                    with self.assertRaisesRegex(CommandError, "G28"):
+                        rig.calibrate(save=0)
+                    self.assertEqual(rig.effects(), before)
+
+    def test_chain_changes_during_capture_setup_or_command_creation_abort_before_home(self):
+        for stage in ("capture", "command"):
+            with self.subTest(stage=stage):
+                rig = Rig()
+                safe = rig.use_safe_z_home()
+                def mutate_after(callback, *args):
+                    result = callback(*args)
+                    safe.prev_G28 = lambda gcmd: None
+                    return result
+                if stage == "capture":
+                    callback = rig.owner.start_capture
+                    rig.owner.start_capture = lambda: mutate_after(callback)
+                else:
+                    callback = rig.gcode.create_gcode_command
+                    rig.gcode.create_gcode_command = lambda *args: mutate_after(callback, *args)
+                with self.assertRaisesRegex(CommandError, "G28 predecessor"):
+                    rig.calibrate(save=0)
+                self.assertEqual(rig.home_calls, [])
+                self.assertEqual(safe.calls, [])
+                self.assertEqual(rig.toolhead.moves, [])
+                self.assertEqual(rig.capture_stops, 1)
+                self.assertFalse(rig.capture_active)
+                self.assertIsNone(rig.workflow.session)
+                self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                self.assertEqual(rig.owner.back_off_dist, 5.0)
+                self.assertEqual(rig.workflow.last_result["result"], "aborted")
+
+    def test_chain_is_revalidated_between_trials_and_after_manual_center_wait(self):
+        for mode in ("calibration", "test", "waiting"):
+            for mutation in ("previous", "active", "override"):
+                with self.subTest(mode=mode, mutation=mutation):
+                    rig = Rig()
+                    safe = rig.use_safe_z_home()
+                    def mutate(axis=None):
+                        if mutation == "previous":
+                            safe.prev_G28 = lambda gcmd: None
+                        elif mutation == "active":
+                            rig.gcode.gcode_handlers = {"G28": lambda gcmd: None}
+                        else:
+                            rig.objects["homing_override"] = object()
+                    if mode == "waiting":
+                        rig.home_results.append({"travel_mm": 2.0})
+                        rig.calibrate(save=0)
+                        mutate()
+                        resume = lambda: rig.calibrate(save=0)
+                    elif mode == "test":
+                        rig.workflow.cmd_TEST(GCmd())
+                        rig.on_home = mutate
+                        resume = rig.confirm
+                    else:
+                        rig.on_home = mutate
+                        resume = lambda: rig.calibrate(save=0)
+                    with self.assertRaisesRegex(CommandError, "G28"):
+                        resume()
+                    self.assertEqual(len(rig.home_calls), 1)
+                    self.assertEqual(safe.calls, [])
+                    self.assertFalse(rig.capture_active)
+                    self.assertIsNone(rig.workflow.session)
+                    self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                    self.assertEqual(rig.owner.back_off_dist, 5.0)
+                    self.assertEqual(rig.workflow.last_result["result"], "aborted")
+
+    def test_direct_stock_error_propagates_and_cleanup_preserves_registered_wrapper(self):
+        for error_type in (CommandError, RuntimeError):
+            with self.subTest(error_type=error_type):
+                rig = Rig()
+                safe = rig.use_safe_z_home()
+                registered = rig.gcode.gcode_handlers["G28"]
+                error = error_type("synthetic stock homing failure")
+                rig.home_results.append(error)
+                with self.assertRaises(error_type) as caught:
+                    rig.calibrate(save=0)
+                self.assertIs(caught.exception, error)
+                self.assertFalse(rig.capture_active)
+                self.assertEqual(rig.capture_stops, 1)
+                self.assertIsNone(rig.workflow.session)
+                self.assertFalse(rig.workflow.in_home)
+                self.assertIsNone(rig.workflow.home_axis)
+                self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                self.assertEqual(rig.owner.back_off_dist, 5.0)
+                self.assertEqual(rig.gcode.gcode_handlers["G28"], registered)
+                self.assertEqual(safe.calls, [])
+                self.assertEqual(rig.toolhead.moves, [])
+                if error_type is CommandError:
+                    self.assertIn("stepper_z", rig.disabled)
+                    self.assertFalse(rig.lines["stepper_z"].enabled)
+
+    def test_invalid_internal_home_axis_is_rejected_without_dispatch_or_capture(self):
+        for axis in ("", "z", "xy", "X", None):
+            rig = Rig()
+            before = rig.effects()
+            with self.assertRaisesRegex(CommandError, "exactly one X or Y"):
+                rig.workflow._home(axis)
+            self.assertEqual(rig.effects(), before)
 
 
 class CalibrationTests(unittest.TestCase):
