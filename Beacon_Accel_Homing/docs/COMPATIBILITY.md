@@ -255,20 +255,33 @@ nominal request travel = v * (T + 0.003) - 0.5 * v * v / a
 ```
 
 `T` includes the acceleration ramp, 15 ms command/sensor lag allowance,
-accepted sample age, and reporting/proof-window margin. Before motor enabling
-or plugin backoff, a generic plan with nominal request travel above a fixed
-**3 mm** limit is rejected; planning checks run again before the homing pass.
+accepted sample age, and reporting/proof-window margin. The startup watchdog
+still requests a stop when motion proof is absent by that deadline. There is
+no default report-distance or startup-distance admission cap: a finite positive
+configured homing speed is preserved without inserting either option.
+Freshness, stream-fault and finite timing checks remain mandatory.
+
+`max_startup_travel` is an optional nominal request-travel limit, disabled when
+absent and bounded to finite 0.1..5 mm values when explicitly configured.
+`max_report_travel` is independently optional, disabled when absent and bounded
+to finite 0.1..2 mm values when configured. An explicit startup limit is checked
+before enable/backoff and again before the homing pass; it does not change the
+startup deadline or become a physical stopping guarantee.
 Resolve the speed/acceleration configuration within the machine's supported
 limits before retrying. The installer does not raise acceleration.
 The installer preserves the configured `homing_speed` unless an explicit
 `--homing-speed N` requests an edit. An incompatible configured or explicitly
 requested plan is refused before installation writes; there is no automatic
-speed edit or reduction. The generic reporting ceiling is
-`max_report_travel / max_sample_age`, which defaults to 50 mm/s from
-1 mm / 0.020 s; there is no independent fixed 50 mm/s ceiling. Higher speeds
-are conditional on explicit settings satisfying both reporting and the 3 mm
-startup budget. The installer changes neither timing nor acceleration to make
-a speed pass, and does not restore a historical speed from older backups.
+speed edit or reduction. When a reporting limit is explicitly configured, its
+speed ceiling is `max_report_travel / max_sample_age`. For example, an explicit
+1 mm limit with 0.020 s sample age imposes 50 mm/s. This is an opt-in limit,
+not a default ceiling. Each configured budget applies independently.
+Optional installer `--max-report-travel N` and `--max-startup-travel N` flags
+select those settings before validation and persist only explicit overrides.
+Existing limits and homing speeds are preserved when no matching flag is
+given. The flags are refused for native Beacon. The installer changes neither
+sample age, reporting interval, current nor acceleration to make a speed pass,
+and does not restore a historical speed from older backups.
 CALIBRATE/TEST/CHARTS also make a read-only check of their requested generic X/Y
 plans before workflow effects, including when both axes are still unhomed.
 The owner method `preflight_motion_policy(axes, error=None)` validates selected
@@ -279,28 +292,30 @@ rejected; `homing_accel: 0` leaves the live acceleration in force, and a nonzero
 value only caps it. Later preparation checks remain necessary because live
 limits can change after this first check.
 Ordinary public `G28` is not wrapped by this preflight. With `safe_z_home`, a
-configured Z hop can occur before a later X/Y policy rejection. The safe Z
-section, Z settings and 3 mm limit are unchanged.
+configured Z hop can occur before a later X/Y policy rejection. These budget
+options do not change the safe Z section or Z settings.
 
 For `v=50 mm/s`, `a=5000 mm/s²`, `max_sample_age=0.020`, and
 `stream_interval=0.005`, `T=0.055 s` and nominal request travel is `2.65 mm`.
-At 75 mm/s with those default timing settings and acceleration, nominal request
-travel is `4.1625 mm`, exceeding the same 3 mm limit. Removing the independent
-50 mm/s cap does not admit this default plan or relax any timing/watchdog guard.
-With the same 50 mm/s and timing settings but a live effective acceleration
-of 1500 mm/s², the request travel is approximately `3.233333 mm`, so the plan
-is rejected. A higher configured printer acceleration or plugin cap does not
-override that lower live value, which can remain after a macro or tuning run.
-The error reports effective speed/acceleration and a conservative, rounded-down
-`homing_speed` ceiling (about `47.0965 mm/s` for this example). It does not alter
-the configuration or raise acceleration automatically.
-At `v=20 mm/s` with the same other settings, `T=0.049 s` and the budget is
-`1.0 mm`. The extra 3 ms covers one nominal watchdog interval. It excludes
+At 100 mm/s with those timing/acceleration settings, `T=0.065 s` and nominal
+request travel is `5.8 mm`. Without an explicit distance cap, neither plan is
+rejected for this distance. An explicit `max_startup_travel: 3` would reject
+the latter. These are synthetic software calculations, not physical validation
+of either speed. Lower live acceleration increases the startup time and travel;
+a plugin cap does not raise a lower live value left by a macro or tuning run.
+The extra 3 ms covers one nominal watchdog interval. It excludes
 unbounded host scheduling stalls, transport and MCU stop delay, and actual
-mechanical response. **The 3 mm policy is not a physical stopping guarantee.**
+mechanical response. **The deadline and optional nominal travel limits are not
+physical stopping guarantees.**
 Backend status exposes `startup_motion_request_limit_mm`,
 `startup_motion_timeout_s`, and `startup_motion_request_travel_mm` for
-inspection; these remain software planning values.
+inspection; the limit key reflects the explicit `max_startup_travel` or `null`
+when disabled. These remain software planning values.
+
+The calibration criterion `max(travel_mm) - min(travel_mm) < 1.5 mm` measures
+spread across ten accepted validation homes. It does not constrain the travel
+of a single home and does not set either optional distance cap. Host latency,
+transport and the mechanical response remain relevant at every speed.
 
 Mechanics remain a separate requirement. The sensor must move with the tested
 axis, be mounted firmly and have the correct machine `axes_map`. Toolhead-only

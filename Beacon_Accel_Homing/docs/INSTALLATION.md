@@ -157,6 +157,55 @@ For a hosted dry run, append `--dry-run` to the final `bash "$t"` invocation
 in the download command. This still downloads the verified source cache;
 printer configuration and plugin paths are left unchanged.
 
+## Explicit generic travel budgets
+
+`max_report_travel` and `max_startup_travel` are independent optional generic
+distance caps, both disabled when absent from the plugin section. Installation
+does not insert either option or cap the configured speed by default. Finite
+positive speeds such as 75 or 100 mm/s are preserved; normal toolhead limits,
+sensor freshness checks and the startup `no_motion` watchdog still apply.
+This does not establish that a speed is suitable for any physical printer.
+
+Existing explicit limits remain active. `--max-report-travel N` and
+`--max-startup-travel N` deliberately opt into or replace the corresponding
+limit during installation or an update. Their finite ranges are 0.1..2 and
+0.1..5 mm respectively. Omit a configuration option to disable its distance
+cap; do not put the text `None` in the file. These options apply to configured
+accelerometer backends, including Cartographer's separate ADXL/LIS object.
+Native Beacon refuses the flags because it uses a different homing path.
+
+For an operator who chooses these additional distance limits, an optional
+local dry run can explicitly select them:
+
+```bash
+bash /path/to/Beacon_Accel_Homing/install.sh --max-report-travel 1.0 --max-startup-travel 3.0 --dry-run
+```
+
+That example enables limits and can refuse a speed that passes without them;
+it is not required for installation or for 75/100 mm/s. The normal install and
+update commands above contain no budget flags. `--homing-speed N` is a
+separate explicit speed edit. No command automatically changes sample age,
+reporting interval, acceleration or driver current to make a speed pass.
+
+The reporting budget limits nominal travel during the accepted sample age;
+the startup budget limits nominal travel before the host requests a stop for
+absent motion proof. Neither changes the startup deadline or includes
+unbounded host stalls, transport/MCU stop delay or the machine's mechanical
+response. They are not physical stopping-distance guarantees. The calibration
+rule `max(travel_mm) - min(travel_mm) < 1.5 mm` is instead a repeatability
+requirement across ten accepted validation homes. It does not set either of
+these distance caps.
+
+Chosen values are validated before configuration/module writes, transaction
+backups or service activation. Only explicit overrides are written to the
+existing current or legacy plugin section at its actual included-file path,
+or to the newly managed section. These options affect all axes using that
+backend: with `--axes x` or `--axes y`, validation also checks an unselected
+axis already using the plugin, including active second homing passes and a
+retained rail `homing_accel` limit, while its rail settings remain intact. The
+transaction backup, rollback and full uninstall retain the previous policy
+values just like other managed configuration changes.
+
 ## Explicit selection when needed
 
 For a multi-instance host or multiple configured sensors:
@@ -211,16 +260,18 @@ an unsafe status to complete installation.
   rail `homing_accel`/`min_home_dist` are commented with their previous values.
   Run currents, stall thresholds, unrelated macros, other axes, explicit X/Y
   thresholds and saved data remain intact.
-- Configured `homing_speed` is preserved by default for every sensor. Generic
-  plans must still satisfy `max_report_travel/max_sample_age` and the fixed
-  3 mm startup request budget. The default 1 mm / 0.020 s settings give a
-  50 mm/s reporting limit; there is no separate fixed 50 mm/s cap.
+- Configured `homing_speed` is preserved by default for every sensor. There is
+  no default 50 mm/s reporting cap or startup-distance cap. Optional explicit
+  `max_report_travel/max_sample_age` and `max_startup_travel` limits are honored
+  independently when configured.
   An incompatible plan produces an
   actionable conflict before config/module writes or activation; the installer
   does not select a lower speed. It shares the runtime formula and uses printer
   `max_velocity`, `max_accel`, and nonzero plugin `homing_accel` limits.
   `--homing-speed N` is a deliberate optional speed edit and is refused if its
   effective speed violates either policy. Acceleration is never raised.
+  The [optional travel-budget flags](#explicit-generic-travel-budgets) write
+  only the limits explicitly selected; they do not choose a speed.
   No universal speed is known to guarantee a detectable impact on all mechanics.
   Installation does not change timing settings or acceleration to admit a
   speed. Updating preserves a speed previously written by an older installer;
@@ -228,8 +279,9 @@ an unsafe status to complete installation.
   Runtime checks repeat before enable/backoff, including after later manual
   config edits or temporary live acceleration changes. CALIBRATE/TEST/CHARTS
   also check requested generic X/Y plans before any workflow effect, even
-  when XY is unhomed. Refusals report effective speed/acceleration and a lower
-  `homing_speed` ceiling; a plugin cap cannot raise a lower live acceleration.
+  when XY is unhomed. Explicit distance-cap refusals report effective
+  speed/acceleration and a lower `homing_speed` ceiling; a plugin cap cannot
+  raise a lower live acceleration.
   This does not promise a physical stopping distance; see
   [the calculation and default 2.65 mm example](COMPATIBILITY.md).
 - All six required Python modules are linked into `klippy/extras`. Existing
