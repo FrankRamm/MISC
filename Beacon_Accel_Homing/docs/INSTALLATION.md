@@ -260,16 +260,16 @@ ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
 ```
 
 `CENTERED=1` states that the toolhead is already physically centered and
-authorizes the first candidate home, starting at 1 g by default. It does not
+authorizes the first candidate home, starting at 0.5 g by default. It does not
 measure the manual position. After an early trigger, XY is released and made
 unhomed; center it manually again and reissue the same calibration command to
 resume, keeping the same `AXIS` and optional `SAVE_CONFIG` value. The console
 reports manual-recentering instructions; the pending calibration retains its
-configured timeout. The default 0.5 g step makes the first retry 1.5 g.
-Calibration and saved models accept finite values from 1 g; existing models
-at 2 g or above remain valid. Manual threshold settings and temporary SET
+configured timeout. The default 0.5 g step makes the first retry 1.0 g.
+Calibration and saved models accept finite values from 0.5 g; existing models
+at 1 g and 2 g remain valid. Manual threshold settings and temporary SET
 commands retain their 3–15 g range. An explicit existing
-`calibration_start_threshold` is preserved; set it to `1` or leave it absent
+`calibration_start_threshold` is preserved; set it to `0.5` or leave it absent
 to use the new default. Updating does not replace a saved model's threshold;
 run calibration to create a new one.
 
@@ -280,8 +280,16 @@ and nozzle/bed clearance. Start them directly with
 first home or request a separate confirmation. `CENTERED=1` is mandatory and
 authorizes movement after stationary preparation succeeds.
 
-Successful calibration saves X and restarts Klipper by default. Once ready,
-repeat the preparation and use `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` for Y.
+Successful calibration uses `SAVE_CONFIG=1` by default: it writes the model to
+the generated `SAVE_CONFIG` block of `printer.cfg` and restarts Klipper.
+To defer both actions, start with
+`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 SAVE_CONFIG=0`. That only stages the
+model in memory and restores the previous active thresholds; you must issue
+`SAVE_CONFIG` yourself to write it and restart. The calibrated threshold is
+used after reload unless a manual threshold override takes priority. An
+ordinary `RESTART` discards an unsaved staged model.
+Once ready, repeat the preparation and use
+`ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` for Y.
 See the [full calibration steps](../README.md#calibrate-x-then-y) for validation,
 manual threshold overrides and optional saving behavior.
 

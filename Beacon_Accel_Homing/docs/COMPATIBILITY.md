@@ -138,14 +138,21 @@ measurement. The workflow does not assign a center coordinate or mark either
 axis homed before the actual home. No further confirmation is requested; the
 first homing pass starts after stationary preparation succeeds.
 
-The first home tests the candidate threshold, starting at 1 g by default.
-Calibration and saved models accept finite thresholds from 1 to 15 g, with
+The first home tests the candidate threshold, starting at 0.5 g by default.
+Calibration and saved models accept finite thresholds from 0.5 to 15 g, with
 the configured calibration ceiling and sensor-range limit still applied.
-The default step stays 0.5 g, so the first early-trigger retry uses 1.5 g.
-Previous models at 2 g or above remain valid; manual threshold settings and
+The default step stays 0.5 g, so the first early-trigger retry uses 1.0 g.
+Previous models at 1 g and 2 g remain valid; manual threshold settings and
 temporary SET commands retain their 3–15 g range.
+An explicit existing `calibration_start_threshold` is preserved. The 0.5 g
+default applies when that setting is absent or set to 0.5; updating does not
+replace any saved model threshold.
 One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
+Each accepted home must exceed 10 mm of commanded travel and fall within the
+configured tolerance of expected center-to-stop travel (20% by default).
+This broad geometry check does not limit the distance spread between trials
+and does not establish precise physical repeatability.
 An early trigger raises the candidate, resets validation progress, releases
 XY and invalidates its homed state while retaining Z. The operator manually
 recenters and repeats the same calibration command to resume the pending
@@ -160,6 +167,13 @@ confirmation command. All three workflows require `CENTERED=1` before any
 workflow movement. Early calibration hits use plain console instructions for
 manual recentering and the same calibration command; the timeout remains
 active. The workflows emit no UI prompt actions.
+
+Successful calibration defaults to `SAVE_CONFIG=1`, writing the staged model
+to `printer.cfg` and restarting Klipper. `SAVE_CONFIG=0` stages only in memory;
+it does not write or restart, and the workflow restores the previous active
+thresholds. An explicit `SAVE_CONFIG` is still required to persist and reload
+the new model; an ordinary `RESTART` discards unsaved staged values. Manual
+threshold overrides retain priority after reload.
 
 ## Generic startup motion policy
 
@@ -209,8 +223,10 @@ their supported kinematics to Cartesian/CoreXY with independent Z and verified
 stock G28, either directly or beneath the recognized built-in `safe_z_home`.
 Other homing wrappers and potentially Z-coupled paths remain rejected.
 
-Distance qualification uses commanded/firmware step positions. An accelerometer
-plus step counts cannot distinguish every jam, skipped step or wrong physical
-stop from valid motion. A qualifying discovery, ten validation repeats and a
-saved model are tuning evidence, not independent physical metrology or safe
-stopping certification.
+Distance qualification uses commanded/firmware step positions, not encoder
+measurements. An accelerometer plus step counts cannot distinguish every jam,
+skipped step or wrong physical stop from valid motion. A qualifying discovery,
+ten validation repeats and a saved model are tuning evidence, not independent
+physical metrology or safe stopping certification. Starting at 0.5 g allows a
+lower candidate to be evaluated; it does not prove that skipped steps or
+inconsistent physical homing are fixed.
