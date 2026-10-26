@@ -43,7 +43,8 @@ The installer downloads verified files, detects the Klipper checkout, config
 and configured sensor, then installs the plugin and activates its X/Y
 endstops. It backs up changed files, disables conflicting sensorless settings
 and keeps existing thresholds, driver run currents and saved configuration.
-Generic accelerometers may require lower homing speeds, which it adjusts.
+It preserves configured homing speeds. An incompatible generic speed/timing
+plan is reported before installation writes; it is never silently reduced.
 
 Multiple printer instances or sensors need explicit selection. Configure
 sensor firmware and wiring beforehand. After installation or an update, the
@@ -126,13 +127,19 @@ for XY travel. These workflows do not perform `safe_z_home`'s Z hop.
    stationary preparation check.** The first home tests the actual candidate
    threshold, starting at **0.5 g by default**, from that manual center.
 3. After one qualifying home, the plugin performs **ten additional consecutive
-   accepted homes** at the same threshold. Between accepted trials, it returns
-   only the tested axis to center.
+   accepted homes** at the same threshold. Their commanded-travel range,
+   **maximum minus minimum, must be strictly less than 1.5 mm**. The discovery
+   home and manual centering are excluded. A range of exactly 1.5 mm fails.
+   Between accepted trials, it returns only the tested axis to center. As soon
+   as the validation range reaches 1.5 mm, calibration aborts before another
+   return or home, without increasing the threshold or saving a model.
 4. If it triggers too early, the plugin raises the candidate threshold by
    0.5 g by default (the first retry is **1.0 g**), resets
-   the validation count and releases XY, leaving both axes unhomed. Center XY
+   the validation count and distance window and releases XY, leaving both axes
+   unhomed. Center XY
    manually again, then repeat **`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`** to
-   resume the pending candidate and attempt count. It does not return
+   resume the pending candidate and attempt count. The new candidate needs
+   a fresh qualifying discovery and ten new validation homes. It does not return
    automatically after a suspect home. Sensor faults or excessive travel abort
    calibration.
 5. On success, the default `SAVE_CONFIG=1` automatically saves that axis in
@@ -241,7 +248,10 @@ range. Calibration and its saved model accept values starting at 0.5 g; the
 calibration ceiling and sensor-range limits still apply.
 
 The named model defaults to `[accel_homing_model default]`. It stores thresholds,
-ten-success counts and sensor/configuration metadata. Calibration defaults to
+ten-success counts, the validation travel range and fixed 1.5 mm limit, and
+sensor/configuration metadata. Existing saved models remain loadable; updating
+does not certify their historical travel range under the new calibration rule.
+Run a new calibration to obtain that qualification. Calibration defaults to
 `SAVE_CONFIG=1`, which writes the file and restarts Klipper automatically.
 `SAVE_CONFIG=0` stages results in memory until you issue `SAVE_CONFIG` yourself;
 it neither writes the file nor activates the new threshold for ordinary
@@ -277,9 +287,16 @@ model's threshold; recalibrate to produce a new model. Starting or resuming
 calibration requires both XY axes to be unhomed; it never marks manually
 centered coordinates as homed.
 Qualification requires over 10 mm of commanded travel and agreement within
-20% of expected center-to-stop travel by default. This broad geometry check
-does not constrain the spread between accepted trials or establish precise
-physical repeatability.
+20% of expected center-to-stop travel by default. After a separate qualifying
+discovery, ten consecutive geometry-qualified validation homes at the same
+candidate must also have `max(travel_mm) - min(travel_mm) < 1.5 mm`. This fixed
+limit has no configuration override. Each axis has its own validation window.
+The existing early-hit classification (pressed start, at most 10 mm, or travel
+below the geometry tolerance) still raises the candidate and clears that window;
+the new candidate must qualify again. A range failure among geometry-qualified
+validation homes aborts without a higher candidate, another automatic move,
+model staging, writing or restart. Status and console progress report the range
+and limit. Commanded distances do not establish physical repeatability.
 Missing/late data, invalid captures, MCU errors and excessive travel abort
 instead of increasing the threshold. Stock Klipper homing fault cleanup still
 applies and may release all motors.
@@ -311,10 +328,25 @@ The preparation check does not change driver settings.
 ### Generic timing and speed limits
 
 Generic defaults are 5 ms reports, a 20 ms maximum sample age and at least
-1000 Hz. The previous report interval is restored afterwards. Speed is
-capped at `min(50, max_report_travel / max_sample_age)` mm/s, normally 50 mm/s.
-The installer may lower it further for the startup guard; it never raises
-acceleration. Beacon retains its existing speed and already-pressed behavior.
+1000 Hz. The previous report interval is restored afterwards. The effective
+generic homing speed must be at most `max_report_travel / max_sample_age`
+mm/s, which is 50 mm/s with the default 1 mm / 0.020 s settings, and must fit
+the startup budget below. There is no separate fixed 50 mm/s cap. These are
+validation limits: default installation and runtime preserve the configured
+`homing_speed` and refuse an incompatible plan. Only an explicit installer
+`--homing-speed N` requests a speed edit, still subject to the same limits.
+Acceleration is never raised automatically. Beacon retains its existing speed
+and already-pressed behavior.
+An update also preserves a 50 mm/s value written by an older installer; it
+does not infer or restore a historical speed from backups. Those backups
+retain the original configuration for review.
+Runtime checks use the current toolhead velocity and acceleration limits,
+including temporary changes left by a macro or tuning routine. A nonzero
+`homing_accel` is only an upper limit: it cannot raise a lower live acceleration.
+CALIBRATE/TEST/CHARTS check their requested generic X/Y plans before changing
+workflow state or moving; homing preparation checks them again. Ordinary
+`G28 X/Y` still uses the configured public handler, so `safe_z_home` can perform
+its Z hop before a later X/Y policy refusal. No Z settings are changed.
 
 A generic home with no impact must establish motion before a calculated
 deadline or fail with `no_motion`; this does not establish an origin. Ordinary
@@ -322,6 +354,15 @@ deadline or fail with `no_motion`; this does not establish an origin. Ordinary
 motion and travel. Plans exceeding a **3 mm nominal commanded-travel budget**
 before the host stop request are rejected. This excludes host stalls,
 transport and MCU stop delay, so it is **not a physical stopping guarantee**.
+For example, the default timing settings at 50 mm/s require 2.65 mm with
+5000 mm/s² effective acceleration, but about 3.233 mm with 1500 mm/s² and
+therefore fail. The error reports the effective speed and acceleration plus
+a lower `homing_speed` ceiling calculated for that acceleration. Review live
+limits and machine capabilities before adjusting speed or acceleration.
+At 75 mm/s and 5000 mm/s², the default timing settings also exceed the
+startup limit (4.1625 mm). Higher speeds are supported only when the explicitly
+configured reporting and startup budgets both pass. Installation does not
+change timing settings or acceleration to make a requested speed pass.
 See [the exact calculation](docs/COMPATIBILITY.md#generic-startup-motion-policy).
 
 Commanded/firmware step distances are not encoder measurements. Ten repeats

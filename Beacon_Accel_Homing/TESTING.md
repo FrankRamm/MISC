@@ -33,8 +33,8 @@ Focused motor-enable and fresh-reference fixtures, run from
 python -m unittest test_session.EnablePreparationTest test_backends.GenericPreparationTest -v
 ```
 
-The recorded combined run includes **92 installer/bootstrap/uninstall tests:
-91 passed and one real POSIX symlink test was skipped** because the Windows
+The recorded combined run includes **100 installer/bootstrap/uninstall tests:
+99 passed and one real POSIX symlink test was skipped** because the Windows
 host does not permit symlink creation. Temporary regular-file fixtures cover
 installation, config idempotence, backup/rollback, full-history restore,
 failed-write recovery, concurrent-edit rejection and later-edit protection.
@@ -57,7 +57,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The combined offline verification run discovered **309 tests: 308 passed,
+The combined offline verification run discovered **345 tests: 344 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -75,9 +75,21 @@ Publication fixtures also execute both bootstrap entry points with mocked
 downloads to verify their FrankRamm testing-fork defaults, immutable revision
 pinning and forwarded installer arguments, and verify that the real source
 package retains its GPLv3 license and original CloakedWayne credit/provenance.
-Low-acceleration fixtures verify automatic speed reduction using the exact
-runtime startup budget, explicit invalid-speed refusal before writes, plugin
-acceleration limits including the zero override, and toolhead velocity limits.
+Installer speed fixtures verify preservation of configured homing speeds and
+refusal of incompatible generic plans before writes, using the exact runtime
+startup budget. Explicit `--homing-speed` edits remain opt-in and must satisfy
+the same limits. Low-acceleration cases include nonzero and zero plugin caps
+and toolhead velocity limits; no automatic speed reduction is expected.
+The reporting ceiling uses `max_report_travel/max_sample_age`, without an
+independent fixed 50 mm/s cap. Defaults still give 50 mm/s; higher-speed
+fixtures must satisfy both that reporting ceiling and the unchanged 3 mm
+startup budget with explicit settings. No timing/acceleration is auto-edited,
+and updating does not automatically recover an earlier speed from backups.
+Admitted 75 mm/s fixtures exercise both directions through fresh-reference
+preparation, arming and watchdog handling. Moving traces establish motion;
+parked noisy traces still fail with `no_motion` and request a host stop within
+the nominal 3 mm budget. Their constructed delivery timing is synthetic and
+does not qualify a sensor, MCU or host for those settings on hardware.
 
 Full-uninstall fixtures cover multiple upgrades back to the original
 activation/config state, restored original links and sensorless settings,
@@ -119,6 +131,21 @@ with both axes unhomed. They do not release XY before the first home. Missing
 consent or a homed XY axis fails before movement or a workflow-state change.
 These checks do not detect or prove physical centering.
 
+Repeatability fixtures require **ten distinct consecutive geometry-qualified
+validation homes** after the separate discovery at the same candidate, with
+`max(travel_mm) - min(travel_mm) < 1.5 mm`. They cover equality rejection,
+decimal endpoint subtraction across binary exponent boundaries, just-below
+acceptance, either-direction outliers, discovery/manual-center exclusion,
+independent X/Y windows and recorded range/limit metadata. The previously
+reported ten-distance example spans 3.625 mm and is rejected. A range failure
+aborts before another automatic return/home, candidate increase, model staging,
+config write or SAVE_CONFIG dispatch. Existing early hits, including a result
+below the broad geometry tolerance, retain retry behavior while clearing all
+validation evidence and requiring a fresh discovery. The save-path fixtures
+also reject incomplete, reused, foreign-axis/candidate/run or malformed windows
+and recompute the range before writes. Legacy saved models remain accepted;
+their old distances do not acquire the new qualification on loading.
+
 Direct-command fixtures check that no separate centering-confirmation command
 is registered and no `action:prompt_*` messages are emitted during successful
 calibration/test/chart runs, early-trigger recentering, cancellation, timeout
@@ -157,13 +184,22 @@ the 20% quiet limit on hardware, or prevent a driver's first-step hold-to-run
 current transient. No physical homing or motor-current measurement was made.
 The 0.5 g starting value does not establish a physical fix for skipped steps
 or inconsistent homing. Commanded/firmware step travel is not an encoder
-measurement, and the default 20% center-to-stop geometry check does not bound
-the spread between accepted trials or prove precise physical repeatability.
+measurement. The default 20% center-to-stop geometry check and new fixed
+less-than-1.5 mm validation range check do not establish precise physical
+repeatability, correct-stop contact or absence of skipped steps.
 
 `test_motion_policy.py` adds offline coverage for relative motion proof at low
 speeds, preservation of legacy Beacon pressed-start behavior, generic
 `no_motion` failures, startup deadline/budget calculations, and rejection of
 plans above the fixed 3 mm nominal command budget before enabling/backoff.
+Additional fixtures cover read-only requested-axis preflight from an unhomed
+workflow, live limits lowered after configuration, invalid limits, zero and
+nonzero plugin caps, and rejection before workflow effects. Diagnostics include
+effective speed/acceleration and a lower speed ceiling: with default timing,
+50 mm/s needs about 3.233333 mm at live 1500 mm/s², compared with 2.65 mm at
+5000 mm/s². Repeated checks protect later preparation. Normal public G28 and
+its safe Z wrapper remain unchanged; these tests do not claim a workflow
+preflight can prevent that public wrapper's configured Z hop.
 Those checks establish software behavior only; no physical stop travel or
 end-to-end host/MCU latency was measured.
 

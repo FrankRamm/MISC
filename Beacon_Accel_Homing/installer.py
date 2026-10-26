@@ -362,6 +362,60 @@ def choose_sensor(graph, selected=None, existing=None):
     return graph.one(configured[0]).name
 
 
+def validate_homing_speeds(graph, args, family, existing):
+    """Read and validate every selected rail before staging config changes."""
+    if family != "beacon":
+        policy = load_motion_policy()
+        printer = graph.one("printer")
+        try:
+            velocity = float(printer.get("max_velocity", "nan"))
+            acceleration = float(printer.get("max_accel", "nan"))
+            homing_accel = float(existing.get("homing_accel", "5000")) if existing else 5000.0
+            age = float(existing.get("max_sample_age", "0.020")) if existing else 0.020
+            travel = float(existing.get("max_report_travel", "1.0")) if existing else 1.0
+            interval = float(existing.get("stream_interval", "0.005")) if existing else 0.005
+        except ValueError:
+            raise InstallError("Generic homing requires numeric printer velocity/acceleration and plugin motion-policy settings.")
+        if not all(math.isfinite(v) and v > 0 for v in (velocity, acceleration)) or not math.isfinite(homing_accel) or homing_accel < 0:
+            raise InstallError("Generic homing requires finite positive printer max_velocity/max_accel and nonnegative homing_accel.")
+        if homing_accel:
+            acceleration = min(acceleration, homing_accel)
+        if (not all(math.isfinite(v) for v in (age, travel, interval))
+                or not 0.005 <= age <= 0.050 or not 0.1 <= travel <= 2.0
+                or not 0.001 <= interval <= 0.020 or interval >= age):
+            raise InstallError("Generic settings require max_sample_age 0.005..0.050s, "
+                               "max_report_travel 0.1..2mm, stream_interval 0.001..0.020s "
+                               "and stream_interval < max_sample_age.")
+        cap = policy.motion_report_speed_limit(age, travel)
+    speeds = {}
+    for axis in args.axes:
+        rail = graph.one("stepper_" + axis)
+        try:
+            original_speed = float(rail.get("homing_speed", "5"))
+        except ValueError:
+            raise InstallError("%s homing_speed must be numeric. No files changed." % axis.upper())
+        speed = args.homing_speed if args.homing_speed is not None else original_speed
+        if not math.isfinite(speed) or speed <= 0:
+            raise InstallError("Homing speeds must be finite and positive. No files changed.")
+        effective = min(speed, velocity) if family != "beacon" else speed
+        if family != "beacon":
+            budget = policy.motion_startup_request_travel(effective, acceleration, age, interval)
+            if (effective > cap or not math.isfinite(budget)
+                    or budget > policy.STARTUP_REQUEST_TRAVEL_LIMIT):
+                setting = "configured homing_speed" if args.homing_speed is None else "requested --homing-speed"
+                raise InstallError(
+                    "%s %s %.12g mm/s (current configured homing_speed %.12g mm/s; "
+                    "effective speed %.12g mm/s, acceleration %.12g mm/s^2) exceeds generic "
+                    "policies: report-speed limit %.12g mm/s for %.12g s max_sample_age / "
+                    "%.12g mm max_report_travel; startup stop request needs %.12g mm of "
+                    "commanded travel (fixed %.1f mm limit). Homing speed is preserved by "
+                    "default; choose compatible settings explicitly. No files changed."
+                    % (axis.upper(), setting, speed, original_speed, effective, acceleration,
+                       cap, age, travel, budget, policy.STARTUP_REQUEST_TRAVEL_LIMIT))
+        speeds[axis] = rail, speed, effective
+    return speeds
+
+
 def make_plan(source, selected, args):
     source = canonical(source)
     for module in MODULES:
@@ -387,6 +441,7 @@ def make_plan(source, selected, args):
                for location in ("extras", "plugins")):
         raise InstallError("Configured [%s] has no installed driver in klippy/extras or klippy/plugins. "
                            "Install its normal driver first." % sensor)
+    speeds = validate_homing_speeds(graph, args, family, existing)
     changes, messages = {}, []
     if safe_z_home is not None:
         messages.append("Preserved [safe_z_home]. Supervised X/Y workflows verify its stock G28 "
@@ -406,71 +461,13 @@ def make_plan(source, selected, args):
         if not any(managed.match(pattern) for pattern in graph.include_patterns):
             main = graph.documents[selected["config"]]
             main.insertions.setdefault(main.active_end, []).append(main.newline + "[include " + MANAGED + "]" + main.newline + main.newline)
-    if family != "beacon":
-        policy = load_motion_policy()
-        printer = graph.one("printer")
-        try:
-            velocity = float(printer.get("max_velocity", "nan"))
-            acceleration = float(printer.get("max_accel", "nan"))
-            homing_accel = float(existing.get("homing_accel", "5000")) if existing else 5000.0
-        except ValueError:
-            raise InstallError("Generic homing requires numeric printer max_velocity/max_accel and plugin homing_accel.")
-        if not all(math.isfinite(v) and v > 0 for v in (velocity, acceleration)) or not math.isfinite(homing_accel) or homing_accel < 0:
-            raise InstallError("Generic homing requires finite positive printer max_velocity/max_accel and nonnegative homing_accel.")
-        if homing_accel:
-            acceleration = min(acceleration, homing_accel)
-        age = float(existing.get("max_sample_age", "0.020")) if existing else 0.020
-        travel = float(existing.get("max_report_travel", "1.0")) if existing else 1.0
-        interval = float(existing.get("stream_interval", "0.005")) if existing else 0.005
-        if (not all(math.isfinite(v) for v in (age, travel, interval))
-                or not 0.005 <= age <= 0.050 or not 0.1 <= travel <= 2.0
-                or not 0.001 <= interval <= 0.020 or interval >= age):
-            raise InstallError("Generic settings require max_sample_age 0.005..0.050s, "
-                               "max_report_travel 0.1..2mm, stream_interval 0.001..0.020s "
-                               "and stream_interval < max_sample_age.")
-        cap = min(50.0, travel / age)
-    for axis in args.axes:
-        rail = graph.one("stepper_" + axis)
+    for axis, (rail, speed, actual_speed) in speeds.items():
         rail.replace("endstop_pin", prefix + ":" + axis)
         rail.replace("homing_retract_dist", "0")
         for key in ("homing_accel", "min_home_dist"):
             rail.disable(key)
-        original_speed = float(rail.get("homing_speed", "5"))
-        speed = args.homing_speed if args.homing_speed is not None else original_speed
-        if not math.isfinite(speed) or speed <= 0:
-            raise InstallError("Homing speeds must be finite and positive.")
-        if family != "beacon":
-            effective = min(speed, velocity)
-            if args.homing_speed is not None and effective > cap:
-                raise InstallError("--homing-speed exceeds generic sample-age/travel limit (%.3g mm/s)." % cap)
-            chosen = min(effective, cap)
-            budget = policy.motion_startup_request_travel(chosen, acceleration, age, interval)
-            if not math.isfinite(budget):
-                raise InstallError("Configured velocity/acceleration cannot produce a finite startup travel budget.")
-            if budget > policy.STARTUP_REQUEST_TRAVEL_LIMIT:
-                if args.homing_speed is not None:
-                    raise InstallError("--homing-speed needs %.3g mm before the startup stop request, "
-                                       "exceeding the fixed %.1f mm policy at effective acceleration %.3g. "
-                                       "Choose a lower speed; no files changed." %
-                                       (budget, policy.STARTUP_REQUEST_TRAVEL_LIMIT, acceleration))
-                low, high = 0.0, chosen
-                for unused in range(64):
-                    middle = (low + high) / 2.0
-                    if policy.motion_startup_request_travel(middle, acceleration, age, interval) <= policy.STARTUP_REQUEST_TRAVEL_LIMIT - 0.000001:
-                        low = middle
-                    else:
-                        high = middle
-                chosen = low
-                if chosen <= 0:
-                    raise InstallError("Configured acceleration cannot produce a positive compatible homing speed.")
-            if chosen < effective:
-                speed = chosen
-                messages.append("Capped %s homing_speed %.6g -> %.6g mm/s for generic report/startup "
-                                "policies at %.6g mm/s²; this is not a certified stopping distance." %
-                                (axis.upper(), original_speed, speed, acceleration))
-        if args.homing_speed is not None or speed != original_speed:
+        if args.homing_speed is not None:
             rail.replace("homing_speed", "%.12g" % speed)
-        actual_speed = min(speed, velocity) if family != "beacon" else speed
         if actual_speed < 50:
             messages.append("%s speed %.3g mm/s may produce soft, indistinguishable impacts. "
                             "Supervised calibration is required." % (axis.upper(), actual_speed))
@@ -1005,7 +1002,8 @@ def arguments(argv=None):
     parser.add_argument("--klippy-socket", default=os.environ.get("KLIPPY_SOCKET"), help="read-only Klipper API socket (-a)")
     parser.add_argument("--accel-chip", help="full configured section, e.g. 'adxl345 toolhead'")
     parser.add_argument("--axes", default="x,y", help="x,y (default), x or y")
-    parser.add_argument("--homing-speed", type=float, help="explicit speed; generic cap still applies")
+    parser.add_argument("--homing-speed", type=float,
+                        help="explicitly replace selected homing speeds; default preserves configured values and rejects policy conflicts")
     parser.add_argument("--acknowledge-homing-override", action="store_true", help="you reviewed custom G28/homing_override behavior")
     parser.add_argument("--replace-existing-links", action="store_true", help="back up/replace plugin links from another source")
     parser.add_argument("--no-restart", action="store_true", help="install/update without automatic host-service restart; activate manually")

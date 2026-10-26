@@ -552,6 +552,27 @@ class BeaconAccelHoming:
             return self.reactor.NEVER
         return eventtime + 0.5
 
+    def preflight_motion_policy(self, axes, error=None):
+        """Check configured X/Y plans against live limits without any effects.
+
+        Workflow callers run this before their first motion. Rail-begin and
+        prepare() still revalidate because limits may change after preflight.
+        """
+        if self.backend is None:
+            return
+        if error is None:
+            error = self.printer.command_error
+        if self.toolhead is None:
+            raise error("accel_homing: printer is not connected")
+        for axis in axes:
+            if axis not in AXES:
+                continue
+            rail = self.rails_by_axis.get(axis)
+            if rail is None or axis not in self.endstops:
+                raise error("accel_homing: axis %s must use this module's accelerometer endstop"
+                            % axis.upper())
+            self.backend.validate_rail(rail.get_homing_info(), error)
+
     # Homing lifecycle
     def _handle_rails_begin(self, homing, rails):
         # Rails come from the homing call itself, so no kinematics or rail order

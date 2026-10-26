@@ -6,6 +6,7 @@ The operator confirms the initial center. Later automatic returns rely on a
 qualified center-to-stop home and remain an experimental physical heuristic.
 """
 import datetime
+from decimal import Decimal
 import json
 import logging
 import math
@@ -32,6 +33,7 @@ _SAFE_Z_G28 = _SafeZHoming.cmd_G28 if _SafeZHoming is not None else None
 
 AXES = {"x": 0, "y": 1}
 REQUIRED_SUCCESSES = 10
+REPEATABILITY_LIMIT_MM = 1.5
 MIN_TRAVEL = 10.0
 
 
@@ -177,6 +179,7 @@ class AccelHomingWorkflows:
         toolhead = self.owner.toolhead
         if toolhead is None:
             raise self._error("printer is not connected")
+        self.owner.preflight_motion_policy(axes, error=self.printer.command_error)
         kin = toolhead.get_kinematics()
         name = self.kinematics_name
         if name is None:
@@ -390,7 +393,8 @@ class AccelHomingWorkflows:
         self._require_unhomed_xy()
         self.session = {"mode": mode, "axis": axis, "state": "starting",
                         "run_id": uuid.uuid4().hex, "successes": 0, "attempts": 0,
-                        "candidate_qualified": False,
+                        "candidate_qualified": False, "candidate_attempt": None,
+                        "validation_records": [], "repeatability_spread_mm": None,
                         "records": [], "paths": [], "candidate": self.start_threshold,
                         "saved_thresholds": dict(self.owner.threshold_g),
                         "saved_back_off": self.owner.back_off_dist,
@@ -457,6 +461,11 @@ class AccelHomingWorkflows:
         record = dict(record)
         record["run_id"] = session["run_id"]
         record["workflow_attempt"] = session["attempts"]
+        record["workflow_threshold_g"] = (threshold if threshold is not None
+                                          else self.owner.threshold_g[axis])
+        record["workflow_phase"] = ("validation" if session["candidate_qualified"]
+                                    else "discovery") if session["mode"] == "calibration" \
+            else session["mode"]
         if len(capture.get("samples", ())) < 2 or capture.get("dropped", 0):
             raise self._error("homing capture is empty or incomplete; sensor data is not usable")
         previous = None
@@ -491,6 +500,13 @@ class AccelHomingWorkflows:
             return "fatal", "travel %.2f mm exceeds expected center travel %.2f mm" % (travel, expected)
         return "good", "qualified center-to-stop home"
 
+    @staticmethod
+    def _repeatability_spread(records):
+        travels = [record["travel_mm"] for record in records]
+        # Reported millimeter values have decimal precision. Subtract their
+        # decimal endpoints so an exact 1.5 mm range cannot round below it.
+        return float(Decimal(str(max(travels))) - Decimal(str(min(travels))))
+
     def _recenter(self, axis):
         # Called only after _quality accepted this exact axis's current home.
         if axis not in self.owner.toolhead.get_kinematics().get_status(
@@ -514,6 +530,9 @@ class AccelHomingWorkflows:
             if quality == "early":
                 session["successes"] = 0
                 session["candidate_qualified"] = False
+                session["candidate_attempt"] = None
+                session["validation_records"] = []
+                session["repeatability_spread_mm"] = None
                 candidate = round(session["candidate"] + self.threshold_step, 6)
                 if candidate > self._threshold_limit() or session["attempts"] >= self.max_attempts:
                     raise self._error(reason + "; calibration threshold/attempt ceiling reached")
@@ -522,27 +541,89 @@ class AccelHomingWorkflows:
                 return
             if not session["candidate_qualified"]:
                 session["candidate_qualified"] = True
-                self._info("%s %.2f g candidate qualified; starting ten repeat validation homes" % (
-                    axis.upper(), session["candidate"]))
+                session["candidate_attempt"] = record["workflow_attempt"]
+                self._info("%s %.2f g candidate qualified; starting ten repeat validation homes "
+                           "with commanded travel spread (max-min) strictly < %.2f mm" % (
+                               axis.upper(), session["candidate"], REPEATABILITY_LIMIT_MM))
                 self._recenter(axis)
                 continue
-            session["successes"] += 1
-            self._info("%s calibration %.2f g: %d/10 qualified homes" % (
-                axis.upper(), session["candidate"], session["successes"]))
+            session["validation_records"].append(record)
+            session["successes"] = len(session["validation_records"])
+            spread = session["repeatability_spread_mm"] = self._repeatability_spread(
+                session["validation_records"])
+            if spread >= REPEATABILITY_LIMIT_MM:
+                raise self._error(
+                    "%s calibration repeatability spread %s mm across %d/10 validation homes "
+                    "must be strictly < %.2f mm; calibration aborted without raising the threshold; "
+                    "no automatic move follows this result; manually recenter" % (
+                        axis.upper(), spread, session["successes"], REPEATABILITY_LIMIT_MM))
+            self._info("%s calibration %.2f g: %d/10 qualified homes; commanded travel spread "
+                       "%s mm (must be strictly < %.2f mm)" % (
+                           axis.upper(), session["candidate"], session["successes"],
+                           spread, REPEATABILITY_LIMIT_MM))
             if session["successes"] < REQUIRED_SUCCESSES:
                 self._recenter(axis)
         self._save_model()
 
+    def _qualified_validation_records(self):
+        """Recheck the entire current-candidate window before any config writes."""
+        session = self.session
+        message = ("cannot save calibration without a qualified discovery and ten distinct "
+                   "current-candidate validation homes with commanded travel spread "
+                   "strictly < %.2f mm" % REPEATABILITY_LIMIT_MM)
+        if not isinstance(session, dict):
+            raise self._error(message)
+        axis, threshold = session.get("axis"), session.get("candidate")
+        candidate_attempt = session.get("candidate_attempt")
+        records, qualified = session.get("records"), session.get("validation_records")
+        if session.get("mode") != "calibration" or session.get("state") != "running" \
+                or not isinstance(axis, str) or axis not in AXES \
+                or session.get("candidate_qualified") is not True \
+                or session.get("successes") != REQUIRED_SUCCESSES \
+                or not isinstance(threshold, (int, float)) or isinstance(threshold, bool) \
+                or not math.isfinite(threshold) or not 0.5 <= threshold <= self._threshold_limit() \
+                or type(candidate_attempt) is not int or candidate_attempt < 1 \
+                or type(session.get("attempts")) is not int \
+                or session.get("attempts") != candidate_attempt + REQUIRED_SUCCESSES \
+                or not isinstance(records, list) or len(records) != session["attempts"] \
+                or not isinstance(qualified, list) or len(qualified) != REQUIRED_SUCCESSES \
+                or not isinstance(session.get("run_id"), str) or not session["run_id"] \
+                or type(session.get("save_config")) is not bool:
+            raise self._error(message)
+        discovery = records[candidate_attempt - 1]
+        window = [discovery] + qualified
+        if len({id(record) for record in window}) != REQUIRED_SUCCESSES + 1 \
+                or any(actual is not expected for actual, expected in
+                       zip(qualified, records[-REQUIRED_SUCCESSES:])):
+            raise self._error(message)
+        for index, record in enumerate(window):
+            if not isinstance(record, dict) or record.get("axis") != axis \
+                    or record.get("run_id") != session["run_id"] \
+                    or type(record.get("workflow_attempt")) is not int \
+                    or record.get("workflow_attempt") != candidate_attempt + index \
+                    or record.get("workflow_threshold_g") != threshold \
+                    or record.get("workflow_phase") != ("discovery" if index == 0 else "validation") \
+                    or self._quality(axis, record)[0] != "good":
+                raise self._error(message)
+        if self._repeatability_spread(qualified) >= REPEATABILITY_LIMIT_MM:
+            raise self._error(message)
+        return qualified
+
     def _save_model(self):
+        qualified = self._qualified_validation_records()
         session = self.session
         axis, threshold = session["axis"], session["candidate"]
-        qualified = session["records"][-REQUIRED_SUCCESSES:]
+        minimum = min(r["travel_mm"] for r in qualified)
+        maximum = max(r["travel_mm"] for r in qualified)
+        spread = self._repeatability_spread(qualified)
         metadata = {"run_id": session["run_id"], **self._model_context(axis),
                     "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "expected_center_travel_mm": self._geometry(axis)[1],
                     "travel_tolerance_fraction": self.travel_tolerance,
-                    "min_commanded_travel_mm": min(r["travel_mm"] for r in qualified),
-                    "max_commanded_travel_mm": max(r["travel_mm"] for r in qualified),
+                    "min_commanded_travel_mm": minimum,
+                    "max_commanded_travel_mm": maximum,
+                    "repeatability_spread_mm": spread,
+                    "repeatability_limit_mm": REPEATABILITY_LIMIT_MM,
                     "onset_g": [r.get("onset_g") for r in qualified],
                     "impact_peak_g": [r.get("impact_peak_g") for r in qualified],
                     "physical_position_verified": False}
@@ -554,11 +635,14 @@ class AccelHomingWorkflows:
         configfile.set(self.model_section, axis + "_metadata", encoded_metadata)
         result = {"result": "calibrated", "axis": axis, "threshold_g": threshold,
                   "successes": REQUIRED_SUCCESSES, "model": self.model_name,
-                  "run_id": session["run_id"], "save_config": session["save_config"]}
+                  "run_id": session["run_id"], "save_config": session["save_config"],
+                  "repeatability_spread_mm": spread,
+                  "repeatability_limit_mm": REPEATABILITY_LIMIT_MM}
         save = session["save_config"]
         self._finish(result)
-        self._info("%s model %s calibrated at %.2f g after ten qualified homes. %s" % (
-            axis.upper(), self.model_name, threshold,
+        self._info("%s model %s calibrated at %.2f g after ten qualified homes with commanded "
+                   "travel spread %s mm < %.2f mm. %s" % (
+            axis.upper(), self.model_name, threshold, spread, REPEATABILITY_LIMIT_MM,
             "Explicit manual threshold overrides remain active." if axis in self.manual_axes
             else "The saved model supplies this axis threshold after restart."))
         if save:
@@ -667,7 +751,10 @@ class AccelHomingWorkflows:
         session = self.session
         active = None if session is None else {
             key: session.get(key) for key in ("mode", "state", "axis", "candidate", "successes",
-                                             "candidate_qualified", "attempts", "run_id", "expires")}
+                                             "candidate_qualified", "attempts", "run_id", "expires",
+                                             "repeatability_spread_mm")}
+        if active is not None:
+            active["repeatability_limit_mm"] = REPEATABILITY_LIMIT_MM
         return {"model": self.model_name, "manual_threshold_overrides": sorted(self.manual_axes),
                 "active": active, "last_result": self.last_result,
                 "charts_directory": self.charts_directory}

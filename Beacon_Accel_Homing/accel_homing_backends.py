@@ -17,6 +17,12 @@ CLOCK_FREQ = 1000000.0
 STARTUP_REQUEST_TRAVEL_LIMIT = 3.0
 
 
+def motion_report_speed_limit(max_age, report_travel):
+    # Report freshness limits commanded travel; startup proof independently
+    # enforces its fixed 3 mm budget at the actual speed and acceleration.
+    return report_travel / max_age
+
+
 def motion_proof_window(speed):
     return max(0.004, min(0.050, 0.050 / speed))
 
@@ -28,8 +34,11 @@ def motion_startup_timeout(speed, accel, max_age, interval):
 
 
 def motion_startup_request_travel(speed, accel, max_age, interval):
-    timeout = motion_startup_timeout(speed, accel, max_age, interval)
-    return speed * (timeout + 0.003) - 0.5 * speed * speed / accel
+    # The same trapezoid distance as speed * (timeout + .003) - v**2/(2a),
+    # without subtracting two unbounded ramp terms at very small acceleration.
+    margin = (0.018 + max_age
+              + max(0.010, 2.0 * interval, motion_proof_window(speed)))
+    return 0.5 * speed * (speed / accel) + speed * margin
 
 
 SENSOR_TYPES = ("beacon", "adxl345", "lis2dw", "lis3dh", "mpu9250", "icm20948")
@@ -113,7 +122,7 @@ class ConfiguredAccelBackend:
                               ("min_sample_rate", self.min_rate), ("max_report_travel", self.report_travel)):
             if not math.isfinite(value):
                 raise config.error("accel_homing: %s must be finite" % option)
-        self.max_speed = min(50.0, self.report_travel / self.max_age)
+        self.max_speed = motion_report_speed_limit(self.max_age, self.report_travel)
         self.full_scale = config.getfloat(
             "sensor_range", DRIVER_RANGES.get(self.name.split()[0], 0.0),
             minval=0.0, maxval=1000.0)
@@ -330,6 +339,8 @@ class ConfiguredAccelBackend:
         if not all(math.isfinite(speed) and speed > 0 for speed in speeds):
             raise error("accel_homing: homing speeds must be finite and positive")
         velocity, accel = self.owner.toolhead.get_max_velocity()
+        if not all(math.isfinite(value) and value > 0 for value in (velocity, accel)):
+            raise error("accel_homing: toolhead max_velocity/max_accel must be finite and positive")
         if self.owner.homing_accel:
             accel = min(accel, self.owner.homing_accel)
         speeds = [min(speed, velocity) for speed in speeds]
@@ -349,16 +360,36 @@ class ConfiguredAccelBackend:
     def motion_startup_request_travel(self, speed, accel):
         return motion_startup_request_travel(speed, accel, self.max_age, self.interval)
 
+    def motion_startup_speed_limit(self, accel):
+        # Distance is strictly increasing for positive speed, including the
+        # speed-dependent proof window. Bound the search by the acceleration
+        # term so even very small positive accelerations keep useful precision.
+        low = 0.0
+        high = min(self.max_speed, math.sqrt(2.0 * STARTUP_REQUEST_TRAVEL_LIMIT)
+                   * math.sqrt(accel))
+        for unused in range(64):
+            middle = (low + high) * 0.5
+            travel = self.motion_startup_request_travel(middle, accel)
+            if math.isfinite(travel) and travel <= STARTUP_REQUEST_TRAVEL_LIMIT - 0.000001:
+                low = middle
+            else:
+                high = middle
+        # Round down to six significant digits for an actionable diagnostic.
+        unit = 10.0 ** (math.floor(math.log10(low)) - 5)
+        return math.floor(low / unit) * unit
+
     def validate_motion_plan(self, speed, accel, error):
         if not all(math.isfinite(value) and value > 0 for value in (speed, accel)):
             raise error("accel_homing: effective homing speed/acceleration must be finite and positive")
         travel = self.motion_startup_request_travel(speed, accel)
-        if travel > STARTUP_REQUEST_TRAVEL_LIMIT + 0.000001:
+        if not math.isfinite(travel) or travel > STARTUP_REQUEST_TRAVEL_LIMIT + 0.000001:
+            maximum = self.motion_startup_speed_limit(accel)
             raise error("accel_homing: startup motion proof needs %.2f mm of commanded travel"
-                        " before the host stop request, above the %.1f mm policy; lower"
-                        " homing_speed or increase the supported homing acceleration. This"
+                        " before the host stop request, above the %.1f mm policy at effective"
+                        " homing speed %.6g mm/s and acceleration %.6g mm/s^2; lower"
+                        " homing_speed to at most %.6g mm/s at this acceleration. This"
                         " is not a guarantee of physical stopping travel"
-                        % (travel, STARTUP_REQUEST_TRAVEL_LIMIT))
+                        % (travel, STARTUP_REQUEST_TRAVEL_LIMIT, speed, accel, maximum))
 
     def get_status(self):
         status = {"type": self.kind, "sensor": self.name,
