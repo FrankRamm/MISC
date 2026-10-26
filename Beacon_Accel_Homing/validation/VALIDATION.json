@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for direct workflow commands and manual code-activation guidance",
-  "timestamp_utc": "2026-10-26T12:55:16.209072+00:00",
-  "source_base_commit": "6e20f6ec95946921afc0bf7ade480ee0b61ed542",
+  "stage": "completed offline validation for 1 g calibration and automatic host-service activation",
+  "timestamp_utc": "2026-10-26T13:25:44.290374+00:00",
+  "source_base_commit": "0c8496a45163bf3fd88d656e9b12af013c76211f",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 292,
-  "passed": 291,
+  "tests_run": 308,
+  "passed": 307,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,18 +14,18 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 3.653,
+  "elapsed_seconds": 4.541,
   "test_returncode": 0,
-  "installer_tests": 77,
-  "workflow_tests": 60,
+  "installer_tests": 92,
+  "workflow_tests": 61,
   "module_tests": {
     "test_backends": 48,
-    "test_installer": 77,
+    "test_installer": 92,
     "test_motion_policy": 10,
     "test_session": 52,
     "test_single_touch": 16,
     "test_trigger": 29,
-    "test_workflows": 60
+    "test_workflows": 61
   },
   "preparation_fixture_tests": {
     "test_backends.GenericPreparationTest": 6,
@@ -40,7 +40,7 @@
   "command": "python -m unittest discover -s Beacon_Accel_Homing/tests -v",
   "log": "tests.txt",
   "shell_syntax_checks": [],
-  "shell_syntax_checks_note": "Not repeated: shell entry-point contents exactly match the source base commit.",
+  "shell_syntax_checks_note": "Not repeated: install.sh, bootstrap.sh and uninstall.sh actual on-disk bytes exactly match the published source base commit, including the locally untracked uninstall.sh.",
   "shell_file_content_checks": [
     {
       "file": "install.sh",
@@ -60,18 +60,32 @@
   ],
   "python_38_grammar_checks": {
     "files": [
+      "accel_homing_model.py",
       "accel_homing_workflows.py",
       "installer.py",
+      "tests/test_installer.py",
+      "tests/test_session.py",
+      "tests/test_single_touch.py",
+      "tests/test_trigger.py",
       "tests/test_workflows.py"
+    ],
+    "line_ending_only_files": [
+      "tests/test_single_touch.py",
+      "tests/test_trigger.py"
     ],
     "passed": true,
     "errors": [],
     "actual_python_38_runtime_tested": false
   },
   "validated_python_sha256": {
-    "accel_homing_workflows.py": "ed016a2cd7dde19c398d6d621168075b3b12229614a29f544b2881709cd61b7b",
-    "installer.py": "26507d0abcc737827d48301ef492b0702e72dc200a68f5095d69079ecd632da5",
-    "tests/test_workflows.py": "1704b86cb1291b682c02210edb41ddaca8f67006b8504e12d6e9bb91a91ad06c"
+    "accel_homing_model.py": "ae5d816868787dc303b783bb302a07efd32b08f3baad4f6acc3e849ceb6afa46",
+    "accel_homing_workflows.py": "275e846dc732409c954897a623aa8e2ee67507da5cb32f33b7cb25b55d6276b1",
+    "installer.py": "2d6aec46b1cea15c66ba80f8a3f48e01c90a5e560b8fa1dae7ad70007d1b41e3",
+    "tests/test_installer.py": "16d826fab9e0ee54c4d747607be2314d0cd2734b71e7013cf692c2631a71c441",
+    "tests/test_session.py": "6b430edf1506b7a84c8da28316d37860a75585ac85fbcfe3022ecb548da84d5b",
+    "tests/test_single_touch.py": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
+    "tests/test_trigger.py": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
+    "tests/test_workflows.py": "915e3044bfe27c455d7611791a47a62a5a2381f93455dd78a4fcd22658f50778"
   },
   "native_linux_integration_tested": false,
   "upstream_klipper_kalico_runtime_integration_tested": false,
@@ -88,18 +102,28 @@
     "No live Linux systemd or Unix-socket integration run.",
     "Hosted GitHub download validation is separate; this report uses mocked offline downloads.",
     "Python 3.8 grammar parsing is not a Python 3.8 runtime compatibility test.",
-    "Host-process restart guidance follows upstream source inspection; no service restart or live Python module reload was performed."
+    "Automatic host-service activation uses mocked process/systemd/privilege fixtures; no real service restart or live Python module reload was performed.",
+    "The postrestart process check does not prove Klipper Ready state, module behavior, or hardware correctness; the final idle check cannot atomically lock other clients out."
   ],
-  "git_diff_check_base": "6e20f6ec95946921afc0bf7ade480ee0b61ed542",
+  "git_diff_check_base": "0c8496a45163bf3fd88d656e9b12af013c76211f",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
-  "process_elapsed_seconds": 3.909,
-  "previous_validation_timestamp_utc": "2026-10-26T12:43:10.187729+00:00",
-  "validation_reason": "Final run after user-log update handoff correction and installer host-process restart-advice changes.",
+  "process_elapsed_seconds": 5.522,
+  "previous_validation_timestamp_utc": "2026-10-26T12:55:16.209072+00:00",
+  "validation_reason": "Final combined run after reviewer clearance for 1 g calibration/model acceptance and automatic selected-host-service activation.",
   "host_service_restart_tested": false,
-  "live_python_module_reload_tested": false
+  "live_python_module_reload_tested": false,
+  "automatic_restart_fixture_tests": 15,
+  "calibration_start_default_g": 1.0,
+  "calibration_start_minimum_g": 1.0,
+  "calibration_first_retry_default_g": 1.5,
+  "saved_model_minimum_g": 1.0,
+  "manual_threshold_range_g": [
+    3.0,
+    15.0
+  ]
 }
