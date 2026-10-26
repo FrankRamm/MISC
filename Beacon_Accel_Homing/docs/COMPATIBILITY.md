@@ -232,6 +232,33 @@ the instantaneous lower-bound comparison remains available. Automatic impact
 direction likewise needs a signed velocity interval entirely beyond +30 or
 -30 mm/s; uncertain drift keeps detection bidirectional.
 
+Expanded native references also have an additional interval proof anchored
+to the first commanded step found in recorded step history. Queued homing
+startup can put stationary sensor samples between arming and those steps;
+the added proof does not integrate that entire earlier stationary interval.
+The step epoch is established on the reactor thread, without querying
+steppers from the sensor callback, with a 50 microsecond search precision.
+It describes commanded steps, not an encoder measurement of motor movement.
+
+A candidate sensor interval starts within 15 ms before or after that epoch,
+never before arming. It ends no later than the epoch plus the effective
+acceleration-ramp duration (`speed / acceleration`), 15 ms and one sample,
+and never after the original startup deadline. Its coherent X/Y/Z samples
+use the same interval and observed noise envelope. The conservative lower
+velocity must reach half the full effective speed, and the usual lagged
+commanded-history check must still qualify. Sample gaps, sensor faults and
+bounded-history overflow cannot qualify this additional proof. The history
+holds at most 4096 prefix entries, including the initial entry. It never
+silently evicts entries; overflow requests a host stop with `proof_overflow`.
+Each watchdog callback shares a budget of 1024 same-window comparisons, even
+when it checks proof more than once. Step-history query errors prevent
+initial proof, including use of a cached full-arm peak.
+
+The ramp duration uses planned effective speed and acceleration. A broader
+physical acceleration response can still leave too little evidence to
+qualify; the original deadline then applies without changing thresholds,
+speed or timeout. This is not general qualification for every ramp shape.
+
 Already-pressed detection uses the **current upper velocity bound**, rather
 than treating a small lower bound as proof that the toolhead is stationary.
 If uncertainty prevents a valid decision and no raw impact occurs, a finite
@@ -247,6 +274,18 @@ post-arm sample must be no older than `stream_timeout`, and their newest
 sample no more than 5 ms in the future, before proof or trigger dispatch.
 Missing, stale, invalid or discontinuous data cannot establish initial motion
 proof on this path. A later gap does not revoke already established motion.
+
+Expanded native results retain a bounded `motion_proof` summary, visible in STATUS
+under `last.x` or `last.y` and in a short console line. It records the relevant
+sensor/step timing, motion bounds and proof eligibility so a later failure can
+be inspected after cleanup. Fields include `first_step_after_arm_ms`,
+`first_sample_after_arm_ms`, `lower_speed_mm_s`, `step_epoch_peak_mm_s`,
+`command_eligible` and `request_after_arm_ms`, plus gap/overflow flags and
+bounded-history counts. `evaluated_sample_after_arm_ms` identifies the
+snapshot used for the bounds; `sample_after_arm_ms` can identify a newer
+sample. Effective speed and acceleration are planned values, not measurements.
+The summary does not retain raw sample arrays or establish that every field
+failure has the same cause.
 
 Raw baseline-relative impact samples and the configured threshold remain
 unchanged. The first valid impact after arming is eligible, including an
