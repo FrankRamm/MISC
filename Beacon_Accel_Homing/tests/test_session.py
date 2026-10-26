@@ -359,7 +359,7 @@ class StatusTest(unittest.TestCase):
         obj.last["x"]["impact_peak_g"] = 12.0
         self.assertEqual(status["last"]["x"]["impact_peak_g"], 10.0)
         self.assertEqual(set(status), {"threshold_g", "impact_sign", "homing_accel", "back_off_dist",
-                                       "homing", "last"})
+                                       "homing", "last", "sensor", "backend", "workflows"})
 
 
 if __name__ == "__main__":

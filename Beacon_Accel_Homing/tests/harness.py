@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent / "beacon_accel_homing.py"
+sys.path.insert(0, str(PLUGIN.parent))
 MG_PER_COUNT_16G = 7.8125     # Beacon RevH 16 g scale
 CLIP_COUNTS = 2047            # BEACON_ACCEL_BITS 12
 BEACON_HZ = 1000.0            # fake Beacon clock: 1 tick per ms
@@ -121,18 +122,23 @@ class FakeReactor:
 class FakeConfig:
     error = ConfigError
 
-    def __init__(self, printer, options, sections=("beacon",)):
+    def __init__(self, printer, options, sections=("beacon",), name="beacon_accel_homing"):
         self.printer, self.options, self.sections = printer, dict(options), sections
+        self.name = name
         self.deprecated = []
 
     def get_printer(self):
         return self.printer
 
     def get_name(self):
-        return "beacon_accel_homing"
+        return self.name
 
     def has_section(self, name):
         return name in self.sections
+
+    def get_prefix_sections(self, prefix):
+        return [types.SimpleNamespace(get_name=lambda name=name: name)
+                for name in self.sections if name == prefix or name.startswith(prefix + " ")]
 
     def deprecate(self, option):
         self.deprecated.append(option)
@@ -232,9 +238,14 @@ class FakePrinter:
             "mcu": types.SimpleNamespace(estimated_print_time=lambda t: t),
             "pins": types.SimpleNamespace(register_chip=self.chips.__setitem__),
             "gcode": types.SimpleNamespace(
-                register_command=lambda name, fn, desc=None: self.commands.__setitem__(name, fn),
+                register_command=self.register_command,
                 run_script_from_command=self.scripts.append),
         }
+
+    def register_command(self, name, callback, desc=None):
+        if name in self.commands:
+            raise ConfigError("gcode command %s already registered" % name)
+        self.commands[name] = callback
 
     def get_reactor(self):
         return self.reactor
