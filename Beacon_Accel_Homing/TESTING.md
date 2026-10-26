@@ -1,6 +1,6 @@
 # Offline verification
 
-All verification for this rewrite uses synthetic Klipper objects, fake sensor
+All recorded verification uses synthetic Klipper objects, fake sensor
 batches, temporary config files and mocked status/download responses. No
 printer connection, SSH session, deployment, service restart, physical home,
 calibration or hardware measurement was performed.
@@ -33,15 +33,15 @@ Focused motor-enable and fresh-reference fixtures, run from
 python -m unittest test_session.EnablePreparationTest test_backends.GenericPreparationTest -v
 ```
 
-The recorded combined run includes **131 installer/bootstrap/uninstall tests:
-130 passed and one real POSIX symlink test was skipped** because the Windows
+The recorded combined run includes **133 installer/bootstrap/uninstall tests:
+132 passed and one real POSIX symlink test was skipped** because the Windows
 host does not permit symlink creation. Temporary regular-file fixtures cover
 installation, config idempotence, backup/rollback, full-history restore,
 failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
-claiming a host integration test. Shell entry points are unchanged by this
-travel-budget change, so their syntax checks were not repeated. No native
+claiming a host integration test. All three shell entry points are byte-identical to the source base
+`923a0845c74fe0e1f77e55f641ccd73095d3f356`, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -57,7 +57,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The combined offline verification run discovered **414 tests: 413 passed,
+The final combined offline verification run discovered **427 tests: 426 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -158,13 +158,38 @@ Save-and-reload fixtures run the real named-model loader for both X and Y,
 including a clean 0.5 g calibration and a 1.0 g calibration after an early trigger.
 They check that the saved threshold and ten successes survive restart loading,
 with the same sensor/geometry checks and no extra homing request. Both axes
-reject thresholds below 0.5 g and nonfinite values; previous models at 1 g and
-2 g remain accepted. Manual threshold and temporary SET limits remain 3–15 g.
+reject saved-model thresholds below 0.5 g and nonfinite values; previous models
+at 1 g and 2 g remain accepted. Calibration/model bounds remain 0.5–15 g.
+Manual configuration and temporary SET commands accept finite positive values
+without a fixed 3 g minimum or 15 g maximum; known sensor range remains limited
+to 80% of full-scale and the actual session scale is rechecked before arming.
 The `SAVE_CONFIG=1` default retains automatic write/restart dispatch.
 `SAVE_CONFIG=0` fixtures check model staging without write/restart dispatch
 and restoration of the original active thresholds; saving and reloading are
 still required to activate that model. All save/restart operations in these
 fixtures are simulated.
+
+Manual-threshold fixtures add **11 tests** in
+`test_manual_thresholds.ManualThresholdRangeTests`, with backend, current/legacy
+section, X/Y, shared-fallback and both SET-command alias subcases. They accept
+0.5 g and smaller positive values, including 0.001 g and the minimum positive
+IEEE-754 double, and values above 15 g when the actual sensor range permits.
+They reject zero, negative and nonfinite values; accept exactly 80% of a known
+range and reject the immediately following representable value; recheck a
+narrower active Beacon stream for SET and before arming; and reject raw-limit
+overflow/underflow before dispatch without a new decimal floor. Unknown native
+Beacon clip ranges keep their existing behavior. Manual SET/status feedback
+retains 0.001 g without displaying zero. Two installer fixtures preserve
+existing shared/X/Y values below 3 g through initial installation and update
+in either section. The next-float fixture uses portable struct operations;
+Python 3.8 runtime compatibility was not exercised.
+
+The recorded run used CPython 3.13.5 on Windows: **427 tests in 6.837 seconds**.
+The full UTF-8 unittest output is retained in `validation/tests.txt`; subprocess
+text decoding normalized CRLF to LF before storage. The JSON report hashes the
+exact stored log and all 18 Python sources. The package inventory contains
+**33 files**, with **22 immutable bootstrap payload files**; no private user log
+or raw hardware samples are included.
 
 Motor-enable and fresh-reference checks include **26 tests** in
 `test_session.EnablePreparationTest` (16) and
@@ -305,7 +330,7 @@ engineering ranges do not certify hardware safety. No current printer
 settings were changed and no private user log or raw measurements were
 included in this package.
 
-The changed production and test Python files listed in
+All **18 production and test Python files** listed in
 `validation/VALIDATION.json` passed Python 3.8
 grammar parsing on the current Python 3.13 host. No Python 3.8 runtime was
 executed; syntax parsing alone does not establish complete runtime compatibility.

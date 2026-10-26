@@ -66,6 +66,14 @@ FAILURES = {
 }
 
 
+def validate_threshold(value, name, error, full_scale=None):
+    if not math.isfinite(value) or value <= 0.0:
+        raise error("accel_homing: %s must be finite and greater than 0 g" % name)
+    if full_scale is not None and value > 0.8 * full_scale:
+        raise error("accel_homing: %s must be at most %.12g g (80%% of the"
+                    " accelerometer range %.12g g)" % (name, 0.8 * full_scale, full_scale))
+
+
 class QuietReference:
     """Constant-size stationary-window statistics, protected by the owner lock."""
 
@@ -323,9 +331,11 @@ class BeaconAccelHoming:
         self.beacon_name = self.sensor_name
         if config.get("mcu", None) is not None:
             config.deprecate("mcu")  # the stepper MCU now comes from the steppers
-        threshold = config.getfloat("threshold", 8.0, minval=3.0, maxval=15.0)
-        self.threshold_g = {a: config.getfloat("%s_threshold" % a, threshold, minval=3.0, maxval=15.0)
-                            for a in AXES}
+        threshold = config.getfloat("threshold", 8.0)
+        self.threshold_g = {a: config.getfloat("%s_threshold" % a, threshold) for a in AXES}
+        validate_threshold(threshold, "threshold", config.error)
+        for axis, value in self.threshold_g.items():
+            validate_threshold(value, axis + "_threshold", config.error)
         self.impact_sign = {a: config.getint("%s_impact_sign" % a, 0, minval=-1, maxval=1)
                             for a in AXES}
         self.homing_accel = config.getfloat("homing_accel", 5000.0, minval=0.0)
@@ -339,13 +349,12 @@ class BeaconAccelHoming:
         self.stream_timeout = config.getfloat("stream_timeout", 0.05, minval=0.01, maxval=0.5)
         self.travel_margin = config.getfloat("travel_margin", 1.1, minval=1.0, maxval=2.0)
         self.watchdog_margin = config.getfloat("watchdog_margin", 0.15, minval=0.0, maxval=2.0)
-        scalar_options = {"threshold": threshold, "homing_accel": self.homing_accel,
+        scalar_options = {"homing_accel": self.homing_accel,
                           "back_off_dist": self.back_off_dist, "baseline_time": self.baseline_time,
                           "baseline_noise_floor": self.baseline_noise_floor,
                           "enable_settle_time": self.enable_settle_time,
                           "stream_timeout": self.stream_timeout, "travel_margin": self.travel_margin,
                           "watchdog_margin": self.watchdog_margin}
-        scalar_options.update((axis + "_threshold", value) for axis, value in self.threshold_g.items())
         for option, value in scalar_options.items():
             if not math.isfinite(value):
                 raise config.error("accel_homing: %s must be finite" % option)
@@ -353,10 +362,7 @@ class BeaconAccelHoming:
         self.sensor = self.printer.load_object(config, self.sensor_name)
         self.backend = None if self.is_beacon else ConfiguredAccelBackend(self, config, self.sensor)
         if self.backend is not None and config.get("threshold", None) is None:
-            default_threshold = max(3.0, min(8.0, self.backend.full_scale * 0.5))
-            if self.backend.full_scale * 0.8 < 3.0:
-                raise config.error("accel_homing: configured sensor range is too small"
-                                   " for the minimum 3 g homing threshold")
+            default_threshold = min(8.0, self.backend.full_scale * 0.5)
             for axis in AXES:
                 if config.get(axis + "_threshold", None) is None:
                     self.threshold_g[axis] = default_threshold
@@ -448,10 +454,8 @@ class BeaconAccelHoming:
         self.impact_window = int(self.sensor_clock.seconds_to_clock(IMPACT_WINDOW))
         self.beacon_freq = float(self.sensor_clock.seconds_to_clock(1.0))
         full_scale = self._full_scale_g(self.scale)
-        if full_scale is not None and max(self.threshold_g.values()) > 0.8 * full_scale:
-            raise self.printer.config_error(
-                "beacon_accel_homing: threshold must stay below %.1f g, the"
-                " accelerometer range is %.0f g" % (0.8 * full_scale, full_scale))
+        for axis, value in self.threshold_g.items():
+            validate_threshold(value, axis + "_threshold", self.printer.config_error, full_scale)
         for endstop in self.endstops.values():
             endstop.setup_trigger(self._trigger_command)
         if self.homing_accel and not any(hasattr(self.toolhead, n) for n in (
@@ -994,9 +998,8 @@ class BeaconAccelHoming:
         self.passes += 1
         info = rail.get_homing_info()
         max_velocity, accel = self.toolhead.get_max_velocity()
-        if (not all(math.isfinite(value) and value > 0 for value in
-                    (max_velocity, accel, info.speed, info.second_homing_speed))
-                or not math.isfinite(self.threshold_g[axis])):
+        if not all(math.isfinite(value) and value > 0 for value in
+                   (max_velocity, accel, info.speed, info.second_homing_speed)):
             raise self.printer.command_error("accel_homing: homing speed, acceleration"
                                              " and threshold must be finite positive values")
         if self.passes == 1:
@@ -1015,10 +1018,16 @@ class BeaconAccelHoming:
             raise self.printer.command_error("accel_homing: derived homing deadline must be finite")
         count_g = self.session_scale["scale"] / 1000.0
         threshold = self.threshold_g[axis]
-        if self.full_scale_g is not None and threshold > 0.8 * self.full_scale_g:
-            raise self.printer.command_error(
-                "beacon_accel_homing: the accelerometer range of %.0f g is too small for a"
-                " %.1f g threshold" % (self.full_scale_g, threshold))
+        validate_threshold(threshold, axis + "_threshold", self.printer.command_error,
+                           self.full_scale_g)
+        if not math.isfinite(count_g) or count_g <= 0.0:
+            raise self.printer.command_error("accel_homing: active accelerometer scale"
+                                             " must be finite and positive")
+        limit_raw = threshold / count_g
+        if not math.isfinite(limit_raw) or limit_raw <= 0.0:
+            raise self.printer.command_error("accel_homing: %s_threshold cannot produce a finite"
+                                             " positive trigger limit at the active accelerometer scale"
+                                             % axis)
         index, map_sign = self._raw_axis(axis)
         direction = self.impact_sign[axis]
         if self.sensor_fault is not None:
@@ -1044,7 +1053,7 @@ class BeaconAccelHoming:
         attempt = Attempt(endstop, self.passes, print_time,
                           beacon_mcu.print_time_to_clock(print_time) & 0xFFFFFFFF,
                           deadline, beacon_mcu.print_time_to_clock(deadline) & 0xFFFFFFFF,
-                          index, map_sign, direction, threshold / count_g, count_g)
+                          index, map_sign, direction, limit_raw, count_g)
         attempt.steppers = endstop.get_steppers()
         attempt.bases = bases
         attempt.proof_noise = proof_noise
@@ -1573,7 +1582,7 @@ class BeaconAccelHoming:
 
     def cmd_STATUS(self, gcmd):
         kind = "beacon_raw" if self.backend is None else self.backend.kind
-        gcmd.respond_info("accel_homing: sensor %s, backend %s, X %.2f g, Y %.2f g"
+        gcmd.respond_info("accel_homing: sensor %s, backend %s, X %.12g g, Y %.12g g"
                           % (self.sensor_name, kind, self.threshold_g["x"], self.threshold_g["y"]))
         if self.backend is not None:
             gcmd.respond_info("accel_homing: requested report interval %.4f s, sample-age limit"
@@ -1599,19 +1608,16 @@ class BeaconAccelHoming:
         axis = gcmd.get("AXIS").lower()
         if axis not in AXES:
             raise gcmd.error("AXIS must be X or Y")
-        threshold = gcmd.get_float("THRESHOLD", None, minval=3.0, maxval=15.0)
+        threshold = gcmd.get_float("THRESHOLD", None)
         sign = gcmd.get_int("IMPACT_SIGN", None, minval=-1, maxval=1)
         if threshold is not None:
-            if not math.isfinite(threshold):
-                raise gcmd.error("THRESHOLD must be finite")
-            full_scale = self._full_scale_g(self.scale) if self.helper is not None else None
-            if full_scale is not None and threshold > 0.8 * full_scale:
-                raise gcmd.error("THRESHOLD must stay below %.1f g, the accelerometer"
-                                 " range is %.0f g" % (0.8 * full_scale, full_scale))
+            scale = self.session_scale if self.stream_on else self.scale
+            full_scale = self._full_scale_g(scale) if self.helper is not None else None
+            validate_threshold(threshold, "THRESHOLD", gcmd.error, full_scale)
             self.threshold_g[axis] = threshold
         if sign is not None:
             self.impact_sign[axis] = sign
-        gcmd.respond_info("beacon_accel_homing %s: threshold %.1f g, impact_sign %d (until restart)"
+        gcmd.respond_info("beacon_accel_homing %s: threshold %.12g g, impact_sign %d (until restart)"
                           % (axis.upper(), self.threshold_g[axis], self.impact_sign[axis]))
 
 

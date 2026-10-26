@@ -1,237 +1,160 @@
 # Accelerometer Homing
 
 Use an already configured accelerometer as an X/Y impact endstop in Klipper,
-Kalico or a compatible fork. Optional commands help you calibrate separate
-X/Y thresholds, test them and chart the measured acceleration.
+Kalico or a compatible fork. Optional commands calibrate, test and chart it.
 
 **[CloakedWayne](https://github.com/CloakedWayne) created the original Beacon
 Accelerometer Homing plugin and its Beacon impact-detection algorithm** in
 [Monolith3D/MISC](https://github.com/Monolith3D/MISC/tree/main/Beacon_Accel_Homing).
-This experimental extension is developed in the
-[FrankRamm testing fork](https://github.com/FrankRamm/MISC/tree/codex/universal-accel-homing)
-for supervised testing and future upstream contribution after physical
-validation. Full credits and provenance: [NOTICE](NOTICE). License:
-[GPLv3](LICENSE).
+This experimental [FrankRamm extension](https://github.com/FrankRamm/MISC/tree/codex/universal-accel-homing)
+is intended for supervised testing and future upstream contribution after
+physical validation. Thanks to **mc-red** for extensive testing.
+Full credits: [NOTICE](NOTICE). License: [GPLv3](LICENSE).
 
-Thanks to **mc-red** for extensive testing of this experimental extension.
+Impact homing deliberately contacts a mechanical stop. Supervise initial homes
+and calibration with an accessible emergency stop; software checks do not prove
+correct physical homing.
 
-Impact homing deliberately contacts a mechanical stop. Supervise the first
-homes and all calibration with an accessible emergency stop. This extension
-still needs physical validation; software checks do not prove a correct home.
+## Install or update
 
-## Before you start
-
-- A Linux printer host with Klipper, Kalico or a compatible checkout, plus
-  Python 3.8+, `bash` and `curl`. Install as the existing Klipper service user.
-- An already working Beacon, ADXL345, LIS2DW, LIS3DH, MPU9250 or ICM20948
-  accelerometer. Cartographer needs its separately configured `adxl345` or
-  `lis2dw` accelerometer object.
-- A firmly mounted sensor that moves with each tested axis, with the correct
-  `axes_map`. A toolhead sensor cannot measure moving-bed Y impacts.
-- For calibration, test and charts: Cartesian/CoreXY with independent Z and
-  stock `G28`, directly or beneath the recognized built-in `[safe_z_home]`.
-  Other custom homing paths require changes before these workflows can run;
-  see the [optional compatibility notes](#for-the-curious).
-
-## 1. Install on the Linux printer host
-
-Run this single line in the host's **shell**, not the printer console:
+With the printer **idle**, run in the Linux host's **shell** as the existing
+Klipper service user. Install:
 
 ```bash
 bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing'
 ```
 
-The installer downloads verified files, detects the Klipper checkout, config
-and configured sensor, then installs the plugin and activates its X/Y
-endstops. It backs up changed files, disables conflicting sensorless settings
-and keeps existing thresholds, driver run currents and saved configuration.
-It preserves configured homing speeds. An incompatible generic speed/timing
-plan is reported before installation writes; it is never silently reduced.
-Generic report/startup distance caps are disabled unless explicitly configured.
-Existing explicit limits are preserved. Optional
-[`--max-report-travel` and `--max-startup-travel`](docs/INSTALLATION.md#explicit-generic-travel-budgets)
-select those limits explicitly during installation or an update.
+Update an existing installation:
 
-Multiple printer instances or sensors need explicit selection. Configure
-sensor firmware and wiring beforehand. After installation or an update, the
-installer rechecks that the selected instance is idle and **automatically
-restarts its verified systemd service** to load the installed Python modules.
-It requests your sudo password if needed; run the installation command as
-the existing Klipper service user. Installation does not start homing or
-calibration. Review the resulting configuration and mounting before either.
-
-Append `--no-restart` to the final `bash "$t"` invocation to install without
-automatic activation, then restart the selected host process while idle using
-the printed command. Printer-console `RESTART` or `FIRMWARE_RESTART` alone
-does not reload already imported code. See the
-[restart requirements](docs/INSTALLATION.md#automatic-host-service-restart)
-for service detection, privilege checks and activation failures.
-
-Keep the printed source directory under `~/.local/share/accel-homing/`; the
-installed links use it. See [installation details](docs/INSTALLATION.md) for
-manual selection, dry run, pinned downloads, backups and rollback.
-For an existing installation, use the
-[update command](docs/INSTALLATION.md#update-an-existing-installation) with
-`--replace-existing-links` to back up and repoint the previous source links.
-
-## 2. Set thresholds
-
-You can calibrate each axis below, or edit thresholds in your existing
-`[accel_homing]` or legacy `[beacon_accel_homing]` section. New installations
-create the section in `accel_homing.cfg`. Example for an ADXL345:
-
-```ini
-[accel_homing]
-accel_chip: adxl345 toolhead
-#x_threshold: 8.0
-#y_threshold: 8.0
+```bash
+bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing --replace-existing-links'
 ```
 
-Keep your existing section and sensor name; do not add a second section.
-Leave thresholds commented to use saved calibration values. To override one
-axis, uncomment its setting, change the value and issue `RESTART` while idle.
-That console command is sufficient for these configuration-only edits.
-Thresholds are in **g**: higher values
-require a stronger impact; lower values can trigger on motion vibration.
-Manual settings take priority over saved calibration values.
+The installer detects the checkout, configuration and sensor, backs up changes
+and activates X/Y accelerometer endstops. It preserves configured homing speeds,
+thresholds and run currents; no speed or travel cap is added by default.
+It verifies the selected systemd service and idle state, then **automatically
+restarts that service**, requesting sudo if needed. It does not start homing.
+Keep the printed source directory: installed links depend on it. For selection,
+options and recovery, see [installation details](docs/INSTALLATION.md).
 
-## 3. Use normal homing
+## Setup
 
-After physical validation, use **`G28 X`** or **`G28 Y`** in the printer console.
-The configured axis uses its accelerometer endstop. Calibration, tests and
-charts are optional workflows that run only when you request them.
-
-Energizing a motor can jolt the sensor and resemble contact. Before every
-homing pass, the plugin waits for setup to finish and checks fresh, quiet
-accelerometer data. Newly enabled motors get an additional 0.25 s settling
-delay by default (`enable_settle_time`). If the data does not settle, that
-homing pass aborts before it starts. This check still needs physical validation.
-
-All commands below go in the **printer console**:
-
-| Command | What it does |
-| --- | --- |
-| `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` | Starts or resumes X calibration after manually centering XY, with both axes unhomed. Use `AXIS=Y` for Y. |
-| `ACCEL_HOMING_TEST CENTERED=1` | Tests X then Y with current thresholds after manually centering XY, with both axes unhomed. |
-| `ACCEL_HOMING_CHARTS_GENERATE CENTERED=1` | Runs the same X-then-Y test and exports measured acceleration charts. |
-| `ACCEL_HOMING_STATUS` | Shows thresholds, recent results, calibration progress, model and chart paths. |
-| `ACCEL_HOMING_CANCEL` | Cancels a pending calibration/manual-recentering wait and restores temporary settings. |
-| `SET_ACCEL_HOMING AXIS=X THRESHOLD=4.0` | Optional temporary X threshold change until restart; use `AXIS=Y` for Y. |
-
-## If stationary preparation aborts
-
-`no fresh quiet accelerometer baseline before the move` means the pass could
-not obtain or retain the required stationary reference before arming.
-After the error, run **`ACCEL_HOMING_STATUS`**. It retains the baseline result
-and phase, quiet-window sample count and duration, X/Y/Z peak-to-peak variation
-and quiet limit, plus sample/batch ages and the allowed sample age. Fresh
-samples can still repeatedly reset the quiet window before it spans
-`baseline_time`. Review the window duration, reset count, measured variation
-and sample ages together; the error alone does not prove excessive sensor
-noise. Include that status output and the matching Klipper log when reporting
-the failure.
+Use an already working, firmly mounted sensor that follows each tested axis,
+with the correct `axes_map`. Check [sensor and workflow compatibility](docs/COMPATIBILITY.md).
+Calibration, TEST and CHARTS require Cartesian/CoreXY, independent Z and stock
+`G28`, directly or beneath the built-in `[safe_z_home]`.
 
 ## Calibrate X, then Y
 
-Before CALIBRATE, TEST or CHARTS, ensure the nozzle has clearance above the bed
-for XY travel. These workflows do not perform `safe_z_home`'s Z hop.
+Before **CALIBRATE, TEST or CHARTS**, keep the printer idle and unpaused.
+**Physically center XY by hand and leave both axes unhomed in Klipper.** Use
+your machine's XY motor controls while keeping Z supported. Ensure nozzle/bed
+clearance for XY travel: these workflows do not perform a Z hop.
 
-1. **Before the command, physically center the toolhead by hand in both X and
-   Y.** Use the XY motor controls appropriate for your machine so Z stays
-   supported. Both X and Y must be **unhomed in Klipper**. Do not home them in
-   advance or assign coordinates to mark them homed.
-2. Run `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`. `CENTERED=1` states that you
-   have already centered XY and authorizes movement; the sensor cannot detect
-   that position. **There is no further confirmation: X starts after the
-   stationary preparation check.** The first home tests the actual candidate
-   threshold, starting at **0.5 g by default**, from that manual center.
-3. After one qualifying home, the plugin performs **ten additional consecutive
-   accepted homes** at the same threshold. Their commanded-travel range,
-   **maximum minus minimum, must be strictly less than 1.5 mm**. The discovery
-   home and manual centering are excluded. A range of exactly 1.5 mm fails.
-   Between accepted trials, it returns only the tested axis to center. As soon
-   as the validation range reaches 1.5 mm, calibration aborts before another
-   return or home, without increasing the threshold or saving a model.
-4. If it triggers too early, the plugin raises the candidate threshold by
-   0.5 g by default (the first retry is **1.0 g**), resets
-   the validation count and distance window and releases XY, leaving both axes
-   unhomed. Center XY
-   manually again, then repeat **`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`** to
-   resume the pending candidate and attempt count. The new candidate needs
-   a fresh qualifying discovery and ten new validation homes. It does not return
-   automatically after a suspect home. Sensor faults or excessive travel abort
-   calibration.
-5. On success, the default `SAVE_CONFIG=1` automatically saves that axis in
-   the **DO NOT EDIT** block of `printer.cfg` and restarts Klipper. Do not edit
-   that generated block. Once ready, repeat the manual preparation and run
-   **`ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1`**. X and Y are saved independently.
+Run commands in the **printer console**. **`CENTERED=1` authorizes movement from
+that manual center; there is no further confirmation.** Motion starts after
+the stationary preparation check.
 
-To defer writing and restarting, start with
-`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 SAVE_CONFIG=0`. This stages the model
-only. You must later issue `SAVE_CONFIG` to write it to `printer.cfg` and
-restart Klipper; the calibrated threshold becomes available after that reload.
-A plain `RESTART` discards an unsaved staged model.
+| Command | Purpose |
+| --- | --- |
+| `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` | Calibrate or resume X. |
+| `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` | Calibrate or resume Y after repeating the preparation. |
+| `ACCEL_HOMING_TEST CENTERED=1` | Test current X/Y thresholds with the same preparation. |
+| `ACCEL_HOMING_CHARTS_GENERATE CENTERED=1` | Run that test and export acceleration charts. |
+| `ACCEL_HOMING_STATUS` | Show thresholds, progress, results and chart paths. |
+| `ACCEL_HOMING_CANCEL` | Cancel pending calibration and restore temporary settings. |
+| `SET_ACCEL_HOMING AXIS=X THRESHOLD=0.5` | Change X temporarily until restart; use `AXIS=Y` for Y. |
+| `G28 X` / `G28 Y` | Normal homing after physical validation. |
 
-Keep the same calibration command, `AXIS` and optional `SAVE_CONFIG` value
-when resuming after manual recentering. The console reports when recentering
-is needed; the pending calibration expires after its configured timeout.
+Calibration starts at **0.5 g by default**. After one qualifying home, it needs
+**ten additional consecutive accepted homes** at that candidate threshold.
+Their commanded-travel range, **maximum minus minimum, must be strictly less
+than 1.5 mm**, independently for each axis; exactly 1.5 mm fails.
 
-Existing manual threshold overrides remain active even after calibration.
-Comment them out if you want the saved model to supply the thresholds.
-Recalibrate after changes to mounting, belts, sensor orientation, homing speed
-or motor current.
+If a home triggers too early, the candidate rises by 0.5 g by default and XY
+is released and left unhomed. Manually center XY again, then repeat the **same
+calibration command** to resume. There is no automatic return after a suspect home.
 
-## Test and view charts
+Success **automatically saves** that axis in `printer.cfg`'s **DO NOT EDIT**
+block and restarts Klipper. Leave that block alone. When ready, repeat the
+preparation and calibrate Y; each axis is saved independently.
 
-Physically center XY by hand and leave both axes unhomed before either command,
-using the same manual preparation and nozzle/bed clearance as calibration.
-Then run **`ACCEL_HOMING_TEST CENTERED=1`** or
-**`ACCEL_HOMING_CHARTS_GENERATE CENTERED=1`**. `CENTERED=1` declares that this
-preparation is complete and authorizes movement. Omitting it fails before
-movement. X starts after stationary preparation, with no separate confirmation
-or preliminary XY release.
+TEST and CHARTS home X, return X alone to center, then home Y. Charts export
+CSV, JSON, SVG and HTML; their paths appear in the console and STATUS.
+Recalibrate after changes to mounting, belts, sensor orientation, speed or current.
 
-They home **X, return X alone to center, then home Y**. These workflows never
-request a Z move. A suspect home aborts without an automatic return. Both axes
-must use suitable accelerometer endstops.
+## Set thresholds manually
 
-The console reports acceleration at impact detection and its measured peak in
-**g**, plus commanded travel. Charts show X/Y/Z acceleration relative to the
-stationary baseline, the threshold and the impact marker when available. They
-export full-resolution CSV, metadata JSON and ready-to-open SVG/HTML, with no
-plotting tools to install.
+Edit `x_threshold` or `y_threshold` in your existing `[accel_homing]` section
+(`accel_homing.cfg` for new installations), then issue `RESTART` while idle.
 
-Paths appear in the console and `ACCEL_HOMING_STATUS`. The default output is
-`accel_homing_charts/` beside the main `printer.cfg`; `charts_directory` changes
-it. See the [configuration example](examples/accel_homing.cfg) for all settings.
+```ini
+x_threshold: 0.5
+y_threshold: 0.5
+```
 
-## Uninstall and restore the previous configuration
+Values are in **g** and must be finite and positive. Higher means a stronger
+impact is required; sensor limits are explained below.
+Explicit axis settings override a legacy shared `threshold`, then saved
+calibration, then sensor defaults. Comment out manual settings to use calibration;
+keep only one plugin section. See the [configuration example](examples/accel_homing.cfg).
 
-Run this single line in the Linux host's **shell**, as the same Klipper user:
+## Uninstall
+
+Run in the host's **shell** as the same Klipper user:
 
 ```bash
 bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/uninstall.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing'
 ```
 
-It restores the original X/Y endstops, sensorless settings and plugin links
-from before the first recorded installation, including installations followed
-by upgrades. It removes configuration and calibration models introduced by
-this extension, preserving unrelated later edits and other saved models.
-
-If a changed setting conflicts with restoration or a backup is incomplete,
-it stops before changing configuration or plugin links and identifies the
-file and backup to review. Source downloads, charts and backups are retained.
-See [uninstall and recovery details](docs/INSTALLATION.md#uninstall-and-restore-the-pre-installation-configuration).
-Review the result, then **restart the selected Klipper host process yourself
-while idle**, using the service command printed by the uninstaller.
-Uninstallation does not restart Klipper or move the printer.
+It restores pre-installation settings while preserving unrelated later edits.
+Review the result, then **manually restart the selected Klipper host process
+while idle**, using the printed service command. See [recovery details](docs/INSTALLATION.md#uninstall-and-restore-the-pre-installation-configuration).
 
 ## For the curious
 
 <details>
-<summary>Compatibility, limits, saved models and implementation details</summary>
+<summary>Installation, activation and restoration details</summary>
 
-### Sensor support and evidence
+The Linux host needs Python 3.8+, `bash` and `curl`. Configure sensor firmware
+and wiring first. Multiple instances or sensors require explicit selection.
+Installation disables conflicting sensorless settings and preserves existing
+saved configuration. An incompatible generic speed/timing plan is reported
+before writes rather than silently lowering the speed. Existing explicit
+travel limits remain active; optional
+[`--max-report-travel` and `--max-startup-travel`](docs/INSTALLATION.md#explicit-generic-travel-budgets)
+select those limits during installation or an update.
+
+`--replace-existing-links` backs up and repoints previous source links. Keep
+source directories under `~/.local/share/accel-homing/` and transaction backups
+for rollback. [Installation details](docs/INSTALLATION.md) cover manual
+selection, dry runs, verified downloads, pinning and backups.
+
+Installation and updates verify the selected systemd service and recheck that
+its instance is idle before restarting it. Append `--no-restart` to the final
+`bash "$t"` invocation to defer activation, then restart the selected host
+process while idle using the printed command. Printer-console `RESTART` or
+`FIRMWARE_RESTART` alone cannot reload already imported Python modules. See
+[restart requirements](docs/INSTALLATION.md#automatic-host-service-restart)
+for service detection, privilege checks and activation failures.
+
+Uninstallation restores original X/Y endstops, sensorless settings and plugin
+links from before the first recorded installation, including later upgrades.
+It removes configuration and calibration models introduced by this extension,
+preserving unrelated later edits and other saved models. Conflicting settings
+or incomplete backups stop restoration before configuration or link changes;
+the uninstaller identifies the file and backup to review. Downloads, charts
+and backups are retained. Uninstallation neither restarts Klipper nor moves
+the printer; review its output and restart the host process yourself while idle.
+
+</details>
+
+<details>
+<summary>Sensor support and evidence</summary>
+
+A toolhead sensor cannot measure moving-bed Y impacts; the mounted sensor
+must move with each tested axis.
 
 | Sensor | Data used | Evidence for this extension |
 | --- | --- | --- |
@@ -253,7 +176,10 @@ Historical Beacon printer tests do not validate this extension's generic
 backends or workflows. Synthetic charts are marked
 **SIMULATED / NOT PRINTER MEASUREMENT**.
 
-### Thresholds and saved models
+</details>
+
+<details>
+<summary>Thresholds and saved models</summary>
 
 On restart, threshold priority for each axis is: explicit `x_threshold` or
 `y_threshold`, explicit legacy shared `threshold`, saved model, then sensor-aware
@@ -262,9 +188,14 @@ default. Leave the shared setting absent to use calibrated values. Generic
 4 g default, so **do not use the 8 g example for MPU9250**. Unknown compatible
 objects need their actual configured `sensor_range`.
 
-Manual threshold settings and temporary SET commands retain their 3–15 g
-range. Calibration and its saved model accept values starting at 0.5 g; the
-calibration ceiling and sensor-range limits still apply.
+Manual threshold settings and temporary SET commands accept any finite positive
+value in g. When the sensor range is known, values are bounded to 80% of that
+configured or detected full-scale range; native Beacon retains its fallback
+when clip range is unknown. There is no fixed 3 g minimum or 15 g maximum for
+manual settings. The actual session range is checked again before each pass:
+another Beacon client using a narrower scale can cause a previously accepted
+value to be rejected. Calibration and saved models retain their 0.5–15 g range,
+subject to the calibration ceiling and sensor-range limits.
 
 The named model defaults to `[accel_homing_model default]`. It stores thresholds,
 ten-success counts, the validation travel range and fixed 1.5 mm limit, and
@@ -283,7 +214,16 @@ With `SAVE_CONFIG=0`, the completed axis remains homed. Before calibrating the
 other axis, use your machine's appropriate controls to leave both XY axes
 unhomed and physically center XY by hand again.
 
-### Workflow restrictions and guards
+To defer saving, start with
+`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 SAVE_CONFIG=0`.
+When resuming after recentering, keep the same command, `AXIS` and optional
+`SAVE_CONFIG` value. The console reports when recentering is needed; a pending
+calibration expires after its configured timeout.
+
+</details>
+
+<details>
+<summary>Workflow restrictions and calibration qualification</summary>
 
 Workflows require idle, unpaused Klipper, Cartesian/CoreXY, independent Z,
 controllable XY enables and single-touch X/Y settings (`homing_retract_dist: 0`,
@@ -320,7 +260,20 @@ Missing/late data, invalid captures, MCU errors and excessive travel abort
 instead of increasing the threshold. Stock Klipper homing fault cleanup still
 applies and may release all motors.
 
-### Stationary preparation before each pass
+</details>
+
+<details>
+<summary>Stationary preparation and diagnostics</summary>
+
+`no fresh quiet accelerometer baseline before the move` means the pass could
+not obtain or retain the required stationary reference before arming.
+After the error, run `ACCEL_HOMING_STATUS`. It retains the baseline result and
+phase, quiet-window sample count and duration, X/Y/Z peak-to-peak variation and
+quiet limit, plus sample/batch ages and the allowed sample age. Fresh samples
+can repeatedly reset the quiet window before it spans `baseline_time`.
+Review duration, reset count, variation and sample ages together; the error
+alone does not prove excessive sensor noise. Include the status output and
+matching Klipper log when reporting a failure.
 
 The same check protects ordinary homing and supervised workflows, including
 already enabled motors and second touches. It enables the motors needed for
@@ -353,7 +306,10 @@ still cause movement after this check. See Klipper's
 [`hold_current` guidance](https://www.klipper3d.org/TMC_Drivers.html#prefer-to-not-specify-a-hold_current).
 The preparation check does not change driver settings.
 
-### Generic timing and speed limits
+</details>
+
+<details>
+<summary>Generic timing, speed and travel limits</summary>
 
 Generic defaults are 5 ms reports, a 20 ms maximum sample age and at least
 1000 Hz. The previous report interval is restored afterwards. Sample freshness,
@@ -423,7 +379,46 @@ Starting calibration at 0.5 g does not establish that either problem is fixed.
 A softer impact at lower speed may also be undetectable. Mounting and actual
 physical behavior need operator validation.
 
-### Legacy names and provenance
+</details>
+
+<details>
+<summary>Test results, charts and temporary thresholds</summary>
+
+TEST and CHARTS need the same existing manual XY center, both axes unhomed
+and nozzle/bed clearance as calibration. `CENTERED=1` declares that preparation
+complete; omitting it fails before movement. They start without a preliminary
+XY release or a separate confirmation and never request a Z move. Both axes
+must use suitable accelerometer endstops. A suspect home aborts without an
+automatic return.
+
+The console reports acceleration at impact detection, its measured peak in g
+and commanded travel. Charts show X/Y/Z acceleration relative to the stationary
+baseline, threshold and impact marker when available. Outputs include
+full-resolution CSV, metadata JSON and ready-to-open SVG/HTML without plotting
+tools to install. The default `accel_homing_charts/` directory is beside the
+main `printer.cfg`; `charts_directory` changes it. See the
+[configuration example](examples/accel_homing.cfg) for all settings.
+
+`SET_ACCEL_HOMING AXIS=X THRESHOLD=0.5` changes X temporarily until restart;
+use `AXIS=Y` for Y. It does not save a calibration model. For manual configuration,
+keep your existing sensor name and plugin section; do not add a second one.
+Example for an **ADXL345**:
+
+```ini
+[accel_homing]
+accel_chip: adxl345 toolhead
+#x_threshold: 8.0
+#y_threshold: 8.0
+```
+
+Leave thresholds commented to use saved calibration. Uncomment an axis to
+override it, choose a sensor-appropriate value and issue `RESTART` while idle.
+That console command is sufficient for configuration-only changes.
+
+</details>
+
+<details>
+<summary>Legacy names and provenance</summary>
 
 Historical `[beacon_accel_homing]`, `beacon: beacon`, `beacon_accel:x/y`,
 `BEACON_ACCEL_HOMING_STATUS` and `SET_BEACON_ACCEL_HOMING` remain accepted. Load
