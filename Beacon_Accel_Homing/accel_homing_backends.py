@@ -14,13 +14,17 @@ import math
 
 GRAVITY = 9806.65
 CLOCK_FREQ = 1000000.0
-STARTUP_REQUEST_TRAVEL_LIMIT = 3.0
+REPORT_TRAVEL_MIN = 0.1
+REPORT_TRAVEL_MAX = 2.0
+STARTUP_REQUEST_TRAVEL_LIMIT = None  # disabled unless explicitly configured
+STARTUP_REQUEST_TRAVEL_MIN = 0.1
+STARTUP_REQUEST_TRAVEL_MAX = 5.0
 
 
 def motion_report_speed_limit(max_age, report_travel):
     # Report freshness limits commanded travel; startup proof independently
-    # enforces its fixed 3 mm budget at the actual speed and acceleration.
-    return report_travel / max_age
+    # enforces its configured request budget at the actual speed/acceleration.
+    return None if report_travel is None else report_travel / max_age
 
 
 def motion_proof_window(speed):
@@ -116,11 +120,15 @@ class ConfiguredAccelBackend:
                                        minval=0.005, maxval=0.050)
         self.min_rate = config.getfloat("min_sample_rate", 1000.0,
                                         minval=800.0, maxval=10000.0)
-        self.report_travel = config.getfloat("max_report_travel", 1.0,
-                                             minval=0.1, maxval=2.0)
+        self.report_travel = config.getfloat("max_report_travel", None,
+                                             minval=REPORT_TRAVEL_MIN, maxval=REPORT_TRAVEL_MAX)
+        self.startup_travel = config.getfloat("max_startup_travel", STARTUP_REQUEST_TRAVEL_LIMIT,
+                                              minval=STARTUP_REQUEST_TRAVEL_MIN,
+                                              maxval=STARTUP_REQUEST_TRAVEL_MAX)
         for option, value in (("stream_interval", self.interval), ("max_sample_age", self.max_age),
-                              ("min_sample_rate", self.min_rate), ("max_report_travel", self.report_travel)):
-            if not math.isfinite(value):
+                              ("min_sample_rate", self.min_rate), ("max_report_travel", self.report_travel),
+                              ("max_startup_travel", self.startup_travel)):
+            if value is not None and not math.isfinite(value):
                 raise config.error("accel_homing: %s must be finite" % option)
         self.max_speed = motion_report_speed_limit(self.max_age, self.report_travel)
         self.full_scale = config.getfloat(
@@ -348,10 +356,6 @@ class ConfiguredAccelBackend:
         if self.owner.homing_accel:
             accel = min(accel, self.owner.homing_accel)
         speeds = [min(speed, velocity) for speed in speeds]
-        if max(speeds) > self.max_speed + 0.000001:
-            raise error("accel_homing: %s homing speed exceeds %.1f mm/s for the"
-                        " %.3f s sample-age / %.2f mm report-travel policy"
-                        % (self.name, self.max_speed, self.max_age, self.report_travel))
         for speed in speeds:
             self.validate_motion_plan(speed, accel, error)
 
@@ -368,13 +372,18 @@ class ConfiguredAccelBackend:
         # Distance is strictly increasing for positive speed, including the
         # speed-dependent proof window. Bound the search by the acceleration
         # term so even very small positive accelerations keep useful precision.
+        if self.startup_travel is None:
+            return self.max_speed
         low = 0.0
-        high = min(self.max_speed, math.sqrt(2.0 * STARTUP_REQUEST_TRAVEL_LIMIT)
-                   * math.sqrt(accel))
+        minimum_margin = 0.018 + self.max_age + max(0.010, 2.0 * self.interval)
+        high = min(math.sqrt(2.0 * self.startup_travel) * math.sqrt(accel),
+                   self.startup_travel / minimum_margin)
+        if self.max_speed is not None:
+            high = min(high, self.max_speed)
         for unused in range(64):
             middle = (low + high) * 0.5
             travel = self.motion_startup_request_travel(middle, accel)
-            if math.isfinite(travel) and travel <= STARTUP_REQUEST_TRAVEL_LIMIT - 0.000001:
+            if math.isfinite(travel) and travel <= self.startup_travel - 0.000001:
                 low = middle
             else:
                 high = middle
@@ -386,14 +395,33 @@ class ConfiguredAccelBackend:
         if not all(math.isfinite(value) and value > 0 for value in (speed, accel)):
             raise error("accel_homing: effective homing speed/acceleration must be finite and positive")
         travel = self.motion_startup_request_travel(speed, accel)
-        if not math.isfinite(travel) or travel > STARTUP_REQUEST_TRAVEL_LIMIT + 0.000001:
+        timeout = self.motion_startup_timeout(speed, accel)
+        if not math.isfinite(travel) or not math.isfinite(timeout):
+            raise error("accel_homing: derived startup timeout and nominal travel must be finite"
+                        " at effective homing speed %.6g mm/s and acceleration %.6g mm/s^2"
+                        % (speed, accel))
+        report_failed = self.max_speed is not None and speed > self.max_speed
+        startup_failed = self.startup_travel is not None and travel > self.startup_travel
+        if report_failed or startup_failed:
             maximum = self.motion_startup_speed_limit(accel)
+            report_setting = "disabled" if self.report_travel is None else "%.12g mm" % self.report_travel
+            startup_setting = "disabled" if self.startup_travel is None else "%.12g mm" % self.startup_travel
+            detail = ("effective homing speed %.6g mm/s and acceleration %.6g mm/s^2;"
+                      " report needs %.12g mm at max_sample_age %.6g s"
+                      " (max_report_travel %s); startup needs %.12g mm"
+                      " (max_startup_travel %s, stream_interval %.6g s)."
+                      " The current-setting homing_speed ceiling is at most %.6g mm/s."
+                      " Review compatible settings explicitly; speed and acceleration"
+                      " were not changed. This is not a guarantee of physical stopping travel"
+                      % (speed, accel, speed * self.max_age, self.max_age, report_setting,
+                         travel, startup_setting, self.interval, maximum))
+            if report_failed:
+                raise error("accel_homing: %s homing speed exceeds %.1f mm/s for the"
+                            " sample-age/report-travel policy; %s"
+                            % (self.name, self.max_speed, detail))
             raise error("accel_homing: startup motion proof needs %.2f mm of commanded travel"
-                        " before the host stop request, above the %.1f mm policy at effective"
-                        " homing speed %.6g mm/s and acceleration %.6g mm/s^2; lower"
-                        " homing_speed to at most %.6g mm/s at this acceleration. This"
-                        " is not a guarantee of physical stopping travel"
-                        % (travel, STARTUP_REQUEST_TRAVEL_LIMIT, speed, accel, maximum))
+                        " before the host stop request, above the %.1f mm policy; %s"
+                        % (travel, self.startup_travel, detail))
 
     def get_status(self):
         status = {"type": self.kind, "sensor": self.name,
@@ -402,16 +430,24 @@ class ConfiguredAccelBackend:
                 "last_sample_age_s": self.last_age,
                 "observed_rate_hz": self.observed_rate,
                 "max_homing_speed": self.max_speed, "fault": self.fault,
-                "startup_motion_request_limit_mm": STARTUP_REQUEST_TRAVEL_LIMIT,
+                "max_report_travel_mm": self.report_travel,
+                "startup_motion_request_limit_mm": self.startup_travel,
                 "latency_guaranteed": False}
         if self.owner.toolhead is not None:
             velocity, accel = self.owner.toolhead.get_max_velocity()
-            speed = min(velocity, self.max_speed)
             if self.owner.homing_accel:
                 accel = min(accel, self.owner.homing_accel)
-            timeout = self.motion_startup_timeout(speed, accel)
-            status["startup_motion_timeout_s"] = timeout
-            # Nominal request budget includes one 3ms early watchdog interval.
+            attempt = self.owner.attempt
+            speed = (attempt.effective_speed if attempt is not None and attempt.effective_speed is not None
+                     else velocity if self.max_speed is None else min(velocity, self.max_speed))
+            if attempt is not None and attempt.effective_accel is not None:
+                accel = attempt.effective_accel
+            valid = all(math.isfinite(value) and value > 0 for value in (speed, accel))
+            timeout = self.motion_startup_timeout(speed, accel) if valid else None
+            travel = self.motion_startup_request_travel(speed, accel) if valid else None
+            status["startup_motion_evaluated_speed_mm_s"] = speed if valid else None
+            status["startup_motion_timeout_s"] = timeout if timeout is not None and math.isfinite(timeout) else None
+            # Nominal request calculation includes one 3ms early watchdog interval.
             # It excludes host scheduling stalls and physical MCU stop delay.
-            status["startup_motion_request_travel_mm"] = self.motion_startup_request_travel(speed, accel)
+            status["startup_motion_request_travel_mm"] = travel if travel is not None and math.isfinite(travel) else None
         return status

@@ -363,7 +363,14 @@ def choose_sensor(graph, selected=None, existing=None):
 
 
 def validate_homing_speeds(graph, args, family, existing):
-    """Read and validate every selected rail before staging config changes."""
+    """Validate selected rails and retained users of explicit shared limits."""
+    overrides = {name: getattr(args, name) for name in
+                 ("max_report_travel", "max_startup_travel")
+                 if getattr(args, name) is not None}
+    if family == "beacon" and overrides:
+        raise InstallError("%s applies only to configured accelerometer backends, not native Beacon. "
+                           "Remove the unsupported override. No files changed."
+                           % ", ".join("--" + name.replace("_", "-") for name in overrides))
     if family != "beacon":
         policy = load_motion_policy()
         printer = graph.one("printer")
@@ -372,7 +379,12 @@ def validate_homing_speeds(graph, args, family, existing):
             acceleration = float(printer.get("max_accel", "nan"))
             homing_accel = float(existing.get("homing_accel", "5000")) if existing else 5000.0
             age = float(existing.get("max_sample_age", "0.020")) if existing else 0.020
-            travel = float(existing.get("max_report_travel", "1.0")) if existing else 1.0
+            travel = (overrides["max_report_travel"] if "max_report_travel" in overrides else
+                      existing.get("max_report_travel") if existing else None)
+            startup = (overrides["max_startup_travel"] if "max_startup_travel" in overrides else
+                       existing.get("max_startup_travel") if existing else None)
+            travel = float(travel) if travel is not None else None
+            startup = float(startup) if startup is not None else None
             interval = float(existing.get("stream_interval", "0.005")) if existing else 0.005
         except ValueError:
             raise InstallError("Generic homing requires numeric printer velocity/acceleration and plugin motion-policy settings.")
@@ -380,39 +392,102 @@ def validate_homing_speeds(graph, args, family, existing):
             raise InstallError("Generic homing requires finite positive printer max_velocity/max_accel and nonnegative homing_accel.")
         if homing_accel:
             acceleration = min(acceleration, homing_accel)
-        if (not all(math.isfinite(v) for v in (age, travel, interval))
-                or not 0.005 <= age <= 0.050 or not 0.1 <= travel <= 2.0
+        if (not all(math.isfinite(v) for v in (age, interval))
+                or not 0.005 <= age <= 0.050
+                or (travel is not None and (not math.isfinite(travel)
+                    or not policy.REPORT_TRAVEL_MIN <= travel <= policy.REPORT_TRAVEL_MAX))
+                or (startup is not None and (not math.isfinite(startup)
+                    or not policy.STARTUP_REQUEST_TRAVEL_MIN <= startup <= policy.STARTUP_REQUEST_TRAVEL_MAX))
                 or not 0.001 <= interval <= 0.020 or interval >= age):
             raise InstallError("Generic settings require max_sample_age 0.005..0.050s, "
-                               "max_report_travel 0.1..2mm, stream_interval 0.001..0.020s "
-                               "and stream_interval < max_sample_age.")
-        cap = policy.motion_report_speed_limit(age, travel)
+                               "optional max_report_travel %.12g..%.12gmm, optional max_startup_travel %.12g..%.12gmm, "
+                               "stream_interval 0.001..0.020s and stream_interval < max_sample_age; "
+                               "all values must be finite. No files changed."
+                               % (policy.REPORT_TRAVEL_MIN, policy.REPORT_TRAVEL_MAX,
+                                  policy.STARTUP_REQUEST_TRAVEL_MIN, policy.STARTUP_REQUEST_TRAVEL_MAX))
+        cap = policy.motion_report_speed_limit(age, travel) if travel is not None else None
+    axes = list(args.axes)
+    if overrides:
+        # These settings belong to the whole backend. A partial update must
+        # not invalidate another rail already connected to this plugin.
+        for axis in ("x", "y"):
+            rail = graph.one("stepper_" + axis, False)
+            if (axis not in axes and rail is not None
+                    and rail.get("endstop_pin", "").lstrip("!^~") in
+                    ("accel_homing:" + axis, "beacon_accel:" + axis)):
+                axes.append(axis)
     speeds = {}
-    for axis in args.axes:
+    for axis in axes:
         rail = graph.one("stepper_" + axis)
         try:
             original_speed = float(rail.get("homing_speed", "5"))
         except ValueError:
             raise InstallError("%s homing_speed must be numeric. No files changed." % axis.upper())
-        speed = args.homing_speed if args.homing_speed is not None else original_speed
+        requested = args.homing_speed is not None and axis in args.axes
+        speed = args.homing_speed if requested else original_speed
         if not math.isfinite(speed) or speed <= 0:
             raise InstallError("Homing speeds must be finite and positive. No files changed.")
         effective = min(speed, velocity) if family != "beacon" else speed
         if family != "beacon":
-            budget = policy.motion_startup_request_travel(effective, acceleration, age, interval)
-            if (effective > cap or not math.isfinite(budget)
-                    or budget > policy.STARTUP_REQUEST_TRAVEL_LIMIT):
-                setting = "configured homing_speed" if args.homing_speed is None else "requested --homing-speed"
-                raise InstallError(
-                    "%s %s %.12g mm/s (current configured homing_speed %.12g mm/s; "
-                    "effective speed %.12g mm/s, acceleration %.12g mm/s^2) exceeds generic "
-                    "policies: report-speed limit %.12g mm/s for %.12g s max_sample_age / "
-                    "%.12g mm max_report_travel; startup stop request needs %.12g mm of "
-                    "commanded travel (fixed %.1f mm limit). Homing speed is preserved by "
-                    "default; choose compatible settings explicitly. No files changed."
-                    % (axis.upper(), setting, speed, original_speed, effective, acceleration,
-                       cap, age, travel, budget, policy.STARTUP_REQUEST_TRAVEL_LIMIT))
-        speeds[axis] = rail, speed, effective
+            rail_acceleration = acceleration
+            passes = [("requested --homing-speed" if requested else "configured homing_speed", speed)]
+            if axis not in args.axes:
+                # Selected rails lose retract/min_home_dist/homing_accel during
+                # conversion. Retained plugin rails keep every active pass and
+                # Kalico's per-rail acceleration, so validate them before edits.
+                try:
+                    retract = float(rail.get("homing_retract_dist", "5"))
+                    minimum = float(rail.get("min_home_dist", str(retract)))
+                    rail_accel = rail.get("homing_accel")
+                    rail_accel = float(rail_accel) if rail_accel is not None else None
+                except ValueError:
+                    raise InstallError("%s retained homing distances/acceleration must be numeric. No files changed."
+                                       % axis.upper())
+                if not all(math.isfinite(value) and value >= 0 for value in (retract, minimum)):
+                    raise InstallError("%s retained homing distances must be finite and nonnegative. No files changed."
+                                       % axis.upper())
+                if rail_accel is not None:
+                    if not math.isfinite(rail_accel) or rail_accel <= 0:
+                        raise InstallError("%s retained homing_accel must be finite and positive. No files changed."
+                                           % axis.upper())
+                    rail_acceleration = min(rail_acceleration, rail_accel)
+                if retract or minimum:
+                    second = rail.get("second_homing_speed")
+                    if second is not None:
+                        try:
+                            second = float(second)
+                        except ValueError:
+                            raise InstallError("%s second_homing_speed must be numeric. No files changed."
+                                               % axis.upper())
+                        if not math.isfinite(second) or second <= 0:
+                            raise InstallError("%s second_homing_speed must be finite and positive. No files changed."
+                                               % axis.upper())
+                        passes.append(("configured second_homing_speed", second))
+                    # Known Klipper/Kalico defaults are first/2 or first; the
+                    # validated first pass conservatively covers both defaults.
+            for setting, pass_speed in passes:
+                pass_effective = min(pass_speed, velocity)
+                timeout = policy.motion_startup_timeout(pass_effective, rail_acceleration, age, interval)
+                budget = policy.motion_startup_request_travel(pass_effective, rail_acceleration, age, interval)
+                if not all(math.isfinite(value) for value in (timeout, budget)):
+                    raise InstallError("%s %s produces non-finite startup timing/travel at effective speed %.12g mm/s "
+                                       "and acceleration %.12g mm/s^2. No files changed."
+                                       % (axis.upper(), setting, pass_effective, rail_acceleration))
+                if ((cap is not None and pass_effective > cap)
+                        or (startup is not None and budget > startup)):
+                    report_policy = ("report-speed limit %.12g mm/s for %.12g s max_sample_age / %.12g mm max_report_travel"
+                                     % (cap, age, travel) if cap is not None else "report-distance cap disabled")
+                    startup_policy = ("startup stop request needs %.12g mm of commanded travel (%.12g mm max_startup_travel limit)"
+                                      % (budget, startup) if startup is not None else "startup-distance cap disabled")
+                    raise InstallError(
+                        "%s %s %.12g mm/s (current configured homing_speed %.12g mm/s; "
+                        "effective speed %.12g mm/s, acceleration %.12g mm/s^2) exceeds generic "
+                        "policies: %s; %s. Homing speed is preserved by "
+                        "default; choose compatible settings explicitly. No files changed."
+                        % (axis.upper(), setting, pass_speed, original_speed, pass_effective, rail_acceleration,
+                           report_policy, startup_policy))
+        if axis in args.axes:
+            speeds[axis] = rail, speed, effective
     return speeds
 
 
@@ -447,8 +522,21 @@ def make_plan(source, selected, args):
         messages.append("Preserved [safe_z_home]. Supervised X/Y workflows verify its stock G28 "
                         "predecessor and omit the wrapper's z_hop; ordinary G28 remains unchanged.")
     prefix = "beacon_accel" if existing and existing.name.lower() == "beacon_accel_homing" else "accel_homing"
+    overrides = {name: repr(getattr(args, name)) for name in
+                 ("max_report_travel", "max_startup_travel")
+                 if getattr(args, name) is not None}
+    if overrides:
+        messages.append("Explicit generic policy overrides: %s. These nominal request-travel "
+                        "limits are not physical stopping guarantees."
+                        % ", ".join("%s=%s mm" % item for item in overrides.items()))
+        messages.append("%s homing_speed: %s."
+                        % ("Preserved configured" if args.homing_speed is None else "Explicitly selected",
+                           ", ".join("%s=%.12g mm/s" % (axis.upper(), speed)
+                                     for axis, (_rail, speed, _effective) in speeds.items())))
     if existing:
         existing.replace("accel_chip", sensor)
+        for name, value in overrides.items():
+            existing.replace(name, value)
     else:
         managed = selected["config"].parent / MANAGED
         if managed.exists() or managed.is_symlink():
@@ -456,7 +544,8 @@ def make_plan(source, selected, args):
         content = ("# Managed by the accelerometer homing installer. Edit this file normally.\n"
                    "# Independent overrides; leave commented to use SAVE_CONFIG calibration models.\n"
                    "[accel_homing]\naccel_chip: " + sensor + "\n"
-                   "#x_threshold: 8.0\n#y_threshold: 8.0\n#model: default\n")
+                    "#x_threshold: 8.0\n#y_threshold: 8.0\n#model: default\n"
+                    + "".join("%s: %s\n" % item for item in overrides.items()))
         changes[managed] = {"kind": "file", "data": content.encode("utf-8")}
         if not any(managed.match(pattern) for pattern in graph.include_patterns):
             main = graph.documents[selected["config"]]
@@ -1004,6 +1093,10 @@ def arguments(argv=None):
     parser.add_argument("--axes", default="x,y", help="x,y (default), x or y")
     parser.add_argument("--homing-speed", type=float,
                         help="explicitly replace selected homing speeds; default preserves configured values and rejects policy conflicts")
+    parser.add_argument("--max-report-travel", type=float,
+                        help="opt into generic max_report_travel in mm (finite 0.1..2); otherwise preserve an explicit configured limit or leave disabled")
+    parser.add_argument("--max-startup-travel", type=float,
+                        help="opt into generic max_startup_travel in mm (finite 0.1..5); otherwise preserve an explicit configured limit or leave disabled")
     parser.add_argument("--acknowledge-homing-override", action="store_true", help="you reviewed custom G28/homing_override behavior")
     parser.add_argument("--replace-existing-links", action="store_true", help="back up/replace plugin links from another source")
     parser.add_argument("--no-restart", action="store_true", help="install/update without automatic host-service restart; activate manually")
@@ -1016,6 +1109,8 @@ def arguments(argv=None):
         parser.error("--axes must be x,y, x or y")
     if args.rollback and args.uninstall:
         parser.error("choose --rollback or --uninstall")
+    if (args.rollback or args.uninstall) and (args.max_report_travel is not None or args.max_startup_travel is not None):
+        parser.error("--max-report-travel and --max-startup-travel apply only to installation/update")
     return args
 
 

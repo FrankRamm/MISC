@@ -33,15 +33,15 @@ Focused motor-enable and fresh-reference fixtures, run from
 python -m unittest test_session.EnablePreparationTest test_backends.GenericPreparationTest -v
 ```
 
-The recorded combined run includes **100 installer/bootstrap/uninstall tests:
-99 passed and one real POSIX symlink test was skipped** because the Windows
+The recorded combined run includes **131 installer/bootstrap/uninstall tests:
+130 passed and one real POSIX symlink test was skipped** because the Windows
 host does not permit symlink creation. Temporary regular-file fixtures cover
 installation, config idempotence, backup/rollback, full-history restore,
 failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. Shell entry points are unchanged by this
-baseline-policy change, so their syntax checks were not repeated. No native
+travel-budget change, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -57,7 +57,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The combined offline verification run discovered **364 tests: 363 passed,
+The combined offline verification run discovered **414 tests: 413 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -76,20 +76,22 @@ downloads to verify their FrankRamm testing-fork defaults, immutable revision
 pinning and forwarded installer arguments, and verify that the real source
 package retains its GPLv3 license and original CloakedWayne credit/provenance.
 Installer speed fixtures verify preservation of configured homing speeds and
-refusal of incompatible generic plans before writes, using the exact runtime
-startup budget. Explicit `--homing-speed` edits remain opt-in and must satisfy
-the same limits. Low-acceleration cases include nonzero and zero plugin caps
-and toolhead velocity limits; no automatic speed reduction is expected.
-The reporting ceiling uses `max_report_travel/max_sample_age`, without an
-independent fixed 50 mm/s cap. Defaults still give 50 mm/s; higher-speed
-fixtures must satisfy both that reporting ceiling and the unchanged 3 mm
-startup budget with explicit settings. No timing/acceleration is auto-edited,
-and updating does not automatically recover an earlier speed from backups.
-Admitted 75 mm/s fixtures exercise both directions through fresh-reference
-preparation, arming and watchdog handling. Moving traces establish motion;
-parked noisy traces still fail with `no_motion` and request a host stop within
-the nominal 3 mm budget. Their constructed delivery timing is synthetic and
-does not qualify a sensor, MCU or host for those settings on hardware.
+finite effective plans before writes. Explicit `--homing-speed` edits remain
+opt-in; a targeted X=75/Y=50 fixture uses no travel-budget flags. Absent
+`max_report_travel` and `max_startup_travel` settings disable those optional
+admission policies. There is no default plugin 50 mm/s ceiling or nominal
+startup-distance cap. Firmware velocity limits, actual accelerometer
+freshness/rate/fault checks and the existing `no_motion` deadline remain.
+If a user explicitly supplies either travel setting, that policy is checked
+independently. Acceleration, report interval and sample-age settings are never
+automatically changed to admit a speed. Updating also does not infer a
+historical speed from backups.
+Prepared 75 and 100 mm/s synthetic plans exercise both directions through
+fresh-reference acquisition, arming and watchdog handling. Moving traces
+establish motion; parked varying traces still fail with `no_motion` at the
+unchanged calculated deadline. Separate advanced-policy fixtures exercise
+explicit 1 mm/3 mm constraints and constructed faster reporting. These
+signals do not qualify real hardware timing or stopping distances.
 
 Full-uninstall fixtures cover multiple upgrades back to the original
 activation/config state, restored original links and sensorless settings,
@@ -217,7 +219,8 @@ changing-mean signal. The final fixtures reject balanced, slow-block and
 asymmetric-reference bias on one or three axes, using the maximum deviation
 from the mean rather than half the peak-to-peak range. Actual synthetic host
 stop requests meet the unchanged startup timeout plus one 3 ms watchdog
-interval and the nominal 3 mm commanded-travel budget. True 50 mm/s ramps at
+interval; the modeled 50 mm/s request is also below 3 mm without establishing
+a default distance limit. True 50 mm/s ramps at
 4000 mm/s² prove movement in both directions and across pseudo-clock wrap;
 that ideal acceleration stays below the unchanged 0.5 g impact threshold.
 Separate first-sample ±0.51 g contacts still trigger, including after uncertain
@@ -244,17 +247,63 @@ repeatability, correct-stop contact or absence of skipped steps.
 `test_motion_policy.py` adds offline coverage for relative motion proof at low
 speeds, preservation of legacy Beacon pressed-start behavior, generic
 `no_motion` failures, startup deadline/budget calculations, and rejection of
-plans above the fixed 3 mm nominal command budget before enabling/backoff.
+plans above an explicitly configured 3 mm nominal limit before enabling/backoff.
 Additional fixtures cover read-only requested-axis preflight from an unhomed
 workflow, live limits lowered after configuration, invalid limits, zero and
 nonzero plugin caps, and rejection before workflow effects. Diagnostics include
-effective speed/acceleration and a lower speed ceiling: with default timing,
-50 mm/s needs about 3.233333 mm at live 1500 mm/s², compared with 2.65 mm at
-5000 mm/s². Repeated checks protect later preparation. Normal public G28 and
+effective speed/acceleration and, when a travel policy is enabled, its speed
+ceiling. With unchanged timing, 50 mm/s calculates about 3.233333 mm at live
+1500 mm/s², compared with 2.65 mm at 5000 mm/s²; these distances do not create
+a default admission limit. Repeated checks protect later preparation. Normal public G28 and
 its safe Z wrapper remain unchanged; these tests do not claim a workflow
 preflight can prevent that public wrapper's configured Z hop.
 Those checks establish software behavior only; no physical stop travel or
 end-to-end host/MCU latency was measured.
+
+Optional policy coverage includes **10 tests** in
+`test_motion_policy.ConfigurableStartupBudgetTests`, **9 tests** in
+`test_motion_policy.OptionalTravelPolicyTests`, and **31 additional installer
+and uninstaller tests**. Both travel settings default to absent/disabled.
+Explicit `max_startup_travel` values must be finite and within 0.1–5.0 mm;
+explicit `max_report_travel` values retain their 0.1–2.0 mm range. Each opt-in
+is enforced independently, with strict `required <= configured` comparison.
+An advanced example with 1.5 mm reporting and 4.5 mm startup limits admits a
+75 mm/s plan at effective 5000 mm/s² with the original 20 ms sample-age and
+5 ms report settings: nominal startup travel is 4.1625 mm and the unchanged
+startup timeout is 60 ms. At live 1500 mm/s² that example needs 5.475 mm and
+fails its explicit 4.5 mm policy. Without that opt-in, no distance policy
+rejects the otherwise numerically valid plan.
+
+Default 75 and 100 mm/s cases pass connect, workflow preflight and real
+prepare/arm callbacks without editing speed, freshness, intervals or
+acceleration. Real moving and parked traces verify the existing movement
+proof and `no_motion` deadline. Missing, stale and frozen streams still
+request failure. Absent-policy status uses JSON null and console text
+`disabled`, including replay fallbacks with no prepared effective speed.
+Finite-positive parameters and finite derived startup timeout, nominal
+travel and homing deadline remain mandatory; numeric extremes cannot leak
+infinity/NaN into status or create an unbounded deadline. The test harness
+returns an absent numeric default of `None` only when the option is absent;
+explicit invalid `None` values are not treated as an opt-out.
+
+Installer fixtures exercise the X=75/Y=50 target without budget flags,
+default preservation, explicit `--max-report-travel`/`--max-startup-travel`
+opt-ins, selected-axis-only speed edits, invalid-value and native-Beacon
+refusals, and pre-write validation of retained plugin axes affected by shared
+policy edits. Retained active second-pass speeds, retract/rehome distances
+and finite positive rail acceleration overrides are checked. Selected rails
+use their planned single-pass settings after installer-owned overrides are
+removed; unselected rails keep their settings. Uninstall validates owned
+opt-in values while retaining later-edit and unrelated-setting protections.
+
+The workflow source is byte-identical to the public source base: the strict
+**max-minus-min travel <1.5 mm across ten qualified validation homes** remains
+separate for each calibrated axis. This is a repeatability rule, not an
+impact threshold, latency distance or physical stopping guarantee. Optional
+travel limits describe nominal command travel before a host request; their
+engineering ranges do not certify hardware safety. No current printer
+settings were changed and no private user log or raw measurements were
+included in this package.
 
 The changed production and test Python files listed in
 `validation/VALIDATION.json` passed Python 3.8

@@ -47,6 +47,10 @@ endstops. It backs up changed files, disables conflicting sensorless settings
 and keeps existing thresholds, driver run currents and saved configuration.
 It preserves configured homing speeds. An incompatible generic speed/timing
 plan is reported before installation writes; it is never silently reduced.
+Generic report/startup distance caps are disabled unless explicitly configured.
+Existing explicit limits are preserved. Optional
+[`--max-report-travel` and `--max-startup-travel`](docs/INSTALLATION.md#explicit-generic-travel-budgets)
+select those limits explicitly during installation or an update.
 
 Multiple printer instances or sensors need explicit selection. Configure
 sensor firmware and wiring beforehand. After installation or an update, the
@@ -352,15 +356,23 @@ The preparation check does not change driver settings.
 ### Generic timing and speed limits
 
 Generic defaults are 5 ms reports, a 20 ms maximum sample age and at least
-1000 Hz. The previous report interval is restored afterwards. The effective
-generic homing speed must be at most `max_report_travel / max_sample_age`
-mm/s, which is 50 mm/s with the default 1 mm / 0.020 s settings, and must fit
-the startup budget below. There is no separate fixed 50 mm/s cap. These are
-validation limits: default installation and runtime preserve the configured
-`homing_speed` and refuse an incompatible plan. Only an explicit installer
-`--homing-speed N` requests a speed edit, still subject to the same limits.
-Acceleration is never raised automatically. Beacon retains its existing speed
-and already-pressed behavior.
+1000 Hz. The previous report interval is restored afterwards. Sample freshness,
+stream faults and startup motion detection still apply at every speed.
+There is no default 50 mm/s cap or startup-distance admission limit. Default
+installation preserves any finite positive configured `homing_speed`, including
+75 or 100 mm/s, without adding distance caps. Only an explicit installer
+`--homing-speed N` requests a speed edit. Normal toolhead velocity and
+acceleration limits still apply; acceleration is never raised automatically.
+Beacon retains its existing speed and already-pressed behavior.
+
+`max_report_travel` and `max_startup_travel` are independent optional limits,
+disabled when absent. An existing explicit value stays active. The installer
+flags with the same names opt into those limits, and are refused for native
+Beacon. A configured reporting limit requires effective speed at most
+`max_report_travel / max_sample_age`; a configured startup limit checks nominal
+travel before a host stop request. Explicit values accept finite ranges
+0.1..2 mm and 0.1..5 mm respectively. An incompatible explicit limit is refused
+before installation writes, without lowering speed or clearing that limit.
 An update also preserves a 50 mm/s value written by an older installer; it
 does not infer or restore a historical speed from backups. Those backups
 retain the original configuration for review.
@@ -390,18 +402,19 @@ Very noisy or slow cases can fail with
 This adjustment has synthetic validation only and still needs supervised
 physical testing.
 
-Plans exceeding a **3 mm nominal commanded-travel budget**
-before the host stop request are rejected. This excludes host stalls,
-transport and MCU stop delay, so it is **not a physical stopping guarantee**.
-For example, the default timing settings at 50 mm/s require 2.65 mm with
-5000 mm/s² effective acceleration, but about 3.233 mm with 1500 mm/s² and
-therefore fail. The error reports the effective speed and acceleration plus
-a lower `homing_speed` ceiling calculated for that acceleration. Review live
-limits and machine capabilities before adjusting speed or acceleration.
-At 75 mm/s and 5000 mm/s², the default timing settings also exceed the
-startup limit (4.1625 mm). Higher speeds are supported only when the explicitly
-configured reporting and startup budgets both pass. Installation does not
-change timing settings or acceleration to make a requested speed pass.
+The startup deadline remains calculated from effective speed, acceleration,
+sample age and reporting margin. Higher speeds or lower acceleration can
+increase the nominal travel before the host requests a stop for absent motion
+proof. An optional `max_startup_travel` can reject such a plan; no distance cap
+is inserted automatically. Installation does not change sample age, reporting
+interval, acceleration or current to admit a requested speed.
+
+The **1.5 mm calibration rule is a separate repeatability test**:
+`max(travel_mm) - min(travel_mm) < 1.5 mm` across ten accepted validation homes.
+It is not a per-home travel cap or a physical stopping-distance guarantee.
+Neither the startup deadline nor optional nominal travel limits include
+unbounded host stalls, transport/MCU stop delay or the machine's mechanical
+response. A configured speed still needs supervised physical validation.
 See [the exact calculation](docs/COMPATIBILITY.md#generic-startup-motion-policy).
 
 Commanded/firmware step distances are not encoder measurements. Ten repeats

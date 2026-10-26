@@ -7,6 +7,7 @@ import difflib
 import glob
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -273,6 +274,23 @@ def _valid_config_change(before, after, path, main, api):
                 if not value or value.split()[0].lower() not in api.SENSORS:
                     _fail(api, "Unrecognized accelerometer change in %s" % path)
                 replace["accel_chip"] = value
+            policy = None
+            for option in ("max_report_travel", "max_startup_travel"):
+                value = changed.get(option)
+                if value == original.get(option):
+                    continue
+                if policy is None:
+                    policy = api.load_motion_policy()
+                low, high = ((policy.REPORT_TRAVEL_MIN, policy.REPORT_TRAVEL_MAX)
+                             if option == "max_report_travel" else
+                             (policy.STARTUP_REQUEST_TRAVEL_MIN, policy.STARTUP_REQUEST_TRAVEL_MAX))
+                try:
+                    travel = float(value)
+                    if not math.isfinite(travel) or not low <= travel <= high:
+                        raise ValueError()
+                except (TypeError, ValueError):
+                    _fail(api, "Unrecognized %s change in %s" % (option, path))
+                replace[option] = value
         for key, value in replace.items():
             original.replace(key, value)
         for key in disable:

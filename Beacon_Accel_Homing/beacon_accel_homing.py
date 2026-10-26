@@ -1011,6 +1011,8 @@ class BeaconAccelHoming:
             self.backend.validate_motion_plan(speed, accel, self.printer.command_error)
         # Cruise time plus the time lost while ramping up to speed.
         deadline = print_time + travel / speed + speed / accel + self.watchdog_margin
+        if self.backend is not None and not math.isfinite(deadline):
+            raise self.printer.command_error("accel_homing: derived homing deadline must be finite")
         count_g = self.session_scale["scale"] / 1000.0
         threshold = self.threshold_g[axis]
         if self.full_scale_g is not None and threshold > 0.8 * self.full_scale_g:
@@ -1150,7 +1152,7 @@ class BeaconAccelHoming:
         # speeds.  This does not alter Beacon's pressed-start decision below.
         effective = attempt.effective_speed
         if effective is None:
-            effective = self.backend.max_speed if self.backend is not None else PRESSED_MIN_SPEED
+            effective = self.toolhead.get_max_velocity()[0] if self.backend is not None else PRESSED_MIN_SPEED
         proof_min_speed = min(PRESSED_MIN_SPEED, 0.5 * effective)
         window = motion_proof_window(effective)
         proof_commanded = (commanded if window == COMMAND_WINDOW else
@@ -1173,7 +1175,7 @@ class BeaconAccelHoming:
 
     def _motion_startup_plan(self, attempt):
         speed, accel = self.toolhead.get_max_velocity()
-        speed = attempt.effective_speed or min(speed, self.backend.max_speed)
+        speed = attempt.effective_speed or speed
         accel = attempt.effective_accel or (min(accel, self.homing_accel)
                                            if self.homing_accel else accel)
         return speed, accel, self.backend.motion_startup_timeout(speed, accel)
@@ -1575,10 +1577,16 @@ class BeaconAccelHoming:
                           % (self.sensor_name, kind, self.threshold_g["x"], self.threshold_g["y"]))
         if self.backend is not None:
             gcmd.respond_info("accel_homing: requested report interval %.4f s, sample-age limit"
-                              " %.4f s, observed rate %s Hz, maximum homing speed %.1f mm/s;"
+                              " %.4f s, observed rate %s Hz, report-age speed ceiling %s;"
                               " total stop latency is not guaranteed"
-                              % (self.backend.interval, self.backend.max_age,
-                                 self.backend.observed_rate, self.backend.max_speed))
+                              % (self.backend.interval, self.backend.max_age, self.backend.observed_rate,
+                                 "disabled" if self.backend.max_speed is None
+                                 else "%.1f mm/s" % self.backend.max_speed))
+        if self.backend is not None:
+            gcmd.respond_info("accel_homing: max_report_travel %s, max_startup_travel %s;"
+                              " optional commanded-travel limits, not physical stopping distances"
+                              % ("disabled" if self.backend.report_travel is None else "%.3f mm" % self.backend.report_travel,
+                                 "disabled" if self.backend.startup_travel is None else "%.3f mm" % self.backend.startup_travel))
         if self.baseline_status is not None:
             gcmd.respond_info("accel_homing: " + describe_reference(self.baseline_status))
         if not self.history:
