@@ -1,10 +1,10 @@
 {
-  "stage": "completed offline validation for 2 g calibration and full-history uninstall",
-  "timestamp_utc": "2026-10-26T05:23:06.510981+00:00",
+  "stage": "completed offline validation for motor-enable settling and fresh quiet preparation",
+  "timestamp_utc": "2026-10-26T05:47:20.476279+00:00",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 254,
-  "passed": 253,
+  "tests_run": 273,
+  "passed": 272,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -13,11 +13,24 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 2.804,
-  "process_elapsed_seconds": 3.017,
+  "elapsed_seconds": 2.965,
+  "process_elapsed_seconds": 3.186,
   "test_returncode": 0,
   "installer_tests": 73,
   "workflow_tests": 45,
+  "module_tests": {
+    "test_backends": 48,
+    "test_installer": 73,
+    "test_motion_policy": 10,
+    "test_session": 52,
+    "test_single_touch": 16,
+    "test_trigger": 29,
+    "test_workflows": 45
+  },
+  "preparation_fixture_tests": {
+    "test_backends.GenericPreparationTest": 6,
+    "test_session.EnablePreparationTest": 13
+  },
   "printer_connections": false,
   "hardware_testing": false,
   "installation": false,
@@ -28,41 +41,60 @@
   "log": "tests.txt",
   "shell_syntax_checks": [
     {
+      "command": "bash -n Beacon_Accel_Homing/install.sh",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "command": "bash -n Beacon_Accel_Homing/bootstrap.sh",
+      "returncode": 0,
+      "output": ""
+    },
+    {
       "command": "bash -n Beacon_Accel_Homing/uninstall.sh",
-      "returncode": 0
+      "returncode": 0,
+      "output": ""
     }
   ],
   "python_38_grammar_checks": {
     "files": [
-      "installer.py",
-      "uninstaller.py",
+      "accel_homing.py",
+      "accel_homing_backends.py",
+      "accel_homing_charts.py",
+      "accel_homing_model.py",
+      "accel_homing_workflows.py",
+      "beacon_accel_homing.py",
       "bootstrap.py",
-      "tests/test_installer.py"
+      "installer.py",
+      "tests/harness.py",
+      "tests/test_backends.py",
+      "tests/test_installer.py",
+      "tests/test_motion_policy.py",
+      "tests/test_session.py",
+      "tests/test_single_touch.py",
+      "tests/test_trigger.py",
+      "tests/test_workflows.py",
+      "uninstaller.py"
     ],
     "passed": true,
+    "errors": [],
     "actual_python_38_runtime_tested": false
   },
   "native_linux_integration_tested": false,
   "limitations": [
     "Real symlink creation skipped because this Windows host lacks permission; full restore/link-history tests use isolated link-state emulation.",
-    "No printer/hardware tests or physical stopping latency/distance measurement.",
+    "No printer/hardware tests, physical homing or motor-current measurement, deployment, restart, or physical motion.",
+    "The 20% quiet limit and default enable settling delay have not been physically validated.",
+    "Pre-motion preparation cannot preempt hold-to-run current changes occurring on the first step.",
+    "No physical stopping latency/distance measurement.",
     "No live Linux systemd or Unix-socket integration run.",
     "Hosted GitHub download validation is separate; this report uses mocked offline downloads.",
-    "Python 3.8 grammar parsing is not a Python 3.8 runtime compatibility test.",
-    "Unchanged install.sh/bootstrap.sh syntax checks from the previous run were not repeated."
+    "Python 3.8 grammar parsing is not a Python 3.8 runtime compatibility test."
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
   "whitespace_check_scope": [
-    "Beacon_Accel_Homing/accel_homing_workflows.py",
-    "Beacon_Accel_Homing/accel_homing_model.py",
-    "Beacon_Accel_Homing/tests/test_workflows.py",
-    "Beacon_Accel_Homing/README.md",
-    "Beacon_Accel_Homing/TESTING.md",
-    "Beacon_Accel_Homing/docs/INSTALLATION.md",
-    "Beacon_Accel_Homing/docs/COMPATIBILITY.md",
-    "Beacon_Accel_Homing/examples/accel_homing.cfg",
-    "Beacon_Accel_Homing/validation/VALIDATION.json",
-    "Beacon_Accel_Homing/validation/tests.txt"
+    "Beacon_Accel_Homing",
+    "README.md"
   ]
 }
