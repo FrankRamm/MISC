@@ -36,6 +36,22 @@ the previous reporting interval on completion/failure. Beacon retains its
 direct raw path and existing trigger dispatch. Both rely on host/transport
 scheduling and cannot guarantee a hard end-to-end stop latency.
 
+## Loading code and configuration
+
+After installing, updating, uninstalling or rolling back Python code/module
+links, manually restart the selected Klipper host process while idle. Use the
+actual service and restart command printed by the installer, or the correct
+host process manager when no service was detected. No restart is automatic.
+
+Console `RESTART` and `FIRMWARE_RESTART` recreate printer objects within the
+same Python process. Extras use normal cached imports, so those commands do
+not reload already imported modules after a source/link change. This follows
+the inspected [Klipper import path](https://github.com/Klipper3d/klipper/blob/ee2c6fb6b00b2b5d097ef70d0868df7d74943b51/klippy/klippy.py#L87-L110),
+[Klipper restart loop](https://github.com/Klipper3d/klipper/blob/ee2c6fb6b00b2b5d097ef70d0868df7d74943b51/klippy/klippy.py#L343-L359)
+and [Kalico restart loop](https://github.com/KalicoCrew/kalico/blob/0057b6a153170807e99080360c1ef15a2078f672/klippy/printer.py#L632-L648).
+Configuration-only threshold edits can still use console `RESTART`, and
+calibration `SAVE_CONFIG` retains its normal configuration restart.
+
 ## safe_z_home and X/Y-only workflows
 
 The standard Klipper/Kalico `[safe_z_home]` is supported without the installer's
@@ -127,9 +143,14 @@ recenters and repeats the same calibration command to resume the pending
 candidate and attempt count, keeping the same `AXIS` and optional `SAVE_CONFIG`
 value. Sensor faults and excessive travel abort. Native homing errors still
 use stock fault cleanup, which may release all motors.
-TEST/CHARTS instead start without arguments and wait for
-`ACCEL_HOMING_CONFIRM CENTERED=1` or the prompt button; this confirmation
-cannot start or resume calibration.
+TEST/CHARTS use the same manual preparation, with both XY axes unhomed, and
+start directly with `ACCEL_HOMING_TEST CENTERED=1` or
+`ACCEL_HOMING_CHARTS_GENERATE CENTERED=1`. They retain the prepared XY state
+until homing starts; there is no preliminary XY release or separate
+confirmation command. All three workflows require `CENTERED=1` before any
+workflow movement. Early calibration hits use plain console instructions for
+manual recentering and the same calibration command; the timeout remains
+active. The workflows emit no UI prompt actions.
 
 ## Generic startup motion policy
 

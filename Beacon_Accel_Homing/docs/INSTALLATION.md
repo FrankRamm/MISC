@@ -31,8 +31,16 @@ aborts before plugin/config installation.
 The installer activates the plugin section and X/Y endstops, not just plugin
 links. It still refuses ambiguous hosts, accelerometers and unsafe/custom
 homing configuration until explicitly resolved. Review the resulting config
-and mounting, then issue **`RESTART` yourself while idle**. The installer
-does not restart Klipper or start homing/calibration.
+and mounting, then **restart the selected Klipper host process yourself while
+idle**. Run the host command printed by the installer, using its exact service
+name. If no service was detected, use that instance's actual host service
+manager. The installer does not restart Klipper or start homing/calibration.
+
+Console `RESTART` and `FIRMWARE_RESTART` do not reload already imported Python
+modules. A real host-process restart is required after installing/updating
+code or changing module links. Later configuration-only threshold edits can
+use console `RESTART`; normal calibration `SAVE_CONFIG` also remains unchanged.
+See [the source evidence](COMPATIBILITY.md#loading-code-and-configuration).
 
 Sources remain under
 `~/.local/share/accel-homing/FrankRamm--MISC-<full-commit-SHA>/`, with the exact
@@ -52,6 +60,27 @@ bash /path/to/Beacon_Accel_Homing/install.sh
 
 Use the actual source path reported by bootstrap, or your extracted folder,
 in the local commands below.
+
+## Update an existing installation
+
+Each downloaded commit has its own immutable source directory. Updating an
+installed version therefore requires reviewing the new release and explicitly
+allowing its module links to replace the previous targets:
+
+```bash
+bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing --replace-existing-links'
+```
+
+`--replace-existing-links` backs up the existing link targets and repoints them
+to the verified new source. Keep all source directories and transaction backups
+for rollback. Without this option, a different existing link target is refused
+before any installation writes; a completed download alone does not update
+the installed plugin. Then review the changes and manually restart the
+selected host process while idle, using the printed service command.
+
+For a pinned update, use the same reviewed full commit SHA in the download URL
+and `--ref`, retaining `--replace-existing-links`; see
+[pinning a published commit](#pin-a-specific-published-commit).
 
 ## Inspect without writes
 
@@ -148,7 +177,7 @@ that review with `--acknowledge-homing-override`; this does not validate a
 custom path. Workflows still reject these paths and unknown wrapper chains,
 including a custom handler beneath or above `safe_z_home`.
 
-## Prepare calibration after restarting
+## Prepare calibration after the host-process restart
 
 Before the first calibration command, use the XY motor controls appropriate
 for your machine and physically center the toolhead by hand in both X and Y,
@@ -167,8 +196,16 @@ ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
 authorizes the first candidate home, starting at 2 g by default. It does not
 measure the manual position. After an early trigger, XY is released and made
 unhomed; center it manually again and reissue the same calibration command to
-resume, keeping the same `AXIS` and optional `SAVE_CONFIG` value.
-`ACCEL_HOMING_CONFIRM` is reserved for TEST/CHARTS.
+resume, keeping the same `AXIS` and optional `SAVE_CONFIG` value. The console
+reports manual-recentering instructions; the pending calibration retains its
+configured timeout.
+
+TEST and CHARTS require the same existing manual XY center, both axes unhomed
+and nozzle/bed clearance. Start them directly with
+`ACCEL_HOMING_TEST CENTERED=1` or
+`ACCEL_HOMING_CHARTS_GENERATE CENTERED=1`. They do not release XY before the
+first home or request a separate confirmation. `CENTERED=1` is mandatory and
+authorizes movement after stationary preparation succeeds.
 
 Successful calibration saves X and restarts Klipper by default. Once ready,
 repeat the preparation and use `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` for Y.
@@ -233,7 +270,9 @@ calibration can be removed without losing other saved data.
 
 Running Klipper must pass the same selected-instance idle checks as install.
 Uninstallation never stops/restarts the service or starts movement. Review
-the restored config and issue **`RESTART` yourself only while idle**.
+the restored config, then **restart the selected Klipper host process yourself
+while idle**, using the service command printed by the uninstaller. This
+applies restored modules and removes the previously imported plugin code.
 
 ## Backups, single-transaction rollback and recovery
 
@@ -294,8 +333,10 @@ up.
 
 A second install of the same package/config makes no further edits or backups.
 An installer never changes firmware, wiring or physical geometry. After install,
-uninstall or rollback, review the result and issue `RESTART` yourself only while
-idle.
+update, uninstall or rollback that changes code/module links, review the result
+and manually restart the selected Klipper host process while idle. Restoring
+old module links also requires a real process restart; console `RESTART` does
+not reload the previous Python implementation.
 
 ## Pin a specific published commit
 
@@ -306,6 +347,10 @@ in the download URL and `--ref`; a branch name is not an immutable version:
 ```bash
 bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/FULL_40_CHARACTER_COMMIT_SHA/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref FULL_40_CHARACTER_COMMIT_SHA'
 ```
+
+For an existing installation, append `--replace-existing-links` to that final
+`bash "$t"` command after reviewing the selected release, as in the update
+command above. This option preserves the old targets in the transaction backup.
 
 No Git dependency, automatic update manager, service restart or motion is added.
 
