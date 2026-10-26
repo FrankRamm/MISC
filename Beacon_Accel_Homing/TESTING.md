@@ -43,7 +43,7 @@ failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. All three shell entry points are byte-identical to the source base
-`3940fa06c71431103371eb24512b147c2df511b4`, so their syntax checks were not repeated. No native
+`4415635d06e8872ae80a54a86ca32d4abb7468cf`, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -59,7 +59,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The final combined offline verification run discovered **468 tests: 467 passed,
+The final combined offline verification run discovered **482 tests: 481 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -226,10 +226,10 @@ existing shared/X/Y values below 3 g through initial installation and update
 in either section. The next-float fixture uses portable struct operations;
 Python 3.8 runtime compatibility was not exercised.
 
-The recorded run used CPython 3.13.5 on Windows: **468 tests in 8.636 seconds**
-(8.8765742 seconds subprocess wall time). The full UTF-8 unittest output is
+The recorded run used CPython 3.13.5 on Windows: **482 tests in 9.295 seconds**
+(9.5432054 seconds subprocess wall time). The full UTF-8 unittest output is
 retained in `validation/tests.txt` as its exact binary-captured bytes, without
-newline conversion: **78,305 bytes and 473 CRLF pairs**. The JSON report hashes
+newline conversion: **80,841 bytes and 487 CRLF pairs**. The JSON report hashes
 that stored log and all **20 Python sources both before and after** the run;
 the two source snapshots match. All **35 package files** were also identical
 between the snapshots taken during the suite; this summary, the new log and
@@ -306,6 +306,36 @@ calculation is 90 ms at 75 mm/s, 5000 mm/s² and a 50 ms native stream timeout,
 bounded also by the existing travel deadline. These are synthetic software
 requests, not measured stopping latency or a hardware guarantee. Quiet native
 references retain the legacy pressed-start and stream watchdog path.
+
+**14 tests** in `test_motion_policy.NativeStepEpochTests` exercise the added
+native-expanded interval proof. Synthetic step histories include queued
+startup delay separately from sensor/step skew and vary watchdog phase.
+The interval uses the first recorded commanded step, a coherent X/Y/Z noise
+bound and the existing commanded-history check, while retaining the original
+arm-relative deadline. Tests do not reconstruct a ramp that occurred before
+arming or accept stationary bias, later jolts or subthreshold ringing as
+startup proof. First and later raw contact samples remain eligible.
+
+History is limited to 4096 prefix entries, including its initial entry;
+overflow requests a host stop with `proof_overflow` rather than evicting
+earlier evidence. Each actual watchdog callback shares one budget of at most
+1024 interval comparisons. Fixtures check this bound, prohibit step-history
+queries from the sensor callback, cover clock wrap and attempt isolation,
+and retain failure diagnostics through session/capture cleanup. Diagnostic
+failures after dispatch cannot prevent the stop request. A step-history query
+fault cannot fall through to cached full-arm proof. A later sensor disconnect
+still fails after verified startup.
+
+The retained scalar `last.<axis>.motion_proof` summary reports planned
+effective speed/acceleration, step and sensor timing, full-arm/window bounds,
+command eligibility, request timing and bounded-history state. It separates
+the bounds' evaluated sample time from a newer accepted sample time and
+contains no raw sample array. The synthetic reproduction establishes a
+software timing failure mode; it does not prove every live failure's cause
+or physical motor travel. A separate broadened matched step/sensor ramp still
+fails conservatively, so these tests do not qualify arbitrary physical ramp
+shapes. No quiet-floor, impact-threshold, speed or timeout relaxation is part
+of this correction.
 
 For a configured reference whose actual accepted variation exceeds the old
 20% gate, movement proof uses a conservative lower bound. Each axis freezes

@@ -301,7 +301,11 @@ candidate, the default quiet limit is 0.2 g while the impact threshold remains
 0.5 g. This setting does not affect native Beacon.
 
 When a native Beacon reference exceeds the original 20% limit, movement
-proof discounts the observed stationary-noise envelope. Already-pressed
+proof discounts the observed stationary-noise envelope. An additional bounded
+sample interval around the first commanded step in recorded history excludes
+earlier queued stationary samples from that interval. It must still prove
+enough motion before the original startup deadline; raw impacts remain
+eligible throughout. Already-pressed
 detection uses the current upper velocity bound; ambiguous evidence fails
 with `no_motion` by a calculated startup deadline. It does not count as a
 successful pressed start. References within the old limit retain the legacy
@@ -309,6 +313,10 @@ path. Neither path changes raw impact detection or introduces a blind
 interval. These policies have synthetic validation only; they do not prove
 physical contact or stopping distance. See
 [native Beacon motion checks](docs/COMPATIBILITY.md#native-beacon-with-an-expanded-reference).
+
+After a failure, STATUS retains a short motion-proof summary under the
+affected axis's last result. Include it with the baseline summary when
+reporting a problem; neither summary measures physical motor travel.
 
 Acquisition is limited to `baseline_time + 0.5 s` after setup completes.
 Earlier buffered data cannot qualify. Data faults abort; persistent noise or
