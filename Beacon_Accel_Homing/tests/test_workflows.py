@@ -20,6 +20,14 @@ from accel_homing_model import AccelHomingModel
 from harness import CommandError, ConfigError, FakeReactor
 
 
+class ConsoleMessages(list):
+    """Every exercised response path must stay free of popup protocol output."""
+    def append(self, message):
+        if "action:prompt_" in message:
+            raise AssertionError("workflow emitted a popup action: " + message)
+        super().append(message)
+
+
 class Config:
     error = ConfigError
 
@@ -62,7 +70,7 @@ class GCmd:
     error = CommandError
 
     def __init__(self, command=None, commandline=None, **params):
-        self.params, self.responses = params, []
+        self.params, self.responses = params, ConsoleMessages()
         self.command, self.commandline = command, commandline
 
     def get_command(self):
@@ -285,7 +293,7 @@ class Rig:
     def __init__(self, options=None, sections=None):
         self.reactor = FakeReactor()
         self.handlers = collections.defaultdict(list)
-        self.output, self.scripts, self.disabled, self.home_calls = [], [], [], []
+        self.output, self.scripts, self.disabled, self.home_calls = ConsoleMessages(), [], [], []
         self.dispatched_scripts, self.created_commands, self.homing_events, self.z_homes = [], [], [], []
         self.end_sessions = 0
         self.idle_state, self.print_state = "Ready", "standby"
@@ -442,11 +450,6 @@ class Rig:
         arguments.update(params)
         self.workflow.cmd_CALIBRATE(GCmd(**arguments))
 
-    def confirm(self, **params):
-        arguments = {"CENTERED": 1}
-        arguments.update(params)
-        self.workflow.cmd_CONFIRM(GCmd(**arguments))
-
     def effects(self):
         return copy.deepcopy({
             "scripts": self.scripts, "moves": self.toolhead.moves,
@@ -482,8 +485,7 @@ class SafeZHomingWorkflowTests(unittest.TestCase):
                         rig.calibrate(axis.upper(), save=0)
                         expected = [axis.upper()] * 11
                     else:
-                        getattr(rig.workflow, "cmd_TEST" if mode == "test" else "cmd_CHARTS")(GCmd())
-                        rig.confirm()
+                        getattr(rig.workflow, "cmd_TEST" if mode == "test" else "cmd_CHARTS")(GCmd(CENTERED=1))
                         expected = ["X", "Y"]
                     self.assertEqual(safe.calls, [])
                     self.assertEqual(rig.dispatched_scripts, [])
@@ -523,8 +525,7 @@ class SafeZHomingWorkflowTests(unittest.TestCase):
         rig.objects["probe"] = rig.objects["cartographer"] = probe
         safe = rig.use_safe_z_home()
         handler = rig.gcode.gcode_handlers["G28"]
-        rig.workflow.cmd_TEST(GCmd())
-        rig.confirm()
+        rig.workflow.cmd_TEST(GCmd(CENTERED=1))
         rig.run_script("G28 Z")
         self.assertEqual(safe.calls, ["G28 Z"])
         self.assertEqual(len(rig.z_homes), 1)
@@ -682,9 +683,8 @@ class SafeZHomingWorkflowTests(unittest.TestCase):
                         mutate()
                         resume = lambda: rig.calibrate(save=0)
                     elif mode == "test":
-                        rig.workflow.cmd_TEST(GCmd())
                         rig.on_home = mutate
-                        resume = rig.confirm
+                        resume = lambda: rig.workflow.cmd_TEST(GCmd(CENTERED=1))
                     else:
                         rig.on_home = mutate
                         resume = lambda: rig.calibrate(save=0)
@@ -1026,7 +1026,7 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(rig.scripts, [])
             self.assertEqual(rig.disabled, [])
 
-    def test_current_command_does_not_mark_idle_printing_and_own_prompt_motion_can_continue(self):
+    def test_current_command_does_not_mark_idle_printing_and_own_retry_release_can_continue(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 2.0})
         rig.calibrate()
@@ -1077,32 +1077,37 @@ class GuardTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandError, "already active"):
             rig.calibrate("Y")
         with self.assertRaisesRegex(CommandError, "already active"):
-            rig.workflow.cmd_TEST(GCmd())
+            rig.workflow.cmd_TEST(GCmd(CENTERED=1))
         with self.assertRaisesRegex(CommandError, "already active"):
-            rig.workflow.cmd_CHARTS(GCmd())
+            rig.workflow.cmd_CHARTS(GCmd(CENTERED=1))
         with self.assertRaisesRegex(CommandError, "workflow"):
             rig.workflow.check_home_axes({"x": rig.owner.rails_by_axis["x"]})
         with self.assertRaisesRegex(CommandError, "workflow"):
             rig.workflow.check_settings_change()
-        with self.assertRaisesRegex(CommandError, "ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1"):
-            rig.confirm()
         self.assertEqual(rig.effects(), before)
 
     def test_calibration_cannot_replace_another_workflow_or_reenter_a_running_one(self):
-        for mode in ("test", "charts", "calibration_running"):
-            rig = Rig()
-            if mode == "test":
-                rig.workflow.cmd_TEST(GCmd())
-            elif mode == "charts":
-                rig.workflow.cmd_CHARTS(GCmd())
-            else:
-                rig.home_results.append({"travel_mm": 2.0})
-                rig.calibrate()
-                rig.workflow.session["state"] = "running"
-            before = rig.effects()
-            with self.assertRaisesRegex(CommandError, "already active"):
-                rig.calibrate()
-            self.assertEqual(rig.effects(), before)
+        for mode in ("test", "charts", "calibration"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                rig = Rig({"charts_directory": temp})
+                checked = []
+                def check_reentrant(axis):
+                    rig.on_home = None
+                    before = rig.effects()
+                    for callback in (lambda: rig.calibrate(),
+                                     lambda: rig.workflow.cmd_TEST(GCmd(CENTERED=1)),
+                                     lambda: rig.workflow.cmd_CHARTS(GCmd(CENTERED=1))):
+                        with self.assertRaisesRegex(CommandError, "already active"):
+                            callback()
+                        self.assertEqual(rig.effects(), before)
+                    checked.append(axis)
+                rig.on_home = check_reentrant
+                if mode == "calibration":
+                    rig.calibrate(save=0)
+                else:
+                    getattr(rig.workflow, "cmd_TEST" if mode == "test" else "cmd_CHARTS")(GCmd(CENTERED=1))
+                self.assertEqual(checked, ["x"])
+                self.assertIsNone(rig.workflow.session)
 
     def test_calibration_resume_keeps_save_config_choice_and_rejects_conflicting_override(self):
         rig = Rig()
@@ -1239,67 +1244,95 @@ class ModelTests(unittest.TestCase):
 
 
 class TestAndChartWorkflowTests(unittest.TestCase):
-    def test_no_argument_start_prompts_for_token_free_explicit_confirmation(self):
+    def test_missing_zero_or_malformed_centered_cannot_start_or_mutate_a_waiting_session(self):
         for callback in ("cmd_TEST", "cmd_CHARTS"):
-            rig = Rig()
-            getattr(rig.workflow, callback)(GCmd())
-            self.assertEqual(rig.scripts, [])
-            self.assertEqual(rig.workflow.session["state"], "waiting")
-            self.assertNotIn("token", rig.workflow.session)
-            self.assertTrue(any("ACCEL_HOMING_CONFIRM CENTERED=1" in text for text in rig.output))
-            self.assertFalse(any("TOKEN" in text for text in rig.output))
-            for params in ({}, {"CENTERED": 0}, {"CENTERED": "invalid"}, {"CENTERED": 2}):
-                before = rig.effects()
-                with self.assertRaisesRegex(CommandError, "CENTERED=1"):
-                    rig.workflow.cmd_CONFIRM(GCmd(**params))
-                self.assertEqual(rig.effects(), before)
+            for waiting in (False, True):
+                for params in ({}, {"CENTERED": 0}, {"CENTERED": "invalid"},
+                               {"CENTERED": "1.0"}, {"CENTERED": 2}, {"CENTERED": -1}):
+                    with self.subTest(callback=callback, waiting=waiting, params=params):
+                        rig = Rig()
+                        if waiting:
+                            rig.home_results.append({"travel_mm": 2.0})
+                            rig.calibrate(save=0)
+                        before = rig.effects()
+                        with self.assertRaisesRegex(CommandError, "CENTERED=1"):
+                            getattr(rig.workflow, callback)(GCmd(**params))
+                        self.assertEqual(rig.effects(), before)
+
+    def test_separate_confirmation_command_and_method_are_removed(self):
+        rig = Rig()
+        self.assertNotIn("ACCEL_HOMING_CONFIRM", rig.gcode.ready_gcode_handlers)
+        self.assertFalse(hasattr(rig.workflow, "cmd_CONFIRM"))
+        for command in ("ACCEL_HOMING_CALIBRATE", "ACCEL_HOMING_TEST",
+                        "ACCEL_HOMING_CHARTS_GENERATE", "ACCEL_HOMING_CANCEL", "ACCEL_HOMING_STATUS"):
+            self.assertIn(command, rig.gcode.ready_gcode_handlers)
 
     def test_old_extra_token_is_ignored_for_compatibility(self):
         rig = Rig()
-        rig.workflow.cmd_TEST(GCmd())
-        rig.confirm(TOKEN="obsolete-token")
+        rig.workflow.cmd_TEST(GCmd(CENTERED=1, TOKEN="obsolete-token"))
         self.assertEqual(rig.scripts, ["G28 X", "G28 Y"])
         self.assertEqual(rig.workflow.last_result["result"], "complete")
 
-    def test_shared_confirmation_rejects_changed_state_and_expiry_before_any_home(self):
-        for change in ("position", "threshold", "homed_state", "printing", "expired"):
-            rig = Rig()
-            rig.workflow.cmd_TEST(GCmd())
-            if change == "position":
-                rig.toolhead.position[0] += 5.0
-            elif change == "threshold":
-                rig.owner.threshold_g["y"] = 4.0
-            elif change == "homed_state":
-                rig.toolhead.kin.limits[1] = (0.0, 200.0)
-            elif change == "printing":
-                rig.print_state = "printing"
-            else:
-                rig.reactor.now = rig.workflow.session["expires"]
-            with self.assertRaises(CommandError):
-                rig.confirm()
-            self.assertIsNone(rig.workflow.session)
-            self.assertEqual(rig.scripts, [])
-            self.assertEqual(rig.toolhead.moves, [])
+    def test_prehomed_xy_are_rejected_before_release_motion_or_setting_changes(self):
+        for callback in ("cmd_TEST", "cmd_CHARTS"):
+            for homed in ("x", "y", "xy", "xz", "yz", "xyz"):
+                with self.subTest(callback=callback, homed=homed):
+                    rig = Rig()
+                    rig.toolhead.kin.limits = [(0.0, 300.0) if axis in homed else (1.0, -1.0)
+                                               for axis in "xyz"]
+                    before = rig.effects()
+                    with self.assertRaisesRegex(CommandError, "both X and Y unhomed"):
+                        getattr(rig.workflow, callback)(GCmd(CENTERED=1))
+                    self.assertEqual(rig.effects(), before)
 
-    def test_test_homes_x_then_y_only_after_confirmation(self):
-        rig = Rig()
-        rig.workflow.cmd_TEST(GCmd())
-        self.assertEqual(rig.scripts, [])
-        rig.confirm()
-        self.assertEqual(rig.scripts, ["G28 X", "G28 Y"])
-        self.assertEqual(rig.toolhead.moves, [([150.0, None, None], 50.0)])
-        self.assertEqual(rig.workflow.last_result["result"], "complete")
-        self.assertEqual(rig.toolhead.position[2:], [40.0, 6.0])
+    def test_busy_printing_paused_shutdown_and_other_homing_block_direct_commands(self):
+        for callback in ("cmd_TEST", "cmd_CHARTS"):
+            for setup in (lambda r: setattr(r, "print_state", "printing"),
+                          lambda r: setattr(r, "print_state", "paused"),
+                          lambda r: setattr(r, "paused", True),
+                          lambda r: setattr(r, "sd_active", True),
+                          lambda r: setattr(r, "idle_state", "Printing"),
+                          lambda r: setattr(r, "shutdown", True),
+                          lambda r: setattr(r.owner, "homing_active", True),
+                          lambda r: setattr(r.owner, "attempt", object()),
+                          lambda r: setattr(r.toolhead, "busy", (0.0, 10.0, False))):
+                rig = Rig()
+                setup(rig)
+                before = rig.effects()
+                with self.assertRaises(CommandError):
+                    getattr(rig.workflow, callback)(GCmd(CENTERED=1))
+                self.assertEqual(rig.effects(), before)
+
+    def test_direct_commands_home_xy_without_preliminary_home_release_or_wait(self):
+        for callback in ("cmd_TEST", "cmd_CHARTS"):
+            with self.subTest(callback=callback), tempfile.TemporaryDirectory() as temp:
+                rig = Rig({"charts_directory": temp})
+                rig.toolhead.position[:2] = [12.0, 19.0]
+                getattr(rig.workflow, callback)(GCmd(CENTERED=1))
+                self.assertEqual(rig.scripts, ["G28 X", "G28 Y"])
+                self.assertEqual([call["axis"] for call in rig.home_calls], ["x", "y"])
+                self.assertEqual(rig.home_calls[0]["position"], [12.0, 19.0, 40.0, 6.0])
+                self.assertEqual(rig.home_calls[0]["homed_axes"], "z")
+                self.assertEqual(rig.toolhead.moves, [([150.0, None, None], 50.0)])
+                self.assertEqual(rig.disabled, [])
+                self.assertEqual(rig.toolhead.dwells, [])
+                self.assertEqual(rig.workflow.last_result["result"], "complete")
+                self.assertEqual(rig.toolhead.position[2:], [40.0, 6.0])
+                self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                self.assertEqual(rig.owner.back_off_dist, 5.0)
+                self.assertEqual(rig.configfile.saved, {})
+                self.assertEqual(rig.dispatched_scripts, [])
+                self.assertIsNone(rig.workflow.session)
+                self.assertEqual(rig.reactor.timers[rig.workflow.timer], rig.reactor.NEVER)
 
     def test_chart_exports_current_run_samples_and_explicit_paths(self):
         with tempfile.TemporaryDirectory() as temp:
             rig = Rig({"charts_directory": temp})
             rig.owner.last["x"] = {"axis": "x", "result": "impact", "travel_mm": 1234}
-            rig.workflow.cmd_CHARTS(GCmd())
-            run = rig.workflow.session["run_id"]
-            rig.confirm()
+            rig.workflow.cmd_CHARTS(GCmd(CENTERED=1))
             self.assertEqual(rig.scripts, ["G28 X", "G28 Y"])
             result = rig.workflow.last_result
+            run = result["run_id"]
             self.assertEqual(len(result["paths"]), 2)
             for item in result["paths"]:
                 for extension in ("csv", "svg", "html", "json"):
@@ -1312,15 +1345,87 @@ class TestAndChartWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(metadata["record"]["travel_mm"], 1234)
             self.assertTrue(any("CSV: " + temp in message for message in rig.output))
 
-    def test_bad_test_result_never_returns_from_false_home_or_homes_next_axis(self):
-        rig = Rig()
-        rig.workflow.cmd_TEST(GCmd())
-        rig.home_results.append({"travel_mm": 15.0})
-        with self.assertRaisesRegex(CommandError, "no automatic move"):
-            rig.confirm()
-        self.assertEqual(rig.scripts, ["G28 X"])
-        self.assertEqual(rig.toolhead.moves, [])
-        self.assertEqual(rig.workflow.last_result["result"], "rejected")
+    def test_suspect_xy_results_finalize_rejection_without_more_homes_or_model_saving(self):
+        for callback in ("cmd_TEST", "cmd_CHARTS"):
+            for bad_axis in "xy":
+                for bad in ({"travel_mm": 15.0}, {"result": "pressed"},
+                            {"result": "no_data"}, {"travel_mm": 500.0}, {"moving": False}):
+                    with self.subTest(callback=callback, axis=bad_axis, bad=bad), tempfile.TemporaryDirectory() as temp:
+                        rig = Rig({"charts_directory": temp})
+                        if bad_axis == "y":
+                            rig.home_results.append({})
+                        rig.home_results.append(bad)
+                        with self.assertRaisesRegex(CommandError, "no automatic move"):
+                            getattr(rig.workflow, callback)(GCmd(CENTERED=1))
+                        expected = ["G28 X"] if bad_axis == "x" else ["G28 X", "G28 Y"]
+                        self.assertEqual(rig.scripts, expected)
+                        self.assertEqual(rig.toolhead.moves, [] if bad_axis == "x" else
+                                         [([150.0, None, None], 50.0)])
+                        self.assertEqual(rig.workflow.last_result["result"], "rejected")
+                        self.assertEqual(len(rig.workflow.last_result["paths"]),
+                                         len(expected) if callback == "cmd_CHARTS" else 0)
+                        self.assertIsNone(rig.workflow.session)
+                        self.assertEqual(rig.configfile.saved, {})
+                        self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                        self.assertEqual(rig.owner.back_off_dist, 5.0)
+                        self.assertFalse(rig.capture_active)
+
+    def test_execution_failures_abort_restore_and_never_save_a_model(self):
+        for callback in ("cmd_TEST", "cmd_CHARTS"):
+            for failure in ("homing", "capture", "unexpected", "export"):
+                if failure == "export" and callback != "cmd_CHARTS":
+                    continue
+                with self.subTest(callback=callback, failure=failure), tempfile.TemporaryDirectory() as temp:
+                    rig = Rig({"charts_directory": temp})
+                    if failure == "homing":
+                        rig.home_results.append(CommandError("synthetic homing error"))
+                    elif failure == "capture":
+                        rig.bad_capture = {"samples": [], "dropped": 0}
+                    elif failure == "unexpected":
+                        rig.home_results.append(RuntimeError("synthetic unexpected error"))
+                    context = mock.patch.object(workflow_module, "write_capture", side_effect=OSError("synthetic export error")) \
+                        if failure == "export" else contextlib.nullcontext()
+                    with context, self.assertRaises(Exception):
+                        getattr(rig.workflow, callback)(GCmd(CENTERED=1))
+                    self.assertEqual(rig.scripts, ["G28 X"])
+                    self.assertEqual(rig.toolhead.moves, [])
+                    self.assertEqual(rig.workflow.last_result["result"], "aborted")
+                    self.assertIsNone(rig.workflow.session)
+                    self.assertFalse(rig.capture_active)
+                    self.assertEqual(rig.configfile.saved, {})
+                    self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                    self.assertEqual(rig.owner.back_off_dist, 5.0)
+
+    def test_retry_cancel_timeout_shutdown_and_status_use_only_console_messages(self):
+        for ending in ("cancel", "timeout", "shutdown"):
+            with self.subTest(ending=ending):
+                rig = Rig()
+                rig.home_results.append({"travel_mm": 2.0})
+                rig.calibrate(save=0)
+                session = rig.workflow.session
+                self.assertEqual(session["state"], "waiting")
+                self.assertTrue(any("ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1" in line for line in rig.output))
+                self.assertEqual(rig.workflow._timeout(rig.reactor.now), session["expires"])
+                status = GCmd()
+                rig.workflow.cmd_STATUS(status)
+                self.assertEqual(json.loads(status.responses[-1])["active"]["state"], "waiting")
+                if ending == "cancel":
+                    rig.workflow.cmd_CANCEL(GCmd())
+                elif ending == "timeout":
+                    rig.workflow._timeout(session["expires"])
+                else:
+                    rig.shutdown = True
+                    for callback in rig.handlers["klippy:shutdown"]:
+                        callback()
+                self.assertEqual(rig.scripts, ["G28 X"])
+                self.assertEqual(rig.toolhead.moves, [])
+                self.assertEqual(rig.configfile.saved, {})
+                self.assertIsNone(rig.workflow.session)
+                self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                self.assertEqual(rig.owner.back_off_dist, 5.0)
+                self.assertEqual(rig.workflow._timeout(rig.reactor.now), rig.reactor.NEVER)
+                rig.workflow.cmd_CANCEL(GCmd())
+                rig.workflow.cmd_STATUS(GCmd())
 
 
 class PortableChartTests(unittest.TestCase):
