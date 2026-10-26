@@ -145,8 +145,7 @@ class AccelHomingWorkflows:
                               "kinematics with Z independent of XY")
         if getattr(kin, "dual_carriage_axis", None) is not None:
             raise self._error("dual-carriage workflows are not supported")
-        if not hasattr(kin, "clear_homing_state") and not (
-                isinstance(getattr(kin, "limits", None), list) and len(kin.limits) == 3):
+        if not (isinstance(getattr(kin, "limits", None), list) and len(kin.limits) == 3):
             raise self._error("this kinematics cannot invalidate XY while retaining Z")
         self._xy_enable_lines()
         for axis in axes:
@@ -202,19 +201,28 @@ class AccelHomingWorkflows:
 
     def _disable_xy(self):
         toolhead = self.owner.toolhead
+        kin = toolhead.get_kinematics()
+        limits = getattr(kin, "limits", None)
+        if not isinstance(limits, list) or len(limits) != 3:
+            raise self._error("this kinematics cannot invalidate XY while retaining Z")
+        lines = self._xy_enable_lines()
+        z_limit = limits[2]
+        z_homed = "z" in kin.get_status(self.reactor.monotonic()).get("homed_axes", "")
         toolhead.wait_moves()
         toolhead.flush_step_generation()
         toolhead.dwell(0.1)
         print_time = toolhead.get_last_move_time()
-        for line in self._xy_enable_lines():
+        for line in lines:
             line.motor_disable(print_time)
         toolhead.dwell(0.1)
-        kin = toolhead.get_kinematics()
-        if hasattr(kin, "clear_homing_state"):
-            kin.clear_homing_state("xy")
-        else:
-            # Historical cartesian/corexy firmware uses the same invalid range.
-            kin.limits[0] = kin.limits[1] = (1.0, -1.0)
+        # Stock cartesian/corexy use these ranges for homed state. The public
+        # clear_homing_state API differs between Klipper (letters) and Kalico
+        # (integer indices), so invalidate only the two verified XY ranges.
+        limits[0] = limits[1] = (1.0, -1.0)
+        homed = kin.get_status(self.reactor.monotonic()).get("homed_axes", "")
+        if any(axis in homed for axis in AXES) or ("z" in homed) != z_homed \
+                or kin.limits[2] != z_limit:
+            raise self._error("could not invalidate XY while retaining Z state")
         toolhead.wait_moves()
 
     def _geometry(self, axis):
@@ -312,7 +320,7 @@ class AccelHomingWorkflows:
     def check_home_axes(self, axes):
         """Called by core before an accelerometer homing session can move."""
         if self.session is not None and (not self.in_home or set(axes) != {self.home_axis}):
-            raise self._error("a supervised workflow is active; use CONFIRM or CANCEL")
+            raise self._error("a supervised workflow is active; resume its prompt or use CANCEL")
 
     def check_home_result(self, record):
         # Single-touch geometry is enforced before any workflow motion. Record
@@ -325,11 +333,24 @@ class AccelHomingWorkflows:
         if self.session is not None:
             raise self._error("cancel the active workflow before changing homing settings")
 
+    def _require_centered(self, gcmd):
+        if str(gcmd.get("CENTERED", "")).strip() != "1":
+            raise gcmd.error("Manually center XY first, then explicitly confirm with CENTERED=1")
+
+    def _require_unhomed_xy(self):
+        homed = self.owner.toolhead.get_kinematics().get_status(
+            self.reactor.monotonic()).get("homed_axes", "")
+        if any(axis in homed for axis in AXES):
+            raise self._error("calibration requires both X and Y unhomed; release XY and "
+                              "manually center the toolhead before CALIBRATE CENTERED=1")
+
     def _begin(self, gcmd, mode, axis=None):
         if self.session is not None:
             raise gcmd.error("A workflow is already active; use ACCEL_HOMING_CANCEL first")
         axes = [axis] if axis else ["x", "y"]
         self._preflight(axes)
+        if mode == "calibration":
+            self._require_unhomed_xy()
         self.session = {"mode": mode, "axis": axis, "state": "starting",
                         "run_id": uuid.uuid4().hex, "successes": 0, "attempts": 0,
                         "candidate_qualified": False,
@@ -343,7 +364,6 @@ class AccelHomingWorkflows:
         self._disable_xy()
         session = self.session
         session["state"] = "waiting"
-        session["token"] = uuid.uuid4().hex[:12]
         session["expires"] = self.reactor.monotonic() + self.confirm_timeout
         session["snapshot"] = self._snapshot()
         self.reactor.update_timer(self.timer, session["expires"])
@@ -351,7 +371,8 @@ class AccelHomingWorkflows:
         instruction = "Move XY manually to the center of their travel, then confirm. "
         instruction += "Expected centers: " + ", ".join("%s=%.2f mm" % (a.upper(), v)
                                                        for a, v in centers.items())
-        command = "ACCEL_HOMING_CONFIRM TOKEN=%s CENTERED=1" % session["token"]
+        command = ("ACCEL_HOMING_CALIBRATE AXIS=%s CENTERED=1" % session["axis"].upper()
+                   if session["mode"] == "calibration" else "ACCEL_HOMING_CONFIRM CENTERED=1")
         self._info("%s. %s Command: %s (expires in %.0f s)" % (
             reason, instruction, command, self.confirm_timeout))
         # Mainsail and Fluidd both understand Klipper action prompt responses.
@@ -521,30 +542,47 @@ class AccelHomingWorkflows:
         axis = gcmd.get("AXIS", "").lower()
         if axis not in AXES:
             raise gcmd.error("AXIS must be X or Y")
+        self._require_centered(gcmd)
+        session = self.session
+        if session is not None:
+            if session["mode"] != "calibration" or session["axis"] != axis \
+                    or session.get("state") != "waiting":
+                raise gcmd.error("A workflow is already active; resume calibration on its "
+                                 "same axis or use ACCEL_HOMING_CANCEL first")
+            if gcmd.get("SAVE_CONFIG", None) is not None and bool(gcmd.get_int(
+                    "SAVE_CONFIG", minval=0, maxval=1)) != session["save_config"]:
+                raise gcmd.error("SAVE_CONFIG cannot change while resuming calibration")
+            self._continue()
+            return
         self._begin(gcmd, "calibration", axis)
         try:
-            self._home(axis, self.start_threshold)  # uncounted initial low-threshold home
-            self._wait_center("Initial %.2f g home complete; it does not count as a calibration success"
-                              % self.start_threshold)
-        except Exception:
-            self._finish({"result": "aborted", "reason": "initial homing or prompt failed"}, release=True)
+            self.session["state"] = "running"
+            self._calibrate_trials()
+        except Exception as exc:
+            if self.session is not None:
+                self._finish({"result": "aborted", "reason": str(exc)}, release=True)
             raise
 
     def cmd_CONFIRM(self, gcmd):
         session = self.session
         if session is None or session.get("state") != "waiting":
             raise gcmd.error("No workflow is waiting for manual centering")
-        token = gcmd.get("TOKEN", "")
-        if token != session["token"]:
-            raise gcmd.error("Confirmation TOKEN is missing or stale; use the current prompt")
-        if gcmd.get_int("CENTERED", 0, minval=0, maxval=1) != 1:
-            raise gcmd.error("Manually center XY and confirm with CENTERED=1")
+        if session["mode"] == "calibration":
+            raise gcmd.error("Resume with ACCEL_HOMING_CALIBRATE AXIS=%s CENTERED=1 after "
+                             "manually centering XY" % session["axis"].upper())
+        self._require_centered(gcmd)
+        self._continue()
+
+    def _continue(self):
+        session = self.session
         try:
             if self.reactor.monotonic() >= session["expires"]:
                 raise self._error("manual-centering confirmation expired")
             self._preflight([session["axis"]] if session["axis"] else "xy", continuation=True)
             if self._snapshot() != session["snapshot"]:
                 raise self._error("printer state changed while awaiting confirmation; restart workflow")
+            if session["mode"] == "calibration":
+                self._require_unhomed_xy()
             session["state"] = "running"
             self.reactor.update_timer(self.timer, self.reactor.NEVER)
             self._close_prompt()

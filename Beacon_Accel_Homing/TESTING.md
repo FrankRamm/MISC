@@ -19,16 +19,17 @@ Focused installer/bootstrap check:
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_installer.py -v
 ```
 
-The focused publication run discovered 43 tests: 42 passed and one real POSIX
-symlink test was skipped because the Windows host does not permit symlink
+The recorded focused installer/bootstrap run discovered 43 tests: 42 passed
+and one real POSIX symlink test was skipped because the Windows host does not permit symlink
 creation. Actual temporary regular-file installation, config idempotence,
 backup/rollback, failed-write recovery, concurrent-edit rejection and later-edit
 protection passed. The symlink operation must still be exercised on a Linux
-host before claiming a host integration test. `bash -n` passed for both entry
-points using Git Bash. No native Linux systemd/Unix-socket integration run was
-performed here.
+host before claiming a host integration test. The earlier Git Bash `bash -n`
+checks passed for both unchanged entry points; they were not repeated for the
+centered-calibration change. No native Linux systemd/Unix-socket integration
+run was performed here.
 
-The combined offline publication run discovered **212 tests: 211 passed,
+The combined offline verification run discovered **223 tests: 222 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -51,9 +52,20 @@ acceleration limits including the zero override, and toolhead velocity limits.
 
 Core/backend and workflow suites separately cover trigger/session behavior,
 mapped generic data and units, timing/rate/error guards, staged/independent
-models, confirmation tokens, stock G28 requirements, ten validation repeats,
-suspect travel without blind returns, and measured chart export. Synthetic
+models, explicit manual-centering confirmation, stock G28 requirements,
+suspect travel without automatic returns, and measured chart export. Synthetic
 chart fixtures are explicitly marked as simulated.
+
+Centered-calibration fixtures check `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`
+as the start/resume command, with both XY axes unhomed before it can move or
+change workflow state. The first home tests the candidate from the operator's
+manual center; a clean run has one qualifying discovery and ten validation
+homes. Early triggers increase the candidate, release/invalidate XY and wait
+for manual recentering followed by the same calibration command, preserving
+the pending candidate and attempt count. Automatic recentering follows only
+accepted homes. TEST/CHARTS retain their argument-free prompt starts and
+`ACCEL_HOMING_CONFIRM CENTERED=1` response; that response cannot continue
+calibration. These checks do not detect or prove physical centering.
 
 `test_motion_policy.py` adds offline coverage for relative motion proof at low
 speeds, preservation of legacy Beacon pressed-start behavior, generic

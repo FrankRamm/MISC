@@ -73,8 +73,9 @@ accel_chip: adxl345 toolhead
 ```
 
 Keep your existing section and sensor name; do not add a second section.
-Leave thresholds commented to use saved calibration values. To override one axis, uncomment its setting, change the
-value and issue `RESTART` while idle. Thresholds are in **g**: higher values
+Leave thresholds commented to use saved calibration values. To override one
+axis, uncomment its setting, change the value and issue `RESTART` while idle.
+Thresholds are in **g**: higher values
 require a stronger impact; lower values can trigger on motion vibration.
 Manual settings take priority over saved calibration values.
 
@@ -88,8 +89,8 @@ All commands below go in the **printer console**:
 
 | Command | What it does |
 | --- | --- |
-| `ACCEL_HOMING_CALIBRATE AXIS=X` | Calibrates X with supervised homing. Use `AXIS=Y` for Y. |
-| `ACCEL_HOMING_CONFIRM TOKEN=... CENTERED=1` | Continues after manual centering. Use the exact command from the current prompt, or its **Centered - continue** button. |
+| `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` | Starts or resumes X calibration after manually centering XY, with both axes unhomed. Use `AXIS=Y` for Y. |
+| `ACCEL_HOMING_CONFIRM CENTERED=1` | Continues the current TEST/CHARTS prompt after manual centering, or use its **Centered - continue** button. |
 | `ACCEL_HOMING_TEST` | After centering confirmation, tests X and then Y with current thresholds. |
 | `ACCEL_HOMING_CHARTS_GENERATE` | Runs the same X-then-Y test and exports measured acceleration charts. |
 | `ACCEL_HOMING_STATUS` | Shows thresholds, recent results, calibration progress, model and chart paths. |
@@ -98,23 +99,31 @@ All commands below go in the **printer console**:
 
 ## Calibrate X, then Y
 
-1. Run `ACCEL_HOMING_CALIBRATE AXIS=X`. **X moves immediately:** it performs
-   an initial low-threshold home **before** asking you to center the
-   carriage. This first home does not count as a calibration success.
-2. At the prompt, XY motors are released. Move the carriage manually to the
-   machine's real X/Y center. Use the **Centered - continue** button or copy
-   the exact `ACCEL_HOMING_CONFIRM TOKEN=... CENTERED=1` command printed now.
-   Each prompt has a new token; an old command will not work.
-3. The plugin checks a center-to-stop home, then performs **ten additional
-   consecutive accepted homes** at the same threshold. Between accepted
-   trials, it returns only the tested axis to center.
-4. If it triggers too early, the plugin raises the candidate threshold and
-   asks you to center manually again. It does not return automatically after
-   a suspect home. Sensor faults or excessive travel abort calibration.
+1. **Before the command, physically center the toolhead by hand in both X and
+   Y.** Use the XY motor controls appropriate for your machine so Z stays
+   supported. Both X and Y must be **unhomed in Klipper**. Do not home them in
+   advance or assign coordinates to mark them homed.
+2. Run `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`. `CENTERED=1` states that you
+   have already centered XY and authorizes movement; the sensor cannot detect
+   that position. **X moves immediately.** The first home tests the actual
+   candidate threshold, starting at **3 g by default**, from that manual center.
+3. After one qualifying home, the plugin performs **ten additional consecutive
+   accepted homes** at the same threshold. Between accepted trials, it returns
+   only the tested axis to center.
+4. If it triggers too early, the plugin raises the candidate threshold, resets
+   the validation count and releases XY, leaving both axes unhomed. Center XY
+   manually again, then repeat **`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`** to
+   resume the pending candidate and attempt count. It does not return
+   automatically after a suspect home. Sensor faults or excessive travel abort
+   calibration.
 5. On success, the default `SAVE_CONFIG=1` automatically saves that axis in
    the **DO NOT EDIT** block of `printer.cfg` and restarts Klipper. Do not edit
-   that generated block. Once ready, run `ACCEL_HOMING_CALIBRATE AXIS=Y` and
-   follow the same steps. X and Y are saved independently.
+   that generated block. Once ready, repeat the manual preparation and run
+   **`ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1`**. X and Y are saved independently.
+
+Calibration starts and resumes with its own command. `ACCEL_HOMING_CONFIRM`
+is only for TEST/CHARTS and cannot continue calibration. Keep the same `AXIS`
+and optional `SAVE_CONFIG` value when resuming after manual recentering.
 
 Existing manual threshold overrides remain active even after calibration.
 Comment them out if you want the saved model to supply the thresholds.
@@ -124,10 +133,12 @@ or motor current.
 ## Test and view charts
 
 `ACCEL_HOMING_TEST` and `ACCEL_HOMING_CHARTS_GENERATE` first release XY and wait
-for your manual-centering confirmation. They home **X, return X alone to
-center, then home Y**. These workflows never request a Z move. A suspect home
-aborts without an automatic return. Both axes must use suitable accelerometer
-endstops.
+for your manual-centering confirmation. Start either command without arguments,
+physically center XY by hand at its prompt, then run
+**`ACCEL_HOMING_CONFIRM CENTERED=1`** or use **Centered - continue**. They home
+**X, return X alone to center, then home Y**. These workflows never request a Z
+move. A suspect home aborts without an automatic return. Both axes must use
+suitable accelerometer endstops.
 
 The console reports acceleration at impact detection and its measured peak in
 **g**, plus commanded travel. Charts show X/Y/Z acceleration relative to the
@@ -179,7 +190,10 @@ The named model defaults to `[accel_homing_model default]`. It stores thresholds
 ten-success counts and sensor/configuration metadata. Calibration with
 `SAVE_CONFIG=0` stages results until you issue `SAVE_CONFIG` yourself; that
 command writes the file and restarts Klipper. A clean calibration has one
-seed, one qualifying discovery home and ten validation homes.
+qualifying discovery home and ten validation homes: eleven homes in total.
+With `SAVE_CONFIG=0`, the completed axis remains homed. Before calibrating the
+other axis, use your machine's appropriate controls to leave both XY axes
+unhomed and physically center XY by hand again.
 
 ### Workflow restrictions and guards
 
@@ -190,10 +204,14 @@ controllable XY enables and single-touch X/Y settings (`homing_retract_dist: 0`,
 
 Calibration defaults: start at 3 g, increase by 0.5 g for early triggers, stop
 at 12 g or 80% of sensor range, allow at most 40 homing attempts and wait up to
-300 seconds for each confirmation. Qualification requires over 10 mm of
-commanded travel and agreement within 20% of expected center-to-stop travel.
+300 seconds for manual recentering. `calibration_start_threshold` is configurable
+with a minimum of 3 g. Starting or resuming calibration requires both XY axes
+to be unhomed; it never marks manually centered coordinates as homed.
+Qualification requires over 10 mm of commanded travel and agreement within
+20% of expected center-to-stop travel.
 Missing/late data, invalid captures, MCU errors and excessive travel abort
-instead of increasing the threshold. Stock Klipper homing faults still apply.
+instead of increasing the threshold. Stock Klipper homing fault cleanup still
+applies and may release all motors.
 
 ### Generic timing and speed limits
 
