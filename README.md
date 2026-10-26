@@ -6,11 +6,13 @@ Each project lives in its own folder with its own README, files, and notes. Star
 
 Some projects are experiments, support parts, or one-off solutions. Use them with the same care you would use for any hardware modification, especially when heat, wiring, or rails are involved.
 
+This [FrankRamm/MISC testing fork](https://github.com/FrankRamm/MISC/tree/codex/universal-accel-homing) extends the original Beacon Accelerometer Homing project by [CloakedWayne](https://github.com/CloakedWayne). The experimental accelerometer extension is intended for contribution to [Monolith3D/MISC](https://github.com/Monolith3D/MISC) after physical validation; it is not an endorsed upstream release. See the project's [credits and provenance](Beacon_Accel_Homing/NOTICE).
+
 ## Projects
 
 | Project | What it does |
 | --- | --- |
-| [Beacon Accelerometer Homing](Beacon_Accel_Homing/) | Experimental one-touch X/Y homing for Klipper and Kalico from the Beacon accelerometer. |
+| [Accelerometer Homing](Beacon_Accel_Homing/) | Experimental extension of CloakedWayne's Beacon X/Y impact homing to compatible configured accelerometers, with supervised calibration and measured charts. |
 | [Better CF tube mounting](CF_tube_mounting/) | A sturdier way to mount a CF X-axis tube. |
 | [Hollow MGN12 Rails](Hollow_MGN12_rails/) | CAD for experimenting with hollowed MGN12 rails. |
 | [Monolith logo](Monolith_logo/) | Monolith logo files for graphics, decals, and cutting. |
