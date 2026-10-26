@@ -13,6 +13,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import collections
+import json
 import logging
 import math
 import struct
@@ -430,6 +431,12 @@ class BeaconAccelHoming:
         self.capture_baseline = None
         self.capture_attempt = None
         self.capture_attempts = 0
+        self.kinematics_home = None
+        self.kinematics_home_owner = None
+        self.ordinary_home = None
+        self.operation_generation = 0
+        self.noise_session = self.noise_window = None
+        self.owned_sensor_clients = collections.deque(maxlen=8)
         self.watchdog = self.reactor.register_timer(self._watchdog)
         self.idle_timer = self.reactor.register_timer(self._idle_check)
 
@@ -442,6 +449,8 @@ class BeaconAccelHoming:
         self.printer.register_event_handler("homing:homing_move_end", self._handle_move_end)
         self.printer.register_event_handler("stepper_enable:motor_off", self._end_session)
         self.printer.register_event_handler("klippy:shutdown", self._end_session)
+        for event in ("stepper_enable:motor_off", "klippy:shutdown", "klippy:disconnect"):
+            self.printer.register_event_handler(event, self._cancel_pending_operations)
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command("BEACON_ACCEL_HOMING_STATUS", self.cmd_STATUS,
                                desc="Report the last Beacon accelerometer homing results")
@@ -503,6 +512,107 @@ class BeaconAccelHoming:
                     self.backend.validate_rail(rail.get_homing_info(), self.printer.config_error)
                 for msg in homing_warnings(rail.get_name(), rail.get_homing_info()):
                     configfile.runtime_warning(msg)
+        kin = self.toolhead.get_kinematics()
+        home = getattr(kin, "home", None)
+        if (getattr(home, "__self__", None) is self
+                and getattr(home, "__func__", None) is BeaconAccelHoming._home_with_retract):
+            return  # A repeated connect must not stack the synchronous hook.
+        if callable(home):
+            self.kinematics_home_owner, self.kinematics_home = kin, home
+            kin.home = self._home_with_retract
+
+    def _cancel_pending_operations(self, *args):
+        self.operation_generation += 1
+        if self.ordinary_home is not None:
+            self.ordinary_home["valid"] = False
+        if self.noise_session is not None:
+            self.stop_noise_measurement()
+
+    def _home_with_retract(self, homing):
+        """Retract synchronously after kinematics finishes final coordinate fixes.
+
+        home_rails_end precedes Klipper/Kalico's adjust_pos correction. Moving
+        from that event changes the correction itself. Public G28 handlers and
+        safe_z_home/override chains remain untouched by this kinematics hook.
+        """
+        if self.ordinary_home is not None:
+            self.ordinary_home["valid"] = False
+            return self.kinematics_home(homing)
+        suppressed = (self.workflows.session is not None or self.workflows.in_home
+                      or self.noise_session is not None)
+        context = {"homing": homing, "rails": {}, "valid": not suppressed}
+        self.ordinary_home = context
+        try:
+            result = self.kinematics_home(homing)
+            if context["valid"]:
+                self._retract_completed_home(context)
+            return result
+        finally:
+            context["valid"] = False
+            self.ordinary_home = None
+
+    def _retract_completed_home(self, context):
+        distance = context.get("distance", self.back_off_dist)
+        if (not distance or not context["rails"]
+                or (hasattr(self.printer, "is_shutdown") and self.printer.is_shutdown())):
+            return
+        if not math.isfinite(distance) or distance < 0.0:
+            raise self.printer.command_error("accel_homing: invalid final back-off distance")
+        position = self.toolhead.get_position()
+        coord, speeds = [None, None, None], []
+        for axis, (rail, record) in context["rails"].items():
+            if self.last.get(axis) is not record or self._homed(axis) is not True:
+                continue
+            info = rail.get_homing_info()
+            low, high = rail.get_range()
+            speed = getattr(info, "retract_speed", None) or info.speed
+            current = position[AXES[axis]]
+            if (not all(math.isfinite(value) for value in
+                        (low, high, info.position_endstop, speed, current))
+                    or low >= high or speed <= 0.0):
+                raise self.printer.command_error("accel_homing: invalid final back-off geometry/speed")
+            away = -1.0 if info.positive_dir else 1.0
+            target = min(max(info.position_endstop + away * distance, low), high)
+            target_free = (target - info.position_endstop) * away
+            free = (current - info.position_endstop) * away
+            # Kalico may already have retracted. Never move back toward a stop
+            # or add another configured distance to an existing final retract.
+            if target_free <= 0.0 or free >= target_free - 0.000001:
+                continue
+            coord[AXES[axis]] = target
+            speeds.append(speed)
+        workflow_session = context.get("workflow_session")
+        if (speeds and context["valid"] and (workflow_session is None
+                                            or self.workflows.session is workflow_session)):
+            generation = self.operation_generation
+            def current():
+                return (context["valid"] and self.operation_generation == generation
+                        and (workflow_session is None or self.workflows.session is workflow_session)
+                        and not (hasattr(self.printer, "is_shutdown") and self.printer.is_shutdown())
+                        and all(self.last.get(axis) is record and self._homed(axis) is True
+                                for axis, (_rail, record) in context["rails"].items()))
+            try:
+                self._limit_accel()
+                # Velocity setters can flush/yield. A motor-off or cancellation
+                # during the cap change must not authorize a later move.
+                if not current():
+                    raise self.printer.command_error("accel_homing: final back-off was interrupted")
+                self.toolhead.manual_move(coord, min(speeds))
+                self.toolhead.wait_moves()
+                if not current():
+                    raise self.printer.command_error("accel_homing: final back-off was interrupted")
+            finally:
+                self._restore_accel()
+
+    def release_workflow_home(self, axis, source_record, distance, session):
+        """Release only a terminal workflow home after its caller qualifies it."""
+        if (self.workflows.session is not session or session.get("state") != "running"
+                or axis not in self.rails_by_axis or self.last.get(axis) is not source_record
+                or self._homed(axis) is not True):
+            raise self.printer.command_error("accel_homing: terminal workflow home is no longer current")
+        context = {"rails": {axis: (self.rails_by_axis[axis], source_record)},
+                   "valid": True, "distance": distance, "workflow_session": session}
+        self._retract_completed_home(context)
 
     def _trigger_command(self, stepper_mcu):
         command = self.trigger_cmds.get(stepper_mcu)
@@ -560,6 +670,8 @@ class BeaconAccelHoming:
             self.session_scale = self.scale
             self.full_scale_g = self.backend.full_scale
             self.backend.start()
+            if not any(client is self.backend.client for client in self.owned_sensor_clients):
+                self.owned_sensor_clients.append(self.backend.client)
             self.stream_on = True
             return
         helper = self.helper
@@ -798,6 +910,16 @@ class BeaconAccelHoming:
             position[AXES[attempt.axis]] = self.homed_before + attempt.halt_delta
             self.toolhead.set_position(position)
             attempt.record["kept_origin"] = True
+        context = self.ordinary_home
+        if (context is not None and context["valid"] and context["homing"] is homing
+                and attempt is not None and attempt.axis in self.session_axes
+                and any(rail is self.session_axes[attempt.axis] for rail in rails)):
+            record = attempt.record
+            accepted = (attempt.reason == "impact" and
+                        (record.get("moving") or record.get("motion_seen"))) or (
+                            attempt.reason == "pressed" and record.get("kept_origin"))
+            if accepted and self.last.get(attempt.axis) is record:
+                context["rails"][attempt.axis] = (self.session_axes[attempt.axis], record)
         self._end_session()
 
     def _handle_move_begin(self, hmove):
@@ -1495,6 +1617,9 @@ class BeaconAccelHoming:
             self._fire(attempt, reason, mcu.MCU_trsync.REASON_HOST_REQUEST)
 
     def _inspect_batch(self, params):
+        if self.noise_session is not None:
+            self._inspect_noise_batch(params)
+            return
         data = params["data"]
         count = sample_count(data)
         if count < 2:
@@ -1707,6 +1832,212 @@ class BeaconAccelHoming:
                 * MM_PER_S2_PER_G * attempt.sample_dt)
 
     # Reporting
+    def noise_sensor_context(self):
+        """Stable, serializable sensor identity for a transient noise seed."""
+        if self.helper is None or self.toolhead is None or self.main_mcu is None:
+            raise self.printer.command_error("accel_homing: accelerometer is not connected")
+        mapping = ([(0, 1), (1, 1), (2, 1)] if self.backend is not None
+                   else self.helper.config.axes_map)
+        if (not isinstance(mapping, (tuple, list)) or len(mapping) != 3
+                or any(not isinstance(pair, (tuple, list)) or len(pair) != 2
+                       or pair[0] not in (0, 1, 2) or pair[1] not in (-1, 1)
+                       for pair in mapping)
+                or len({pair[0] for pair in mapping}) != 3):
+            raise self.printer.command_error("accel_homing: invalid accelerometer axes map")
+        scale = self.scale
+        count_g = scale["scale"] / 1000.0
+        full_scale = self._full_scale_g(scale)
+        if (not math.isfinite(count_g) or count_g <= 0.0
+                or (full_scale is not None and
+                    (not math.isfinite(full_scale) or full_scale <= 0.0))):
+            raise self.printer.command_error("accel_homing: invalid accelerometer range")
+        driver_map = (getattr(self.backend.sensor, "axes_map", None)
+                      if self.backend is not None else mapping)
+        context = {"sensor": self.sensor_name,
+                   "backend": "beacon_raw" if self.backend is None else self.backend.kind,
+                   "scale_id": scale.get("id"), "scale_name": scale.get("name"),
+                   "count_g": count_g, "full_scale_g": full_scale,
+                   "capture_axes_map": mapping, "sensor_axes_map": driver_map,
+                   "sensor_rate_hz": (getattr(self.backend.sensor, "data_rate", None)
+                                      if self.backend is not None else None)}
+        try:
+            return json.loads(json.dumps(context, allow_nan=False))
+        except (TypeError, ValueError):
+            raise self.printer.command_error("accel_homing: invalid accelerometer context")
+
+    def _noise_shared_client(self):
+        if self.backend is None:
+            return bool(self.helper._stream_en)
+        for name in ("clients", "client_cbs"):
+            clients = getattr(self.helper, name, None)
+            if isinstance(clients, dict):
+                clients = list(clients)
+            if isinstance(clients, (tuple, list, set)) and any(
+                    not any(client is own for own in self.owned_sensor_clients)
+                    and client is not self.backend.client and not getattr(client, "closed", False)
+                    for client in clients):
+                return True
+        return False
+
+    def start_noise_measurement(self):
+        """Own only a stationary sensor subscription; never enable or move motors."""
+        context = self.noise_sensor_context()
+        if (self.homing_active or self.attempt is not None or self.stream_on
+                or self.noise_session is not None or self.capture_batches is not None
+                or (self.backend is not None and self.backend.active)):
+            raise self.printer.command_error("accel_homing: sensor or homing capture is busy")
+        if self._noise_shared_client():
+            raise self.printer.command_error("accel_homing: noise measurement requires an exclusive sensor stream")
+        session = {"context": context, "sensor": self.sensor, "helper": self.helper,
+                   "helper_scale": dict(self.helper._scale) if self.backend is None else None}
+        self.noise_session = session
+        with self.lock:
+            # A prior home's peak tail must not be extended by stationary data.
+            self.tail = None
+            self.recent.clear()
+            self.preparation = None
+        self.last_batch = None
+        try:
+            self._start_stream()
+            if (self.session_scale != self.scale
+                    or self.noise_sensor_context() != context):
+                raise self.printer.command_error("accel_homing: sensor context changed while starting noise measurement")
+        except Exception:
+            self.stop_noise_measurement()
+            raise
+        return context
+
+    def stop_noise_measurement(self):
+        self.noise_session = None
+        with self.lock:
+            self.noise_window = None
+        if self.helper is not None:
+            self._stop_stream()
+
+    def collect_noise_window(self, check_running, duration=1.0):
+        """Collect one fresh bounded sensor-time window with no motion state writes."""
+        session = self.noise_session
+        if session is None or not math.isfinite(duration) or duration != 1.0:
+            raise self.printer.command_error("accel_homing: noise measurement requires a one-second session")
+        check_running()
+        started = self.reactor.monotonic()
+        window = {"cutoff": self.main_mcu.estimated_print_time(started),
+                  "duration": duration, "samples": [], "last": None,
+                  "interval": None, "complete": False, "changed": False}
+        with self.lock:
+            self.noise_window = window
+            if self.backend is not None:
+                self.backend.prepare_reference()
+        try:
+            while True:
+                check_running()
+                now = self.reactor.monotonic()
+                if (self.noise_session is not session or self.sensor is not session["sensor"]
+                        or self.helper is not session["helper"]):
+                    raise self.printer.command_error("accel_homing: noise measurement cancelled or disconnected")
+                if (self._noise_shared_client() or self.noise_sensor_context() != session["context"]
+                        or self.session_scale != self.scale
+                        or (self.backend is None and self.helper._scale != session["helper_scale"])):
+                    raise self.printer.command_error("accel_homing: sensor scale, mapping or client changed during noise measurement")
+                if self.sensor_fault is not None:
+                    raise self.printer.command_error("accel_homing: noise measurement: %s" % FAILURES[self.sensor_fault])
+                with self.lock:
+                    complete, last = window["complete"], window["last"]
+                if complete:
+                    if not window["changed"]:
+                        raise self.printer.command_error("accel_homing: noise readings are identical; a live sensor cannot be established")
+                    samples = window["samples"]
+                    if len(samples) < BASELINE_MIN_SAMPLES:
+                        raise self.printer.command_error("accel_homing: insufficient noise samples")
+                    return {"samples": samples, "dropped": 0, "fault": None,
+                            "cutoff_time_s": window["cutoff"],
+                            "_noise_context": session["context"]}
+                sensor_now = self.main_mcu.estimated_print_time(now)
+                if last is not None and sensor_now - last > self.stream_timeout:
+                    raise self.printer.command_error("accel_homing: noise measurement stopped receiving fresh samples")
+                if now - started > duration + STREAM_START_TIMEOUT:
+                    raise self.printer.command_error("accel_homing: noise measurement acquisition timeout")
+                self.reactor.pause(now + 0.005)
+        finally:
+            with self.lock:
+                if self.noise_window is window:
+                    self.noise_window = None
+
+    def _inspect_noise_batch(self, params):
+        """Validate native and decoded stationary batches independently of homing."""
+        window = self.noise_window
+        if window is None or window["complete"] or self.sensor_fault is not None:
+            return
+        session = self.noise_session
+        if (self._noise_shared_client() or self.noise_sensor_context() != session["context"]
+                or self.session_scale != self.scale
+                or self.sensor is not session["sensor"] or self.helper is not session["helper"]
+                or (self.backend is None and self.helper._scale != session["helper_scale"])):
+            self._sensor_fault("scale")
+            return
+        if any(params.get(key, 0) for key in ("errors", "overflows")):
+            self._sensor_fault("data_error")
+            return
+        data = params["data"]
+        width = 3 if isinstance(data, tuple) else 6
+        count = sample_count(data)
+        if count < 2 or len(data) % width:
+            self._sensor_fault("invalid_data")
+            return
+        interval = params["delta_clock"] / (count - 1.0) / self.beacon_freq
+        start = self.clock_to_time(params["start_clock"])
+        minimum_rate = 800.0 if self.backend is None else self.backend.min_rate * 0.98
+        if (not math.isfinite(start) or not math.isfinite(interval) or interval <= 0.0
+                or 1.0 / interval < minimum_rate):
+            self._sensor_fault("sample_rate")
+            return
+        now = self.reactor.monotonic()
+        sensor_now = self.main_mcu.estimated_print_time(now)
+        max_age = self._reference_max_age()
+        mapping = self.noise_session["context"]["capture_axes_map"]
+        count_g = self.noise_session["context"]["count_g"]
+        full_scale = self.noise_session["context"]["full_scale_g"]
+        raw = [axis_values(sample_slice(data, count), index) for index in range(3)]
+        with self.lock:
+            if self.noise_window is not window:
+                return
+            for number in range(count):
+                when = start + number * interval
+                if when <= window["cutoff"]:
+                    continue
+                if not -0.005 <= sensor_now - when <= max_age:
+                    self._sensor_fault("stale_data")
+                    return
+                if window["last"] is not None:
+                    gap = when - window["last"]
+                    if gap <= 0.0:
+                        self._sensor_fault("invalid_data")
+                        return
+                    if (gap > 5.0 * interval + 0.000003
+                            or (window["interval"] is not None
+                                and abs(interval - window["interval"]) > max(0.000003, interval * 0.10))):
+                        self._sensor_fault("sample_gap")
+                        return
+                values = tuple(axis[number] for axis in raw)
+                if (not all(math.isfinite(value) for value in values)
+                        or (self.backend is None and CLIPPED in values)
+                        or (full_scale is not None
+                            and any(abs(value * count_g) >= full_scale for value in values))):
+                    self._sensor_fault("invalid_data")
+                    return
+                if len(window["samples"]) >= self.capture_limit:
+                    self._sensor_fault("proof_overflow")
+                    return
+                xyz = tuple(values[index] * sign * count_g for index, sign in mapping)
+                if window["samples"] and xyz != window["samples"][0][1:]:
+                    window["changed"] = True
+                window["samples"].append((when,) + xyz)
+                window["last"], window["interval"] = when, interval
+                self.last_batch = now
+                if when - window["samples"][0][0] + 0.000000001 >= window["duration"]:
+                    window["complete"] = True
+                    return
+
     def start_capture(self):
         """Capture one requested workflow in memory; no streaming or motion."""
         with self.lock:

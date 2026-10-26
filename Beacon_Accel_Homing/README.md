@@ -52,12 +52,18 @@ Before **CALIBRATE, TEST, CHARTS or ACCURACY**, keep the printer idle and unpaus
 your machine's XY motor controls while keeping Z supported. Ensure nozzle/bed
 clearance for XY travel: these workflows do not perform a Z hop.
 
+After this preparation, optionally run `ACCEL_HOMING_CALIBRATE_NOISE` with the
+toolhead still, then run CALIBRATE. It records three one-second XYZ vibration
+windows, exports charts and prepares initial X/Y calibration candidates.
+It performs no movement. Standalone noise measurement does not require centering.
+
 Run commands in the **printer console**. **`CENTERED=1` authorizes movement from
 that manual center; there is no further confirmation.** Motion starts after
 the stationary preparation check.
 
 | Command | Purpose |
 | --- | --- |
+| `ACCEL_HOMING_CALIBRATE_NOISE` | Measure stationary vibration and prepare initial calibration candidates. |
 | `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` | Calibrate or resume X. |
 | `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` | Calibrate or resume Y after repeating the preparation. |
 | `ACCEL_HOMING_TEST CENTERED=1` | Test current X/Y thresholds with the same preparation. |
@@ -68,7 +74,8 @@ the stationary preparation check.
 | `SET_ACCEL_HOMING AXIS=X THRESHOLD=0.5` | Change X temporarily until restart; use `AXIS=Y` for Y. |
 | `G28 X` / `G28 Y` | Normal homing after physical validation. |
 
-Calibration starts at **0.5 g by default**. After one qualifying home, it needs
+Calibration starts at **0.5 g by default**, or at the available candidate from
+a fresh noise measurement. After one qualifying home, it needs
 **ten additional consecutive accepted homes** at that candidate threshold.
 Their commanded-travel range, **maximum minus minimum, must be strictly less
 than 1.5 mm**, independently for each axis; exactly 1.5 mm fails.
@@ -86,6 +93,12 @@ CSV, JSON, SVG and HTML; their paths appear in the console and STATUS.
 ACCURACY uses the same preparation, excludes one qualifying home per axis,
 then measures `SAMPLES` repeats (2–50; default 10). Omit `AXIS` to test X and Y.
 It reports commanded-travel variation without tuning or saving thresholds.
+Successful ordinary XY homing releases each just-homed stop by **5 mm by
+default**, bounded by the configured rail range. Successful workflows release
+only their final tested axis after all checks; rejected homes do not retract.
+This release does not add a second touch. See the detail below for `back_off_dist`.
+Noise candidates last until restart: after saving X restarts Klipper, repeat
+the stationary measurement before calibrating Y if you want a new Y candidate.
 Recalibrate after changes to mounting, belts, sensor orientation, speed or current.
 
 ## Set thresholds manually
@@ -227,6 +240,66 @@ calibration expires after its configured timeout.
 </details>
 
 <details>
+<summary>Stationary vibration measurement and final retraction</summary>
+
+`ACCEL_HOMING_CALIBRATE_NOISE` measures stationary accelerometer vibration in
+g, not sound. It requires an idle, unpaused printer with an empty motion queue
+and no other homing, workflow or accelerometer client. It leaves the current
+motor/fan state as it is; neither manual centering nor `CENTERED=1` is required.
+It does not home, move, enable/release motors, save a model or restart Klipper.
+`SAVE_CONFIG` is not accepted by this command.
+
+Each of three separate one-second windows subtracts its own XYZ mean. The
+report retains signed XYZ traces, raw and baseline-subtracted full-resolution
+CSV, exact JSON values, per-axis absolute peak, RMS and peak-to-peak vibration.
+HTML embeds all three plots and SVG includes all three windows. The report
+records sensor, mapping/scale context, duration, sample count and run identity.
+`ACCEL_HOMING_STATUS` shows results, paths, `noise_recommendation` and the
+remaining `noise_seed_axes`.
+
+For each X/Y axis, the largest absolute peak from all three windows receives
+the greater of a **20% or 0.1 g** margin, then rounds upward on the configured
+`calibration_start_threshold + n * calibration_step` grid. For example, a
+2 g X peak gives a 2.5 g initial candidate with the default 0.5 g start/step.
+This is an **initial candidate, NOT a calibrated impact threshold**. A candidate
+above the calibration/sensor ceiling is unavailable; it is never reduced to
+fit. An unknown sensor range also leaves candidates unavailable. Complete
+measurements and charts remain available in either case. An incomplete or
+faulted run has no recommendation.
+
+The next separate `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` consumes its
+available X candidate; Y is independent. A restart or changed sensor/calibration
+context discards unused candidates. Existing manual thresholds, saved models
+and ordinary homing thresholds are unchanged by noise measurement. Stationary
+vibration does not measure motor-enable/first-step transients, guarantee noise
+filtering or qualify contact detection. The existing quiet-reference checks
+still apply; high peak-to-peak vibration can still fail `no_baseline` even with
+a higher candidate. Calibration still needs its normal geometry and ten-home
+repeatability qualification.
+
+`homing_retract_dist: 0` keeps one touch per home. The separate plugin setting
+`back_off_dist` defaults to 5 mm (0 disables; finite 0–20 mm) and controls the
+existing cross-axis release plus the final release after a successful ordinary
+home. Final release runs after firmware homing-coordinate corrections, only
+on axes completed by that invocation. It moves away from the configured stop
+at the rail's retract speed (homing speed if absent), clips to the rail range
+and does not repeat a release the firmware already made. The existing
+`homing_accel` cap also applies to this move, preserving any lower live
+acceleration and restoring the normal acceleration afterward. Z is not included.
+Supervised workflows suppress this ordinary release on individual trials:
+accepted intermediate homes still return only the tested axis to center;
+after the whole workflow passes its checks and required per-home captures, its
+final tested axis releases before model staging/saving or successful completion.
+ACCURACY writes its aggregate summary after this trusted release. A later
+summary-export failure reports an aborted run and preserves the per-home captures;
+it does not reverse the preceding release.
+A failed, cancelled or suspect workflow does not gain a final release move.
+Homing speeds, driver currents and the meaning of commanded-travel statistics
+are unchanged; a completed release is not proof of physical stop accuracy.
+
+</details>
+
+<details>
 <summary>Workflow restrictions and calibration qualification</summary>
 
 Workflows require idle, unpaused Klipper, Cartesian/CoreXY, independent Z,
@@ -235,8 +308,10 @@ controllable XY enables and single-touch X/Y settings (`homing_retract_dist: 0`,
 its active handler and underlying stock `G28` are verified. Workflow homes
 recheck this path before each trial and call that stock handler for X or Y
 only, bypassing `safe_z_home`'s `z_hop`.
-Normal `G28`, Z homing and Cartographer probe configuration retain their
-existing behavior. Dual carriages, shared XY/Z enables, `homing_override`,
+Normal `G28` retains its configured safe Z behavior. Each successful underlying
+XY home releases as described above; later safe Z/wrapper positioning may still
+move XY. Z homing and Cartographer probe configuration
+retain their existing behavior. Dual carriages, shared XY/Z enables, `homing_override`,
 G28 macros and unknown wrapper chains remain rejected. See
 [the source contract and limits](docs/COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 

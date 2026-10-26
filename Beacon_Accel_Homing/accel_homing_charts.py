@@ -454,6 +454,21 @@ def _trial_entries(axes):
             yield axis, "Rejected home (excluded)", item["rejected"], item["rejection_capture_paths"], False
 
 
+def validate_accuracy(directory, run_id, axis_results, result="complete", reason=None, simulated=False):
+    """Validate current-run capture completeness without publishing any output."""
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        raise ValueError("Invalid accuracy run ID")
+    destination = Path(directory).expanduser().resolve()
+    axes = _validate_accuracy(destination, run_id, axis_results, result, reason, simulated)
+    embedded_bytes = 0
+    for _axis, _label, _record, reference, _included in _trial_entries(axes):
+        if reference is not None:
+            embedded_bytes += len(_embedded_capture_svg(reference["svg"]).encode("utf-8"))
+            if embedded_bytes > _MAX_REPORT_BYTES:
+                raise ValueError("Accuracy summary exceeds its report size limit")
+    return axes
+
+
 def write_accuracy(directory, run_id, axis_results, result, reason=None, simulated=False):
     """Atomically publish an accuracy summary using already published captures.
 
@@ -469,7 +484,7 @@ def write_accuracy(directory, run_id, axis_results, result, reason=None, simulat
     published = destination / ("accel_homing_accuracy_%s" % run_id)
     if os.path.lexists(published):
         raise ValueError("Accuracy output already exists for this run")
-    axes = _validate_accuracy(destination, run_id, axis_results, result, reason, simulated)
+    axes = validate_accuracy(destination, run_id, axis_results, result, reason, simulated)
     with tempfile.TemporaryDirectory(prefix=".accel_homing_accuracy_", dir=str(destination)) as temporary:
         paths = _write_accuracy(Path(temporary), published.name, run_id, axes, result, reason, simulated)
         if sum(Path(path).stat().st_size for path in paths.values()) > _MAX_REPORT_BYTES:
@@ -587,4 +602,434 @@ def _write_accuracy(directory, stem, run_id, axes, result, reason, simulated):
                      'document.querySelectorAll(".trial").forEach(function(panel){'
                      'panel.hidden=panel.id!==document.getElementById("trial").value;});});</script></html>'
                      % tuple(html.escape(Path(paths[key]).name, quote=True) for key in ("csv", "json", "svg")))
+    return paths
+
+
+_NOISE_WINDOWS = 3
+_NOISE_WINDOW_SECONDS = 1.0
+_NOISE_DEFINITION = ("Stationary accelerometer vibration: raw machine-mapped XYZ g minus "
+                     "each window's own mean; not sound or acoustic noise.")
+_NOISE_CANDIDATE_NOTE = ("Initial calibration candidate only - NOT a calibrated impact threshold. "
+                         "Stationary measurements do not predict motor-enable or motion transients, "
+                         "guarantee filtering, or bypass homing's quiet-reference checks.")
+
+
+def _noise_identity(run_id, iteration):
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        raise ValueError("Invalid noise run ID")
+    if type(iteration) is not int or not 1 <= iteration <= _NOISE_WINDOWS:
+        raise ValueError("Invalid stationary noise iteration")
+    return "accel_homing_noise_%s_i%02d" % (run_id, iteration)
+
+
+def _noise_vector(value, label):
+    if not isinstance(value, dict) or set(value) != set("xyz") \
+            or not all(_finite(number) for number in value.values()):
+        raise ValueError("Invalid stationary noise %s" % label)
+    return value
+
+
+def _same_noise_number(first, second):
+    return _finite(first) and _finite(second) and math.isclose(
+        first, second, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _check_noise_record(run_id, iteration, record):
+    _noise_identity(run_id, iteration)
+    if not isinstance(record, dict) or record.get("run_id") != run_id \
+            or type(record.get("noise_iteration")) is not int or record["noise_iteration"] != iteration \
+            or type(record.get("sample_count")) is not int or record["sample_count"] < 50 \
+            or not _finite(record.get("duration_s")) \
+            or record["duration_s"] < _NOISE_WINDOW_SECONDS - 1e-9 \
+            or not _finite(record.get("first_sample_time_s")) \
+            or not _finite(record.get("last_sample_time_s")) \
+            or not _same_noise_number(record["duration_s"],
+                                      record["last_sample_time_s"] - record["first_sample_time_s"]):
+        raise ValueError("Stationary noise record is not a complete current-run window")
+    for key in ("baseline_g", "noise_peak_g", "noise_peak_to_peak_g", "noise_rms_g"):
+        vector = _noise_vector(record.get(key), key)
+        if key != "baseline_g" and any(value < 0 for value in vector.values()):
+            raise ValueError("Stationary noise magnitudes must not be negative")
+    for key in ("sensor", "backend", "axis_context"):
+        if not isinstance(record.get(key), str) or not record[key] or len(record[key]) > 400:
+            raise ValueError("Invalid stationary noise sensor context")
+    full_scale = record.get("full_scale_g")
+    if full_scale is not None and (not _finite(full_scale) or full_scale <= 0):
+        raise ValueError("Invalid stationary noise sensor range")
+    json.dumps(record, allow_nan=False)
+
+
+def _validate_noise_capture(run_id, iteration, capture, record):
+    _check_noise_record(run_id, iteration, record)
+    if not isinstance(capture, dict) or capture.get("dropped", 0) \
+            or capture.get("fault") or capture.get("error"):
+        raise ValueError("Stationary noise sensor capture is incomplete or faulted")
+    samples = capture.get("samples", ())
+    if not isinstance(samples, (list, tuple)) or len(samples) != record["sample_count"]:
+        raise ValueError("Stationary noise capture count does not match its record")
+    previous = None
+    for sample in samples:
+        if not isinstance(sample, (list, tuple)) or len(sample) != 4 \
+                or not all(_finite(value) for value in sample) \
+                or (previous is not None and sample[0] <= previous):
+            raise ValueError("Invalid stationary noise accelerometer samples")
+        previous = sample[0]
+    if not _same_noise_number(samples[0][0], record["first_sample_time_s"]) \
+            or not _same_noise_number(samples[-1][0], record["last_sample_time_s"]):
+        raise ValueError("Stationary noise sample times do not match their record")
+    baseline = tuple(math.fsum(sample[index] for sample in samples) / len(samples)
+                     for index in (1, 2, 3))
+    supplied = capture.get("baseline_g")
+    if not isinstance(supplied, (list, tuple)) or len(supplied) != 3 \
+            or not all(_same_noise_number(value, supplied[index])
+                       for index, value in enumerate(baseline)):
+        raise ValueError("Stationary noise capture must use its full-window mean")
+    delta = [(sample[0],) + tuple(sample[index + 1] - baseline[index] for index in range(3))
+             for sample in samples]
+    for index, axis in enumerate("xyz", 1):
+        values = [sample[index] for sample in delta]
+        computed = {"baseline_g": baseline[index - 1],
+                    "noise_peak_g": max(abs(value) for value in values),
+                    "noise_peak_to_peak_g": max(values) - min(values),
+                    "noise_rms_g": math.sqrt(math.fsum(value * value for value in values) / len(values))}
+        if any(not _same_noise_number(record[key][axis], value) for key, value in computed.items()):
+            raise ValueError("Stationary noise statistics do not match measured samples")
+    return samples, baseline, delta
+
+
+def _noise_capture_svg(run_id, iteration, record, delta, simulated):
+    top, bottom, left, right = 85, 365, 90, 1040
+    t0, duration = delta[0][0], record["duration_s"]
+    peak = max(0.001, max(abs(value) for sample in delta for value in sample[1:])) * 1.08
+    sx = lambda stamp: left + (stamp - t0) / duration * (right - left)
+    sy = lambda value: (top + bottom) / 2.0 - value / peak * (bottom - top) / 2.0
+    title = "Stationary accelerometer vibration - iteration %d of 3" % iteration
+    source = "SIMULATED / NOT PRINTER MEASUREMENT" if simulated else "Captured accelerometer measurements"
+    parts = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 445" role="img" '
+             'aria-label="%s">' % html.escape(title, quote=True),
+             '<rect width="1100" height="445" fill="#fff"/>',
+             '<g font-family="sans-serif" fill="#182331">',
+             '<text x="90" y="25" font-size="18">%s</text>' % html.escape(title),
+             '<text x="90" y="47" font-size="12">%s; %d samples over %.6g s</text>'
+             % (source, record["sample_count"], duration),
+             '<text x="90" y="66" font-size="12">Own-window mean removed; signed XYZ; run %s</text>'
+             % html.escape(run_id)]
+    for tick in range(5):
+        value = -peak + tick * peak / 2.0
+        y = sy(value)
+        parts.append('<path d="M90 %.3fH1040" stroke="#dce1e8"/>' % y)
+        parts.append('<text x="80" y="%.3f" text-anchor="end" font-size="12">%.4g</text>'
+                     % (y + 4, value))
+    for tick in range(6):
+        parts.append('<text x="%.3f" y="388" text-anchor="middle" font-size="12">%.3f</text>'
+                     % (left + tick / 5.0 * (right - left), duration * tick / 5.0))
+    parts.extend(['<text x="565" y="415" text-anchor="middle">Time since first sample (s)</text>',
+                  '<text x="20" y="225" transform="rotate(-90 20 225)" '
+                  'text-anchor="middle">Acceleration minus window mean (g)</text>'])
+    stride = max(1, int(math.ceil(len(delta) / 4000.0)))
+    for index, color in enumerate(("#1769aa", "#c54238", "#217746"), 1):
+        points = []
+        for offset in range(0, len(delta), stride):
+            bucket = delta[offset:offset + stride]
+            chosen = sorted({0, len(bucket) - 1,
+                             min(range(len(bucket)), key=lambda point: bucket[point][index]),
+                             max(range(len(bucket)), key=lambda point: bucket[point][index])})
+            points.extend("%.3f,%.3f" % (sx(bucket[point][0]), sy(bucket[point][index]))
+                          for point in chosen)
+        parts.append('<polyline points="%s" fill="none" stroke="%s" stroke-width="1.2"/>'
+                     % (" ".join(points), color))
+        parts.append('<text x="%d" y="438" fill="%s" font-size="12">%s</text>'
+                     % (460 + index * 60, color, "XYZ"[index - 1]))
+    parts.append('</g></svg>')
+    return "\n".join(parts)
+
+
+def write_noise_capture(directory, run_id, iteration, capture, record, simulated=False):
+    """Atomically export one complete stationary window, preserving raw XYZ g."""
+    stem = _noise_identity(run_id, iteration)
+    samples, baseline, delta = _validate_noise_capture(run_id, iteration, capture, record)
+    destination = Path(directory).expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    published = destination / stem
+    if os.path.lexists(published):
+        raise ValueError("Stationary noise output already exists for this iteration")
+    with tempfile.TemporaryDirectory(prefix=".accel_homing_noise_", dir=str(destination)) as temporary:
+        paths = {extension: str(Path(temporary) / (stem + "." + extension))
+                 for extension in ("csv", "svg", "html", "json")}
+        with open(paths["csv"], "x", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("print_time_s", "elapsed_s", "raw_x_g", "raw_y_g", "raw_z_g",
+                             "delta_x_g", "delta_y_g", "delta_z_g"))
+            for sample, removed in zip(samples, delta):
+                writer.writerow((sample[0], sample[0] - samples[0][0], *sample[1:], *removed[1:]))
+        metadata = {"run_id": run_id, "noise_iteration": iteration,
+                    "data_source": "SIMULATED - NOT PRINTER MEASUREMENT" if simulated else
+                    "captured accelerometer measurements", "definition": _NOISE_DEFINITION,
+                    "sample_count": len(samples), "baseline_g": list(baseline), "record": record,
+                    "capture": {"dropped": 0, "fault": None},
+                    "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+        with open(paths["json"], "x", encoding="utf-8") as stream:
+            json.dump(metadata, stream, indent=2, allow_nan=False)
+        svg = _noise_capture_svg(run_id, iteration, record, delta, simulated)
+        Path(paths["svg"]).write_text(svg, encoding="utf-8")
+        title = "Stationary accelerometer vibration - iteration %d of 3" % iteration
+        page = ('<!doctype html><html lang="en"><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<title>%s</title><style>body{font:16px sans-serif;margin:2rem;color:#182331}'
+                'svg{width:100%%;max-width:1500px;height:auto}</style><h1>%s</h1><p>%s</p>'
+                '<p>Sensor: %s; backend: %s; %s; full scale: %s g.</p>%s'
+                '<p><a href="%s">Full-resolution raw and baseline-subtracted CSV</a> · '
+                '<a href="%s">Metadata JSON</a></p><p>%s</p></html>') % (
+                    html.escape(title), html.escape(title), html.escape(_NOISE_DEFINITION),
+                    html.escape(record["sensor"]), html.escape(record["backend"]),
+                    html.escape(record["axis_context"]), _display(record["full_scale_g"]), svg,
+                    html.escape(Path(paths["csv"]).name, quote=True),
+                    html.escape(Path(paths["json"]).name, quote=True), html.escape(_NOISE_CANDIDATE_NOTE))
+        Path(paths["html"]).write_text(page, encoding="utf-8")
+        os.rename(temporary, published)
+    return {extension: str(published / Path(path).name) for extension, path in paths.items()}
+
+
+def _noise_capture_reference(directory, run_id, iteration, record, paths, simulated):
+    stem = _noise_identity(run_id, iteration)
+    if not isinstance(paths, dict):
+        raise ValueError("Stationary noise window is missing capture paths")
+    resolved = {}
+    for extension in ("csv", "svg", "html", "json"):
+        path = paths.get(extension)
+        if not isinstance(path, str):
+            raise ValueError("Stationary noise window is missing an output file")
+        candidate = Path(path).expanduser().resolve(strict=True)
+        if candidate != directory / stem / (stem + "." + extension) or not candidate.is_file():
+            raise ValueError("Stationary noise capture path does not belong to this run")
+        resolved[extension] = str(candidate)
+    metadata = json.loads(_read_limited(resolved["json"], _MAX_CAPTURE_JSON_BYTES))
+    source = "SIMULATED - NOT PRINTER MEASUREMENT" if simulated else "captured accelerometer measurements"
+    if metadata.get("run_id") != run_id or metadata.get("noise_iteration") != iteration \
+            or metadata.get("record") != json.loads(json.dumps(record, allow_nan=False)) \
+            or metadata.get("data_source") != source or metadata.get("sample_count") != record["sample_count"] \
+            or not isinstance(metadata.get("baseline_g"), list) or len(metadata["baseline_g"]) != 3 \
+            or not all(_same_noise_number(metadata["baseline_g"][index], record["baseline_g"][axis])
+                       for index, axis in enumerate("xyz")) \
+            or metadata.get("capture") != {"dropped": 0, "fault": None}:
+        raise ValueError("Stationary noise capture metadata does not match a complete valid window")
+    return resolved
+
+
+def _validate_noise_recommendation(recommendation, iterations):
+    if not isinstance(recommendation, dict) or recommendation.get("source") != "stationary_noise" \
+            or recommendation.get("method") != "initial_candidate_heuristic" \
+            or recommendation.get("margin_factor") != 1.2 or recommendation.get("margin_g") != 0.1 \
+            or recommendation.get("clamped") is not False:
+        raise ValueError("Invalid stationary noise initial-candidate heuristic")
+    for key in ("candidate_step_g", "configured_start_g"):
+        if not _finite(recommendation.get(key)) or recommendation[key] <= 0:
+            raise ValueError("Invalid stationary noise candidate bounds")
+    limit = recommendation.get("threshold_limit_g")
+    if limit is not None and (not _finite(limit) or limit <= 0):
+        raise ValueError("Invalid stationary noise candidate ceiling")
+    observed = _noise_vector(recommendation.get("noise_peak_g"), "maximum peak")
+    candidates = recommendation.get("start_threshold_g")
+    if not isinstance(candidates, dict) or set(candidates) != set("xy"):
+        raise ValueError("Invalid stationary noise axis candidates")
+    for axis in "xyz":
+        if not _same_noise_number(observed[axis], max(item["record"]["noise_peak_g"][axis]
+                                                     for item in iterations)):
+            raise ValueError("Stationary noise recommendation peak does not match its windows")
+    if limit is None:
+        if any(item["record"]["full_scale_g"] is not None for item in iterations) \
+                or candidates != {"x": None, "y": None} \
+                or recommendation.get("unavailable_axes") != ["x", "y"]:
+            raise ValueError("Unknown sensor range cannot supply a stationary noise calibration candidate")
+        json.dumps(recommendation, allow_nan=False)
+        return
+    unavailable = []
+    start, step = recommendation["configured_start_g"], recommendation["candidate_step_g"]
+    for axis in "xy":
+        minimum = max(start, observed[axis] * 1.2, observed[axis] + 0.1)
+        candidate = start + max(0, math.ceil((minimum - start) / step)) * step
+        if not _finite(candidate) or candidate > limit:
+            unavailable.append(axis)
+            if candidates[axis] is not None:
+                raise ValueError("Stationary noise candidate exceeds its ceiling; do not clamp it downward")
+        elif not _same_noise_number(candidates[axis], candidate):
+            raise ValueError("Stationary noise candidate is not rounded upward on the calibration grid")
+    if recommendation.get("unavailable_axes") != unavailable:
+        raise ValueError("Stationary noise unavailable candidates do not match the ceiling")
+    json.dumps(recommendation, allow_nan=False)
+
+
+def write_noise(directory, run_id, iterations, recommendation, result, reason=None, simulated=False):
+    """Publish three stationary-window charts, or an explicit incomplete report.
+
+    iterations contains only {record, capture_paths} entries from this run's
+    write_noise_capture outputs. A failed/incomplete run cannot recommend a seed.
+    """
+    _noise_identity(run_id, 1)
+    if result not in ("complete", "aborted", "incomplete", "failed", "cancelled") \
+            or (reason is not None and (not isinstance(reason, str) or len(reason) > 4000)) \
+            or not isinstance(iterations, list) or len(iterations) > _NOISE_WINDOWS:
+        raise ValueError("Invalid stationary noise report")
+    if result == "complete" and len(iterations) != _NOISE_WINDOWS:
+        raise ValueError("A complete stationary noise report requires three valid windows")
+    if result != "complete" and recommendation is not None:
+        raise ValueError("Incomplete stationary noise data cannot recommend a calibration candidate")
+    destination = Path(directory).expanduser().resolve()
+    checked, context, previous_end = [], None, None
+    for iteration, item in enumerate(iterations, 1):
+        if not isinstance(item, dict):
+            raise ValueError("Invalid stationary noise report iteration")
+        record = item.get("record")
+        _check_noise_record(run_id, iteration, record)
+        if previous_end is not None and record["first_sample_time_s"] <= previous_end:
+            raise ValueError("Stationary noise windows overlap or repeat earlier samples")
+        previous_end = record["last_sample_time_s"]
+        current = tuple(record[key] for key in ("sensor", "backend", "axis_context", "full_scale_g")) + (
+            json.dumps(record.get("sensor_context"), sort_keys=True, allow_nan=False),)
+        if context is not None and current != context:
+            raise ValueError("Stationary noise sensor context changed between windows")
+        context = current
+        refs = _noise_capture_reference(destination, run_id, iteration, record,
+                                        item.get("capture_paths"), simulated)
+        checked.append({"record": record, "capture_paths": refs})
+    if result == "complete":
+        _validate_noise_recommendation(recommendation, checked)
+    destination.mkdir(parents=True, exist_ok=True)
+    published = destination / ("accel_homing_noise_%s" % run_id)
+    if os.path.lexists(published):
+        raise ValueError("Stationary noise summary already exists for this run")
+    with tempfile.TemporaryDirectory(prefix=".accel_homing_noise_summary_", dir=str(destination)) as temporary:
+        paths = _write_noise(Path(temporary), published.name, run_id, checked,
+                             recommendation, result, reason, simulated)
+        if sum(Path(path).stat().st_size for path in paths.values()) > _MAX_REPORT_BYTES:
+            raise ValueError("Stationary noise summary exceeds its report size limit")
+        os.rename(temporary, published)
+    return {extension: str(published / Path(path).name) for extension, path in paths.items()}
+
+
+def _write_noise(directory, stem, run_id, iterations, recommendation, result, reason, simulated):
+    paths = {extension: str(directory / (stem + "." + extension))
+             for extension in ("csv", "svg", "html", "json")}
+    title = "Stationary accelerometer vibration - three-window measurement"
+    status = "COMPLETE: all three stationary windows exported."
+    if result != "complete":
+        title = "INCOMPLETE / %s: %s" % (result.upper(), title)
+        status = "INCOMPLETE / %s: no calibration candidate is recommended." % result.upper()
+    if simulated:
+        title = "SIMULATED / NOT PRINTER MEASUREMENT: " + title
+    relative = lambda path: "../" + Path(path).parent.name + "/" + Path(path).name
+    exported = [{"record": item["record"], "capture_paths": {
+        extension: relative(path) for extension, path in item["capture_paths"].items()}}
+        for item in iterations]
+    metadata = {"run_id": run_id, "result": result, "reason": reason,
+                "data_source": "SIMULATED - NOT PRINTER MEASUREMENT" if simulated else
+                "captured accelerometer measurements", "definition": _NOISE_DEFINITION,
+                "candidate_note": _NOISE_CANDIDATE_NOTE, "requested_windows": _NOISE_WINDOWS,
+                "requested_window_duration_s": _NOISE_WINDOW_SECONDS, "iterations": exported,
+                "recommendation": recommendation,
+                "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    with open(paths["json"], "x", encoding="utf-8") as stream:
+        json.dump(metadata, stream, indent=2, allow_nan=False)
+    with open(paths["csv"], "x", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("run_id", "iteration", "axis", "duration_s", "sample_count", "baseline_g",
+                         "absolute_noise_peak_g", "noise_rms_g", "noise_peak_to_peak_g",
+                         "initial_calibration_candidate_g", "candidate_is_calibrated_impact_threshold"))
+        for item in iterations:
+            record = item["record"]
+            for axis in "xyz":
+                candidate = recommendation["start_threshold_g"].get(axis) if recommendation else None
+                writer.writerow((run_id, record["noise_iteration"], axis.upper(), record["duration_s"],
+                                 record["sample_count"], record["baseline_g"][axis],
+                                 record["noise_peak_g"][axis], record["noise_rms_g"][axis],
+                                 record["noise_peak_to_peak_g"][axis], candidate, False))
+    embedded = [_embedded_capture_svg(item["capture_paths"]["svg"]) for item in iterations]
+    header_height = 185
+    height = header_height + max(1, len(embedded)) * 445
+    summary = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 %d" role="img" '
+               'aria-label="Stationary accelerometer vibration windows">' % height,
+               '<rect width="1100" height="%d" fill="#fff"/>' % height,
+               '<g font-family="sans-serif" fill="#182331">',
+               '<text x="90" y="28" font-size="18">Stationary accelerometer vibration - %d of 3 windows</text>'
+               % len(iterations), '<text x="90" y="51" font-size="12">%s</text>' % html.escape(status),
+               '<text x="90" y="73" font-size="12">%s</text>' % (
+                   "SIMULATED / NOT PRINTER MEASUREMENT" if simulated else "Captured accelerometer measurements"),
+               '<text x="90" y="95" font-size="12">%s</text>' % (
+                   'Observed maximum absolute noise peaks XYZ: %s g' % ' / '.join(
+                       _display(recommendation["noise_peak_g"][axis], 9) for axis in "xyz")
+                   if recommendation else 'No calibration candidate is recommended from incomplete data.'),
+               '<text x="90" y="117" font-size="12">%s</text>' % (
+                   'Initial candidates X: %s g; Y: %s g - NOT calibrated impact thresholds' % tuple(
+                       _display(recommendation["start_threshold_g"][axis], 9) for axis in "xy")
+                   if recommendation else 'Initial candidates unavailable.'),
+               '<text x="90" y="139" font-size="12">Peak + max(20% of peak, 0.1 g); round upward on start + n * step grid</text>',
+               '<text x="90" y="161" font-size="12">Run %s; every window uses its own stationary mean</text>'
+               % html.escape(run_id), '</g>']
+    for index, svg in enumerate(embedded):
+        panel = ET.fromstring(svg)
+        panel.set("width", "1100")
+        panel.set("height", "445")
+        summary.append('<g transform="translate(0 %d)">%s</g>'
+                       % (header_height + index * 445, ET.tostring(panel, encoding="unicode")))
+    if not embedded:
+        summary.append('<text x="90" y="235" font-family="sans-serif">No valid complete windows available.</text>')
+    summary.append('</svg>')
+    Path(paths["svg"]).write_text("\n".join(summary), encoding="utf-8")
+    parts = ['<!doctype html><html lang="en"><meta charset="utf-8">'
+             '<meta name="viewport" content="width=device-width,initial-scale=1">'
+             '<title>%s</title><style>body{font:16px system-ui,sans-serif;margin:2rem;max-width:1500px;'
+             'color:#182331}h1{font-size:1.55rem}svg{width:100%%;height:auto}table{border-collapse:collapse;'
+             'width:100%%;margin:1rem 0}th,td{padding:.5rem;border:1px solid #ccd3dc;text-align:right}'
+             'th:first-child,td:first-child{text-align:left}.scroll{overflow-x:auto}.status{padding:.8rem;'
+             'background:#edf2f7}a{color:#155a97}details{margin:1rem 0}summary{cursor:pointer}</style>'
+             '<h1>%s</h1><p class="status">%s</p><p>%s</p><p>%s</p>'
+             % (html.escape(title), html.escape(title), html.escape(status),
+                html.escape(_NOISE_DEFINITION), html.escape(_NOISE_CANDIDATE_NOTE))]
+    if reason:
+        parts.append('<p>Reason: %s</p>' % html.escape(reason))
+    if recommendation:
+        parts.append('<h2>Initial calibration candidate</h2><p>For each X/Y axis: take the largest absolute '
+                     'noise peak across all three windows, add the greater of 20% or 0.1 g, then round upward '
+                     'on the configured start + n × step grid. No downward clamp is applied. '
+                     'Ordinary/manual trigger thresholds are unchanged.</p><ul>')
+        for axis in "xy":
+            candidate = recommendation["start_threshold_g"][axis]
+            label = "%s g" % _display(candidate, 9) if candidate is not None else (
+                "unavailable: sensor range unknown" if recommendation["threshold_limit_g"] is None
+                else "unavailable: exceeds calibration ceiling")
+            parts.append('<li>%s: observed absolute peak %s g; initial candidate %s.</li>'
+                         % (axis.upper(), _display(recommendation["noise_peak_g"][axis], 9), label))
+        parts.append('</ul><p>Configured start %s g; step %s g; ceiling %s g. '
+                     'Use a usable seed only in a separate later ACCEL_HOMING_CALIBRATE command. '
+                     'Seeds last until restart; remeasure before Y if saving X restarted Klipper.</p>'
+                     % tuple(_display(recommendation[key], 9) for key in
+                             ("configured_start_g", "candidate_step_g", "threshold_limit_g")))
+    parts.append('<h2>Measured windows</h2><div class="scroll"><table><thead><tr>'
+                 '<th>Iteration / axis</th><th>Duration (s)</th><th>Samples</th><th>Mean (g)</th>'
+                 '<th>Absolute peak (g)</th><th>RMS (g)</th><th>Peak-to-peak (g)</th></tr></thead><tbody>')
+    for item in iterations:
+        record = item["record"]
+        for axis in "xyz":
+            parts.append('<tr><td>%d / %s</td><td>%s</td><td>%d</td>%s</tr>' % (
+                record["noise_iteration"], axis.upper(), _display(record["duration_s"], 9), record["sample_count"],
+                "".join('<td>%s</td>' % _display(record[key][axis], 9) for key in
+                        ("baseline_g", "noise_peak_g", "noise_rms_g", "noise_peak_to_peak_g"))))
+    parts.append('</tbody></table></div>')
+    for item, svg in zip(iterations, embedded):
+        record = item["record"]
+        parts.append('<details open><summary>Iteration %d - signed XYZ acceleration trace</summary>'
+                     '<p>Sensor: %s; backend: %s; %s; full scale: %s g.</p>%s<p>%s</p></details>' % (
+                         record["noise_iteration"], html.escape(record["sensor"]),
+                         html.escape(record["backend"]), html.escape(record["axis_context"]),
+                         _display(record["full_scale_g"]), svg,
+                         " · ".join('<a href="%s">%s</a>' % (
+                             html.escape(relative(item["capture_paths"][extension]), quote=True), label)
+                             for extension, label in (("csv", "Full-resolution raw and baseline-subtracted CSV"),
+                                                      ("json", "Capture JSON"), ("svg", "Capture SVG")))))
+    parts.append('<p>Display traces retain positive and negative extrema of each display bucket. '
+                 'Each CSV keeps every original sample. Plots are embedded and need no network connection.</p>'
+                 '<p><a href="%s">Summary CSV</a> · <a href="%s">Summary JSON</a> · '
+                 '<a href="%s">All-window SVG</a></p></html>'
+                 % tuple(html.escape(Path(paths[key]).name, quote=True) for key in ("csv", "json", "svg")))
+    Path(paths["html"]).write_text("\n".join(parts), encoding="utf-8")
     return paths

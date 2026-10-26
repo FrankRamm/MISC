@@ -28,6 +28,26 @@ python -m unittest discover -s Beacon_Accel_Homing/tests -p test_accuracy_workfl
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_accuracy_charts.py -v
 ```
 
+The chart module's focused command includes the stationary-noise fixtures.
+Those fixtures check three separate one-second windows, independent XYZ means,
+signed raw-minus-mean traces, absolute peak/RMS/peak-to-peak statistics and
+full-resolution raw/delta CSV. A 2 g X peak produces a distinct 2.5 g initial
+candidate on the default grid; Y is independent and Z gravity stays in raw
+data while its window mean is removed from the plotted trace. Incomplete or
+faulted data cannot recommend a seed. Over-ceiling and unknown-range cases
+retain all three valid charts with unavailable candidates. Same-run identity,
+chronological non-overlap, sensor/map/scale consistency, escaped metadata,
+passive SVG, bounded display reduction and no-overwrite publication are checked.
+Nested panels have explicit 1100×445 viewports in the all-window SVG.
+
+The representative three-window chart retained outside this source package is
+**SIMULATED / NOT PRINTER MEASUREMENT**. Its aggregate SVG was rendered with an
+existing PyMuPDF installation and visually checked: all three panels, signed
+XYZ axes, sample/time labels, the 2/1/0.5 g observed peaks and separate 2.5/1.5 g
+initial candidates were legible without clipping. The charts need no plotting
+dependency or network connection on the printer host. This is layout
+verification, not a measurement of a physical sensor or printer.
+
 Focused motor-enable and fresh-reference fixtures, run from
 `Beacon_Accel_Homing/tests/`:
 
@@ -43,7 +63,7 @@ failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. All three shell entry points are byte-identical to the source base
-`4415635d06e8872ae80a54a86ca32d4abb7468cf`, so their syntax checks were not repeated. No native
+`51202db1ef03a4e33626265be15341ede6942eb5`, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -59,7 +79,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The final combined offline verification run discovered **482 tests: 481 passed,
+The final combined offline verification run discovered **504 tests: 503 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -150,7 +170,7 @@ also reject incomplete, reused, foreign-axis/candidate/run or malformed windows
 and recompute the range before writes. Legacy saved models remain accepted;
 their old distances do not acquire the new qualification on loading.
 
-Accuracy adds **26 tests**: **18** in `test_accuracy_workflow` and **8** in
+Accuracy workflow/report fixtures are in `test_accuracy_workflow` and
 `test_accuracy_charts`. `ACCEL_HOMING_ACCURACY` accepts X, Y or XY (default),
 with 2–50 measured homes per axis and a default of ten. Each axis first needs
 a separate geometry-qualified discovery home from the manually confirmed
@@ -226,14 +246,14 @@ existing shared/X/Y values below 3 g through initial installation and update
 in either section. The next-float fixture uses portable struct operations;
 Python 3.8 runtime compatibility was not exercised.
 
-The recorded run used CPython 3.13.5 on Windows: **482 tests in 9.295 seconds**
-(9.5432054 seconds subprocess wall time). The full UTF-8 unittest output is
+The recorded run used CPython 3.13.5 on Windows: **504 tests in 11.043 seconds**
+(11.29669 seconds subprocess wall time). The full UTF-8 unittest output is
 retained in `validation/tests.txt` as its exact binary-captured bytes, without
-newline conversion: **80,841 bytes and 487 CRLF pairs**. The JSON report hashes
-that stored log and all **20 Python sources both before and after** the run;
-the two source snapshots match. All **35 package files** were also identical
+newline conversion: **85,122 bytes and 509 CRLF pairs**. The JSON report hashes
+that stored log and all **21 Python sources both before and after** the run;
+the two source snapshots match. All **36 package files** were also identical
 between the snapshots taken during the suite; this summary, the new log and
-the validation report were written afterward. The package inventory contains **35 files**,
+the validation report were written afterward. The package inventory contains **36 files**,
 with **22 immutable bootstrap payload files**; no private user log
 or raw hardware samples are included.
 
@@ -444,7 +464,7 @@ engineering ranges do not certify hardware safety. No current printer
 settings were changed and no private user log or raw measurements were
 included in this package.
 
-All **20 production and test Python files** listed in
+All **21 production and test Python files** listed in
 `validation/VALIDATION.json` passed Python 3.8
 grammar parsing on the current Python 3.13 host. No Python 3.8 runtime was
 executed; syntax parsing alone does not establish complete runtime compatibility.
