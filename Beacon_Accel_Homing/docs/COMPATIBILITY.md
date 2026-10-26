@@ -35,6 +35,29 @@ the previous reporting interval on completion/failure. Beacon retains its
 direct raw path and existing trigger dispatch. Both rely on host/transport
 scheduling and cannot guarantee a hard end-to-end stop latency.
 
+## Centered calibration
+
+Start or resume with `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`, or `AXIS=Y`
+for Y. Before that command, the operator physically centers both XY axes by
+hand using motor controls appropriate for the machine, with Z supported.
+Both XY axes must be unhomed in Klipper. `CENTERED=1` declares that this manual
+preparation is complete and authorizes movement; it is not a sensor position
+measurement. The workflow does not assign a center coordinate or mark either
+axis homed before the actual home.
+
+The first home tests the candidate threshold, starting at 3 g by default.
+One qualifying discovery is followed by ten additional accepted validation
+homes, returning only the tested axis to center between accepted trials.
+An early trigger raises the candidate, resets validation progress, releases
+XY and invalidates its homed state while retaining Z. The operator manually
+recenters and repeats the same calibration command to resume the pending
+candidate and attempt count, keeping the same `AXIS` and optional `SAVE_CONFIG`
+value. Sensor faults and excessive travel abort. Native homing errors still
+use stock fault cleanup, which may release all motors.
+TEST/CHARTS instead start without arguments and wait for
+`ACCEL_HOMING_CONFIRM CENTERED=1` or the prompt button; this confirmation
+cannot start or resume calibration.
+
 ## Generic startup motion policy
 
 While no impact has completed a generic home, fresh acceleration must prove
@@ -84,5 +107,6 @@ G28; they reject homing wrappers and potentially Z-coupled paths.
 
 Distance qualification uses commanded/firmware step positions. An accelerometer
 plus step counts cannot distinguish every jam, skipped step or wrong physical
-stop from valid motion. Ten qualifying repeats and a saved model are tuning
-evidence, not independent physical metrology or safe stopping certification.
+stop from valid motion. A qualifying discovery, ten validation repeats and a
+saved model are tuning evidence, not independent physical metrology or safe
+stopping certification.

@@ -135,6 +135,31 @@ After adapting their behavior you can explicitly acknowledge that review with
 calibration/test/chart commands still reject a wrapped `G28` because even an
 X-only invocation can cause Z movement. Resolve those wrappers to use workflows.
 
+## Prepare calibration after restarting
+
+Before the first calibration command, use the XY motor controls appropriate
+for your machine and physically center the toolhead by hand in both X and Y,
+keeping Z supported. Both XY axes must be unhomed in Klipper. Do not run a
+preparatory home or assign coordinates to mark either axis homed.
+
+Then run in the printer console:
+
+```gcode
+ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
+```
+
+`CENTERED=1` states that the toolhead is already physically centered and
+authorizes the first candidate home, starting at 3 g by default. It does not
+measure the manual position. After an early trigger, XY is released and made
+unhomed; center it manually again and reissue the same calibration command to
+resume, keeping the same `AXIS` and optional `SAVE_CONFIG` value.
+`ACCEL_HOMING_CONFIRM` is reserved for TEST/CHARTS.
+
+Successful calibration saves X and restarts Klipper by default. Once ready,
+repeat the preparation and use `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` for Y.
+See the [full calibration steps](../README.md#calibrate-x-then-y) for validation,
+manual threshold overrides and optional saving behavior.
+
 ## Backups, rollback and repeated installation
 
 Each changed installation saves a private transaction directory beside the
