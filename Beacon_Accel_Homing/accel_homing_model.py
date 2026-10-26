@@ -23,7 +23,7 @@ class AccelHomingModel:
         self.version = config.getint("version", 1, minval=1, maxval=1)
         for axis in "xy":
             threshold = config.getfloat(axis + "_threshold", None,
-                                        minval=2.0, maxval=15.0)
+                                        minval=1.0, maxval=15.0)
             self.successes[axis] = config.getint(axis + "_successes", 0,
                                                 minval=0, maxval=10)
             encoded = config.get(axis + "_metadata", "{}")

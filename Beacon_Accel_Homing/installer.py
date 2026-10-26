@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Transactional installer for an existing Klipper host. Never restarts or moves it."""
+"""Transactional Klipper/Kalico installer with guarded host-service activation."""
 import argparse
 import base64
 import datetime
@@ -16,6 +16,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 MODULES = ("accel_homing.py", "beacon_accel_homing.py", "accel_homing_backends.py",
@@ -25,6 +26,11 @@ SAVE_MARKER = "#*# <---------------------- SAVE_CONFIG ---------------------->"
 MANAGED = "accel_homing.cfg"
 SECTION = re.compile(r"^\s*\[([^]]+)\]\s*(?:[#;].*)?$")
 OPTION = re.compile(r"^(\s*)([\w]+)(\s*[:=]\s*)(.*?)(\r?\n)?$")
+SERVICE_NAME = re.compile(r"[A-Za-z0-9_:][A-Za-z0-9_.:@\\-]*\.service\Z")
+SERVICE_PROPERTIES = ("Id", "LoadState", "ActiveState", "SubState", "MainPID", "InvocationID",
+                      "ControlGroup", "ExecStart", "WorkingDirectory", "FragmentPath", "DropInPaths",
+                      "NeedDaemonReload", "User", "Group", "CanStart", "CanStop",
+                      "RefuseManualStart", "RefuseManualStop", "Environment", "EnvironmentFiles")
 
 
 def load_motion_policy():
@@ -53,6 +59,10 @@ def uninstall_api():
 
 
 class InstallError(Exception):
+    pass
+
+
+class ServiceStarting(InstallError):
     pass
 
 
@@ -100,13 +110,22 @@ def proc_instances(proc_root=Path("/proc")):
                     (process / "cmdline").read_bytes().split(b"\0") if p]
             if not any(Path(arg).name == "klippy.py" for arg in argv):
                 continue
-            service = None
+            service, scope = None, None
             if (process / "cgroup").is_file():
-                names = re.findall(r"/([^/\n]+\.service)(?:/|$)", (process / "cgroup").read_text())
+                groups = (process / "cgroup").read_text()
+                names = re.findall(r"/([^/\n]+\.service)(?:/|$)", groups)
                 service = names[-1] if names else None
+                scope = "user" if "/user.slice/" in groups else "system"
             found = command_instance(argv, (process / "cwd").resolve(),
                                      "running process " + process.name, int(process.name), service)
             if found:
+                found["service_scope"] = scope
+                # Field 22 follows the parenthesized command, which may contain spaces.
+                try:
+                    fields = (process / "stat").read_text().rsplit(") ", 1)[1].split()
+                    found["start_time"] = fields[19] if fields[19].isdigit() else None
+                except (OSError, IndexError):
+                    found["start_time"] = None
                 instances.append(found)
         except (OSError, ValueError):
             continue
@@ -139,6 +158,7 @@ def service_instances(home):
                 found = command_instance(shlex.split(command[0]), working[-1].strip() if working else "/",
                                          str(unit), service=unit.name)
                 if found:
+                    found["service_scope"] = "user" if directory == directories[-1] else "system"
                     instances.append(found)
             except (OSError, ValueError):
                 continue
@@ -146,10 +166,14 @@ def service_instances(home):
 
 
 def active_service(service):
-    if not service or shutil.which("systemctl") is None:
+    systemctl = shutil.which("systemctl")
+    if not service or systemctl is None:
         return None
-    result = subprocess.run(["systemctl", "show", service, "--property=ActiveState", "--value"],
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+    try:
+        result = subprocess.run([systemctl, "--no-ask-password", "show", "--property=ActiveState", "--value", "--", service],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 
@@ -509,8 +533,12 @@ def webhook_query(api_path, method, params=None):
     raise InstallError("No complete reply from Klipper API socket %s" % api_path)
 
 
-def assert_idle(selected, query=webhook_query, service_state=active_service):
+def assert_idle(selected, query=None, service_state=None, require_process_identity=False):
+    query = webhook_query if query is None else query
+    service_state = active_service if service_state is None else service_state
     state = service_state(selected["service"])
+    if require_process_identity and selected["pid"] is not None and selected["service"] and state != "active":
+        raise InstallError("Selected live service is no longer verifiably active (%s); refusing writes/restart." % state)
     active = selected["pid"] is not None or state in ("active", "activating", "reloading")
     if not active:
         if selected["service"] and state is None:
@@ -523,9 +551,12 @@ def assert_idle(selected, query=webhook_query, service_state=active_service):
         info = query(selected["socket"], "info")
         if not info.get("config_file") or canonical(info["config_file"]) != selected["config"]:
             raise InstallError("API socket belongs to a different/unknown config (%s). "
-                               "Use the selected instance's --klippy-socket; no files changed." % info.get("config_file"))
+                               "Use the selected instance's --klippy-socket." % info.get("config_file"))
         if info.get("klipper_path") and canonical(info["klipper_path"]) != selected["repo"]:
             raise InstallError("API socket Klipper checkout does not match selected --klipper-path.")
+        if require_process_identity and (info.get("process_id") != selected["pid"]
+                or not info.get("klipper_path") or canonical(info["klipper_path"]) != selected["repo"]):
+            raise InstallError("API socket process/checkout identity does not match the selected service MainPID.")
         if info.get("state") != "ready":
             raise InstallError("Klipper is not ready/idle (%s); stop it before repairing config." % info.get("state", "unknown"))
         objects = query(selected["socket"], "objects/list").get("objects", [])
@@ -534,13 +565,220 @@ def assert_idle(selected, query=webhook_query, service_state=active_service):
             raise InstallError("No idle_timeout evidence; stop the selected service first.")
         status = query(selected["socket"], "objects/query", {"objects": {name: None for name in names}}).get("status", {})
         idle = status.get("idle_timeout", {}).get("state")
-        printing = status.get("print_stats", {}).get("state", "standby")
-        paused = status.get("pause_resume", {}).get("is_paused", False)
-        if idle not in ("Idle", "Ready") or printing not in ("standby", "complete", "cancelled", "error") or paused:
+        printing = status.get("print_stats", {}).get("state") if "print_stats" in names else "standby"
+        paused = status.get("pause_resume", {}).get("is_paused") if "pause_resume" in names else False
+        if (idle not in ("Idle", "Ready") or printing not in ("standby", "complete", "cancelled", "error")
+                or paused is not False):
             raise InstallError("Refusing writes: printing/paused/unknown state (idle_timeout=%s, print_stats=%s, paused=%s)." % (idle, printing, paused))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
         raise InstallError("Cannot obtain read-only idle evidence from %s: %s. Stop the selected service and retry." % (selected["socket"], exc))
     return "Selected live Klipper reports ready/idle (read-only API query)."
+
+
+def service_command(command, timeout=5, capture=True):
+    """Every service-manager command is bounded, argv-only, and non-shell."""
+    try:
+        return subprocess.run(command, timeout=timeout, text=True,
+                              stdout=subprocess.PIPE if capture else None,
+                              stderr=subprocess.PIPE if capture else None)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise InstallError("Host service command did not complete: %s" % exc)
+
+
+def read_service_unit(selected, systemctl):
+    service = selected.get("service")
+    if not service or not SERVICE_NAME.fullmatch(service):
+        raise InstallError("Automatic restart needs one exact, valid detected systemd service. "
+                           "Select --service or use --no-restart with the actual service manager.")
+    if selected.get("service_scope") == "user":
+        raise InstallError("Selected Klipper uses a user systemd manager. Use --no-restart and "
+                           "restart that user's service manually; system services will not be guessed.")
+    result = service_command([systemctl, "--system", "--no-ask-password", "show", "--all",
+                              "--property=" + ",".join(SERVICE_PROPERTIES), "--", service])
+    properties = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    if result.returncode != 0 or properties.get("Id") != service or properties.get("LoadState") != "loaded":
+        raise InstallError("Cannot verify the loaded systemd unit %s; no service will be guessed. "
+                           "Use --no-restart for another service manager. %s" % (service, result.stderr.strip()))
+    if properties.get("NeedDaemonReload") != "no":
+        raise InstallError("%s has an unknown/pending unit reload. Reconcile its effective service definition first." % service)
+    if (properties.get("CanStart") != "yes" or properties.get("CanStop") != "yes"
+            or properties.get("RefuseManualStart") != "no" or properties.get("RefuseManualStop") != "no"):
+        raise InstallError("%s does not permit a verified manual service restart." % service)
+    if "/user.slice/" in properties.get("ControlGroup", ""):
+        raise InstallError("Refusing to control a user service through the system manager.")
+    return properties
+
+
+def effective_service_instance(properties, live=None):
+    # `show` supplies the manager's effective command, including loaded drop-ins.
+    # A standard live `python $KLIPPER_ARGS` unit is identified by its MainPID's
+    # actual /proc arguments, not by interpreting an environment file as a shell.
+    # Stopped units require a literal command because that live proof is absent.
+    command = properties.get("ExecStart", "")
+    arguments = re.findall(r"(?:^|;\s*)argv\[\]=(.*?)\s*;\s*ignore_errors=", command)
+    if len(arguments) != 1 or any(token in arguments[0] for token in ("%", "\\x")):
+        raise InstallError("Cannot resolve the effective systemd ExecStart to one Klipper command. "
+                           "Environment-based/wrapped units require --no-restart and manual activation.")
+    try:
+        argv = shlex.split(arguments[0])
+    except ValueError as exc:
+        raise InstallError("Cannot parse effective systemd ExecStart: %s" % exc)
+    working = properties.get("WorkingDirectory") or "/"
+    variables = [arg for arg in argv if "$" in arg]
+    if variables:
+        if (live is None or not argv or not Path(argv[0]).is_absolute()
+                or canonical(argv[0]) != canonical(live["executable"])
+                or any(not re.fullmatch(r"\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*\}", value) for value in variables)):
+            raise InstallError("Environment-based ExecStart needs a matching live main process; "
+                               "use --no-restart for stopped/unresolved units.")
+        found = live
+    else:
+        found = command_instance(argv, working, "effective systemd ExecStart", service=properties["Id"])
+    if not found:
+        raise InstallError("Effective systemd ExecStart does not identify one Klipper/Kalico instance; use --no-restart.")
+    definition = {key: properties.get(key, "") for key in (
+        "Id", "WorkingDirectory", "FragmentPath", "DropInPaths", "User", "Group", "Environment", "EnvironmentFiles")}
+    definition["argv"] = argv
+    return found, definition
+
+
+def service_identity(selected, systemctl):
+    properties = read_service_unit(selected, systemctl)
+    try:
+        pid = int(properties["MainPID"])
+    except (KeyError, ValueError):
+        raise InstallError("Cannot verify the selected service MainPID.")
+    processes = proc_instances()
+    relevant = [item for item in processes if item["config"] == selected["config"]
+                or (item.get("service") == selected["service"] and item.get("service_scope") != "user")]
+    active = properties.get("ActiveState")
+    live = None
+    if active in ("inactive", "failed") and pid == 0 and not relevant:
+        pid = None
+    else:
+        if active != "active" or properties.get("SubState") != "running" or pid <= 0 or len(relevant) != 1:
+            error = ServiceStarting if active in ("active", "activating") and not relevant else InstallError
+            raise error("Selected service/process is changing or ambiguous (%s/%s, MainPID=%s); retry when stable." %
+                        (active, properties.get("SubState"), pid))
+        live = relevant[0]
+        if (live["pid"] != pid or live.get("service") != selected["service"]
+                or live.get("service_scope") != "system" or not live.get("start_time")):
+            raise InstallError("Selected systemd MainPID/process creation identity cannot be verified.")
+    effective, definition = effective_service_instance(properties, live)
+    for key in ("repo", "config", "socket"):
+        if effective[key] != selected[key]:
+            raise InstallError("Effective service %s does not match the selected %s." % (selected["service"], key))
+        if live and live[key] != selected[key]:
+            raise InstallError("Live service process does not match the selected %s." % key)
+    return dict(definition=definition, pid=pid, start_time=live["start_time"] if live else None,
+                invocation=properties.get("InvocationID", ""), state=active)
+
+
+def restart_permission(plan, acquire=False):
+    # sudoers may permit command *listing* without authenticating execution.
+    # Validate the timestamp independently before checking this exact command.
+    validation = service_command([plan["sudo"], "-n", "-v"])
+    if validation.returncode and acquire:
+        print("Authorize the detected host-service restart before any idle check or file writes.")
+        validation = service_command([plan["sudo"], "-v"], timeout=60, capture=False)
+        if validation.returncode:
+            raise InstallError("Cannot obtain sudo authorization for the selected service restart; no files changed.")
+        validation = service_command([plan["sudo"], "-n", "-v"])
+    if validation.returncode:
+        raise InstallError("Noninteractive sudo authentication is unavailable. Authorize it before retrying, "
+                           "or use --no-restart.")
+    command = [plan["sudo"], "-n", "-l", "--"] + plan["service_command"]
+    result = service_command(command)
+    if result.returncode:
+        raise InstallError("Noninteractive sudo authorization for the exact service restart is unavailable. "
+                           "Authorize it before retrying, or use --no-restart. %s" % result.stderr.strip())
+
+
+def prepare_restart(selected):
+    systemctl, sudo = shutil.which("systemctl"), shutil.which("sudo")
+    if not systemctl or not sudo:
+        raise InstallError("Automatic restart requires systemctl and sudo. Use --no-restart for manual host activation.")
+    identity = service_identity(selected, systemctl)
+    if (identity["pid"] != selected.get("pid")
+            or (identity["pid"] and identity["start_time"] != selected.get("start_time"))):
+        raise InstallError("Selected service/process changed since detection. Retry before installing.")
+    plan = dict(systemctl=systemctl, sudo=sudo, identity=identity,
+                service_command=[systemctl, "--system", "--no-ask-password", "restart", "--", selected["service"]])
+    restart_permission(plan, acquire=True)
+    return plan
+
+
+def assert_restart_safe(selected, plan):
+    # These commands cannot ask for credentials. Permission checks always precede
+    # the final identity/API evidence, including after a slow file transaction.
+    restart_permission(plan)
+    if service_identity(selected, plan["systemctl"]) != plan["identity"]:
+        raise InstallError("Selected service/process identity changed; refusing writes/restart.")
+    print(assert_idle(selected, require_process_identity=True))
+
+
+def activation_path(selected, backup=None):
+    if backup is None:
+        _, active, _ = load_uninstaller().history(selected["config"], uninstall_api())
+        if active:
+            backup = active[-1]["directory"]
+    return (backup / "activation.json" if backup else
+            selected["config"].parent / ".accel_homing_activation.json")
+
+
+def save_activation(path, selected, status, attempted=False, **details):
+    receipt = dict(version=1, status=status, restart_attempted=attempted, repo=str(selected["repo"]),
+                   config=str(selected["config"]), service=selected.get("service"),
+                   updated_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(), **details)
+    data = json.dumps(receipt, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    write_state(path, {"kind": "file", "mode": 0o600, "data": base64.b64encode(data).decode("ascii")})
+
+
+def restarted_process(selected, plan):
+    deadline = time.monotonic() + 10
+    before = plan["identity"]
+    while True:
+        try:
+            after = service_identity(selected, plan["systemctl"])
+        except ServiceStarting:
+            after = None  # A Type=simple process may not have exec'd Python yet.
+        if after:
+            if after["definition"] != before["definition"] or after["state"] != "active" or after["pid"] is None:
+                raise InstallError("Restart did not produce the selected matching active host service.")
+            if (after["pid"], after["start_time"]) != (before["pid"], before["start_time"]):
+                return after
+        if time.monotonic() >= deadline:
+            raise InstallError("Restart returned successfully but a new matching active host process was not verified within 10 seconds.")
+        time.sleep(0.1)
+
+
+def activate_install(selected, plan, backup=None):
+    receipt = activation_path(selected, backup)
+    attempted = False
+    try:
+        save_activation(receipt, selected, "pending")
+        assert_restart_safe(selected, plan)
+        # No interactive authentication, filesystem writes or waits occur between
+        # the last idle proof and sending this restart request.
+        attempted = True
+        result = service_command([plan["sudo"], "-n", "--"] + plan["service_command"], timeout=45)
+        if result.returncode:
+            raise InstallError("systemctl restart failed (exit %s): %s" % (result.returncode, result.stderr.strip()))
+        after = restarted_process(selected, plan)
+        before = plan["identity"]
+        save_activation(receipt, selected, "restarted", attempted=True,
+                        previous_pid=before["pid"], pid=after["pid"], start_time=after["start_time"])
+    except (InstallError, OSError, ValueError) as exc:
+        try:
+            save_activation(receipt, selected, "failed" if attempted else "blocked", attempted=attempted, error=str(exc))
+        except (InstallError, OSError, ValueError) as receipt_error:
+            print("Activation receipt could not be saved: %s" % receipt_error, file=sys.stderr)
+        raise InstallError("Files are installed; automatic host-service activation %s. "
+                           "Installed changes and backups were retained; no automatic rollback was attempted. "
+                           "The service may have changed state. Backup: %s; activation receipt: %s. Cause: %s" %
+                           ("failed" if attempted else "was blocked", backup or "existing installation", receipt, exc))
+    print("Host service %s restarted; a new matching process was verified (PID %s)." % (selected["service"], after["pid"]))
+    print("Klipper Ready/module behavior and physical homing/calibration have not been verified. Activation receipt: %s" % receipt)
 
 
 def snapshot(path):
@@ -587,7 +825,7 @@ def save_manifest(directory, manifest):
     write_state(directory / "manifest.json", {"kind": "file", "mode": 0o600, "data": base64.b64encode(data).decode("ascii")})
 
 
-def apply_plan(changes, config, writer=write_state, selected=None):
+def apply_plan(changes, config, writer=write_state, selected=None, before_write=None):
     if not changes:
         return None
     entries = []
@@ -597,7 +835,7 @@ def apply_plan(changes, config, writer=write_state, selected=None):
         if not state_matches(path, expected):
             raise InstallError("%s changed after planning. Retry after editor/SAVE_CONFIG finishes." % path)
         if not os.access(path.parent, os.W_OK):
-            raise InstallError("No write access to %s. Run as Klipper service user; no sudo is used." % path.parent)
+            raise InstallError("No write access to %s. Run as Klipper service user; files are never written with sudo." % path.parent)
         if after["kind"] == "file":
             after["data"], after["mode"] = base64.b64encode(after["data"]).decode("ascii"), before.get("mode", 0o600)
         entries.append(dict(path=str(path), before=before, after=after))
@@ -607,16 +845,18 @@ def apply_plan(changes, config, writer=write_state, selected=None):
     metadata = dict(operation="install", repo=str(selected["repo"]) if selected else None,
                     parent=active[-1]["ref"] if active else None,
                     previous_uninstall=receipt["ref"] if receipt else None, context=context)
-    return execute_transaction(entries, config, metadata, writer)
+    return execute_transaction(entries, config, metadata, writer, before_write)
 
 
-def execute_transaction(entries, config, metadata, writer=write_state):
+def execute_transaction(entries, config, metadata, writer=write_state, before_write=None):
     for entry in entries:
         path = Path(entry["path"])
         if not state_matches(path, entry["before"]):
             raise InstallError("%s changed after planning. No files changed; retry after editor/SAVE_CONFIG finishes." % path)
         if not os.access(path.parent, os.W_OK):
-            raise InstallError("No write access to %s. Run as Klipper service user; no sudo is used." % path.parent)
+            raise InstallError("No write access to %s. Run as Klipper service user; files are never written with sudo." % path.parent)
+    if before_write:
+        before_write()
     parent = config.parent / ".accel_homing_backups"
     if parent.is_symlink():
         raise InstallError("Refusing symlink backup directory: %s" % parent)
@@ -768,6 +1008,7 @@ def arguments(argv=None):
     parser.add_argument("--homing-speed", type=float, help="explicit speed; generic cap still applies")
     parser.add_argument("--acknowledge-homing-override", action="store_true", help="you reviewed custom G28/homing_override behavior")
     parser.add_argument("--replace-existing-links", action="store_true", help="back up/replace plugin links from another source")
+    parser.add_argument("--no-restart", action="store_true", help="install/update without automatic host-service restart; activate manually")
     parser.add_argument("--dry-run", action="store_true", help="validate/print plan, no writes")
     parser.add_argument("--rollback", metavar="BACKUP_DIRECTORY", help="restore one unchanged installation transaction")
     parser.add_argument("-u", "--uninstall", action="store_true", help="restore the state before the first active managed installation, including upgrades")
@@ -784,7 +1025,9 @@ def print_restart_advice(selected):
     print("After reviewing the changes, while the printer is idle, restart its Klipper host "
           "process to load the changed Python modules.")
     service = selected.get("service")
-    if service:
+    if service and selected.get("service_scope") == "user":
+        print("Run this host command as the Klipper service user: systemctl --user restart -- %s" % shlex.quote(str(service)))
+    elif service:
         print("Run this host command yourself: sudo systemctl restart -- %s" % shlex.quote(str(service)))
     else:
         print("Use this printer's actual host service manager to restart the Klipper process; "
@@ -796,7 +1039,7 @@ def print_restart_advice(selected):
 def main(argv=None):
     args = arguments(argv)
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        raise InstallError("Run as the Klipper service user, not root. The installer never uses sudo.")
+        raise InstallError("Run as the Klipper service user, not root. Only the detected host-service restart uses sudo.")
     selected = discover_target(args)
     print("Checkout: %s\nMain config: %s\nDetection: %s\nService: %s\nExecutable: %s" %
           (selected["repo"], selected["config"], selected["origin"], selected["service"] or "none", selected["executable"] or "stopped host"))
@@ -838,16 +1081,28 @@ def main(argv=None):
     if args.dry_run:
         print("Dry run: no writes, restart, or movement.")
         return 0
-    if not changes:
-        print("Already installed; no changes, restart, or movement.")
-        return 0
-    print(assert_idle(selected))
-    backup = apply_plan(changes, selected["config"], selected=selected)
-    print("Installed. Backup: %s" % backup)
-    print("Review the config and sensor mounting/orientation.")
-    print_restart_advice(selected)
-    print("Restore: bash %s --config %s --klipper-path %s --rollback %s" %
-          tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "install.sh", selected["config"], selected["repo"], backup)))
+    restart = None if args.no_restart else prepare_restart(selected)
+    backup = None
+    if changes:
+        def before_write():
+            if restart:
+                assert_restart_safe(selected, restart)
+            else:
+                print(assert_idle(selected))
+        backup = apply_plan(changes, selected["config"], selected=selected, before_write=before_write)
+        print("Installed. Backup: %s" % backup)
+        print("Review the config and sensor mounting/orientation.")
+        print("Restore: bash %s --config %s --klipper-path %s --rollback %s" %
+              tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "install.sh", selected["config"], selected["repo"], backup)))
+    else:
+        print("Already installed; no installation files changed.")
+    if restart:
+        activate_install(selected, restart, backup)
+    else:
+        receipt = activation_path(selected, backup)
+        save_activation(receipt, selected, "skipped", reason="--no-restart")
+        print("Automatic activation skipped by --no-restart. Activation receipt: %s" % receipt)
+        print_restart_advice(selected)
     print("Full uninstall (including upgrades): bash %s --config %s --klipper-path %s" %
           tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "uninstall.sh", selected["config"], selected["repo"])))
     return 0

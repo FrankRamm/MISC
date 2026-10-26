@@ -46,14 +46,19 @@ and keeps existing thresholds, driver run currents and saved configuration.
 Generic accelerometers may require lower homing speeds, which it adjusts.
 
 Multiple printer instances or sensors need explicit selection. Configure
-sensor firmware and wiring beforehand. Installation does not start movement
-or restart Klipper.
+sensor firmware and wiring beforehand. After installation or an update, the
+installer rechecks that the selected instance is idle and **automatically
+restarts its verified systemd service** to load the installed Python modules.
+It requests your sudo password if needed; run the installation command as
+the existing Klipper service user. Installation does not start homing or
+calibration. Review the resulting configuration and mounting before either.
 
-Review the resulting configuration and mounting. Then, **while idle**, run the
-host service restart command printed by the installer in the host's **shell**.
-Use its selected service name; restarting the Klipper host process loads the
-installed Python modules. Printer-console `RESTART` or `FIRMWARE_RESTART`
-alone does not reload already imported code.
+Append `--no-restart` to the final `bash "$t"` invocation to install without
+automatic activation, then restart the selected host process while idle using
+the printed command. Printer-console `RESTART` or `FIRMWARE_RESTART` alone
+does not reload already imported code. See the
+[restart requirements](docs/INSTALLATION.md#automatic-host-service-restart)
+for service detection, privilege checks and activation failures.
 
 Keep the printed source directory under `~/.local/share/accel-homing/`; the
 installed links use it. See [installation details](docs/INSTALLATION.md) for
@@ -119,11 +124,12 @@ for XY travel. These workflows do not perform `safe_z_home`'s Z hop.
    have already centered XY and authorizes movement; the sensor cannot detect
    that position. **There is no further confirmation: X starts after the
    stationary preparation check.** The first home tests the actual candidate
-   threshold, starting at **2 g by default**, from that manual center.
+   threshold, starting at **1 g by default**, from that manual center.
 3. After one qualifying home, the plugin performs **ten additional consecutive
    accepted homes** at the same threshold. Between accepted trials, it returns
    only the tested axis to center.
-4. If it triggers too early, the plugin raises the candidate threshold, resets
+4. If it triggers too early, the plugin raises the candidate threshold by
+   0.5 g by default (the first retry is **1.5 g**), resets
    the validation count and releases XY, leaving both axes unhomed. Center XY
    manually again, then repeat **`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`** to
    resume the pending candidate and attempt count. It does not return
@@ -225,7 +231,7 @@ default. Leave the shared setting absent to use calibrated values. Generic
 objects need their actual configured `sensor_range`.
 
 Manual threshold settings and temporary SET commands retain their 3–15 g
-range. Calibration and its saved model accept values starting at 2 g; the
+range. Calibration and its saved model accept values starting at 1 g; the
 calibration ceiling and sensor-range limits still apply.
 
 The named model defaults to `[accel_homing_model default]`. It stores thresholds,
@@ -250,11 +256,15 @@ existing behavior. Dual carriages, shared XY/Z enables, `homing_override`,
 G28 macros and unknown wrapper chains remain rejected. See
 [the source contract and limits](docs/COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
-Calibration defaults: start at 2 g, increase by 0.5 g for early triggers, stop
+Calibration defaults: start at 1 g, increase by 0.5 g for early triggers, stop
 at 12 g or 80% of sensor range, allow at most 40 homing attempts and wait up to
 300 seconds for manual recentering. `calibration_start_threshold` is configurable
-with a minimum of 2 g. Starting or resuming calibration requires both XY axes
-to be unhomed; it never marks manually centered coordinates as homed.
+with a minimum of 1 g. Existing models at 2 g or above remain valid. Starting
+at 1 g applies when `calibration_start_threshold` is absent or set to 1;
+an explicit existing value is preserved. Updating does not replace a saved
+model's threshold; recalibrate to produce a new model. Starting or resuming
+calibration requires both XY axes to be unhomed; it never marks manually
+centered coordinates as homed.
 Qualification requires over 10 mm of commanded travel and agreement within
 20% of expected center-to-stop travel.
 Missing/late data, invalid captures, MCU errors and excessive travel abort

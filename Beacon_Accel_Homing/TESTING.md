@@ -33,25 +33,31 @@ Focused motor-enable and fresh-reference fixtures, run from
 python -m unittest test_session.EnablePreparationTest test_backends.GenericPreparationTest -v
 ```
 
-The recorded combined run includes **77 installer/bootstrap/uninstall tests:
-76 passed and one real POSIX symlink test was skipped** because the Windows
+The recorded combined run includes **92 installer/bootstrap/uninstall tests:
+91 passed and one real POSIX symlink test was skipped** because the Windows
 host does not permit symlink creation. Temporary regular-file fixtures cover
 installation, config idempotence, backup/rollback, full-history restore,
 failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. Shell entry points are unchanged by this
-direct-command workflow change, so their syntax checks were not repeated. No native
+calibration/activation change, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
-Host-process restart guidance follows inspected upstream import/restart
-source, documented in [compatibility evidence](docs/COMPATIBILITY.md#loading-code-and-configuration).
-No service restart or live module reload was tested. Installing/updating code,
-uninstalling it or restoring previous module links requires an operator-run
-host-process restart while idle; configuration-only edits retain console
-`RESTART` and normal calibration `SAVE_CONFIG` behavior.
+The need for a full host-process restart follows inspected upstream
+import/restart source, documented in
+[compatibility evidence](docs/COMPATIBILITY.md#loading-code-and-configuration).
+Installer activation fixtures use mocked systemd/process/privilege operations.
+They cover default install/update restart, `--no-restart`, selected-unit and
+live-process identity checks, a fresh idle/pause check before activation,
+authorization before writes, unchanged-package activation, and retained
+installation/backups on restart failure. Dry run, uninstall and rollback do
+not automatically restart. No real service restart or live module reload was
+tested. Configuration-only edits retain console `RESTART` and normal
+calibration `SAVE_CONFIG` behavior.
 
-The combined offline verification run discovered **292 tests: 291 passed,
+The restart coverage includes **15 `test_installer.RestartFixture` tests**.
+The combined offline verification run discovered **308 tests: 307 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -101,9 +107,9 @@ validate nozzle clearance, Cartographer probing or physical homing behavior.
 
 Centered-calibration fixtures check `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`
 as the start/resume command, with both XY axes unhomed before it can move or
-change workflow state. The first home tests the 2 g default candidate from
+change workflow state. The first home tests the 1 g default candidate from
 the operator's manual center; a clean run has one qualifying discovery and ten
-validation homes. Early triggers increase the default candidate to 2.5 g,
+validation homes. Early triggers increase the default candidate to 1.5 g,
 release/invalidate XY and wait for manual recentering followed by the same
 calibration command, preserving the pending candidate and attempt count.
 Automatic recentering follows only accepted homes. TEST/CHARTS start directly
@@ -120,16 +126,18 @@ or failure. Early calibration hits retain console instructions, the same
 calibration resume command, candidate/attempt state and pending timeout.
 
 Save-and-reload fixtures run the real named-model loader for both X and Y,
-including a clean 2 g calibration and a 2.5 g calibration after an early trigger.
+including a clean 1 g calibration and a 1.5 g calibration after an early trigger.
 They check that the saved threshold and ten successes survive restart loading,
-with the same sensor/geometry checks and no extra homing request.
+with the same sensor/geometry checks and no extra homing request. Both axes
+reject thresholds below 1 g and nonfinite values; previous models at 2 g or
+above remain accepted. Manual threshold and temporary SET limits remain 3–15 g.
 
 Motor-enable and fresh-reference checks add **19 tests** in
 `test_session.EnablePreparationTest` (13) and
 `test_backends.GenericPreparationTest` (6), with parameterized subcases. They
 cover disabled, partly enabled and already enabled CoreXY motors; actual
 completion of queued settling/backoff/retract before the cutoff; a fresh
-reference for the 2 g candidate and every pass; exclusion of old/buffered
+reference for the 1 g candidate and every pass; exclusion of old/buffered
 impacts; ringdown and noise on all sensor axes; and rejection of invalid,
 stale, future, nonmonotonic, gapped, clipped or scale-changed references.
 They also exercise bounded failure with persistent noise or no data,
@@ -150,7 +158,7 @@ plans above the fixed 3 mm nominal command budget before enabling/backoff.
 Those checks establish software behavior only; no physical stop travel or
 end-to-end host/MCU latency was measured.
 
-The three changed Python files (`accel_homing_workflows.py`, `installer.py` and
-`tests/test_workflows.py`) passed Python 3.8
+The changed production and test Python files listed in
+`validation/VALIDATION.json` passed Python 3.8
 grammar parsing on the current Python 3.13 host. No Python 3.8 runtime was
 executed; syntax parsing alone does not establish complete runtime compatibility.
