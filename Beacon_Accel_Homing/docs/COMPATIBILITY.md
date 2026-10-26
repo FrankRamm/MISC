@@ -142,6 +142,106 @@ Klipper documents that current changes can themselves move a motor in its
 [`hold_current` guidance](https://www.klipper3d.org/TMC_Drivers.html#prefer-to-not-specify-a-hold_current).
 This preparation does not change TMC currents, modes or other driver settings.
 
+## Final release after successful homing
+
+The installed X/Y `homing_retract_dist: 0` setting retains one touch. The
+plugin's `back_off_dist` (default 5 mm; finite 0–20 mm; zero disables it)
+controls its existing cross-axis release and the final release after a
+successful ordinary home. It does not enable a second touch. Configured
+homing/retract speeds, firmware acceleration limits and driver currents are
+preserved.
+
+The final release wraps the kinematics `home` call synchronously and waits
+until it returns, after firmware homing-coordinate corrections. It leaves the
+public `G28` handler and safe Z/override registration unchanged. Each underlying
+homing call is handled separately: a safe Z wrapper can still position
+XY after that call's release, so the final public `G28` position need not be
+5 mm from a stop. Release applies only to axes completed by that invocation
+and still associated with its current
+successful detector record. A failed home, shutdown, nested/untrusted home or
+stale record does not receive this move. The target is the configured endstop
+position plus the release distance away from the stop, bounded by the rail's
+minimum/maximum. The rail retract speed is used, with homing speed as fallback.
+The existing `homing_accel` limit temporarily caps the release acceleration;
+it does not raise a lower live value. Normal acceleration is restored after
+the move completes or fails.
+An equal or larger firmware release is not repeated; the move never returns
+toward the stop to enforce an exact distance. The release does not include Z.
+
+Supervised trial homes suppress the ordinary release. Accepted intermediate
+trials keep their existing tested-axis return to center. CALIBRATE releases
+its final tested axis only after geometry and all ten repeatability validations,
+before model staging or `SAVE_CONFIG`. TEST/CHARTS release their final Y only
+after both axes pass quality checks and any per-home charts are exported.
+ACCURACY validates the final accepted home and all required per-home captures,
+then releases its final tested axis before writing the aggregate summary.
+A later aggregate-export failure marks ACCURACY aborted while preserving
+the captures and the preceding trusted release. Rejected, cancelled or
+failed trial data never requests a terminal release. Stationary NOISE performs
+no release or other motion. These paths are verified with synthetic objects;
+no physical clearance, stop accuracy or skipped-step result is established.
+
+## Stationary accelerometer noise measurement
+
+`ACCEL_HOMING_CALIBRATE_NOISE` acquires three disjoint one-second windows of
+stationary, machine-mapped XYZ acceleration in g. This is a vibration
+measurement, not a sound-level measurement or a noise filter. It requires an
+idle, unpaused printer, an empty verified motion queue and an exclusive sensor
+stream. It does not require homed axes, manual centering or `CENTERED=1` and
+does not change motor enable/current, position, fan state, active thresholds
+or saved models. No homing, model save or restart follows automatically.
+The command rejects `SAVE_CONFIG`.
+
+Native Beacon raw data and configured generic sensors use their existing
+mapping, scale and stream contracts. Each window excludes earlier buffered
+data and requires at least 50 fresh, increasing samples spanning one second.
+Stale/future/gapped/frozen/malformed/saturated data, changed sensor identity,
+mapping/scale/range, concurrent clients, queue activity, cancellation or
+disconnect aborts the measurement. Generic reporting changes are restored and
+only the measurement's sensor subscription is stopped. There is no hidden
+motor-enable or motion test in this command.
+
+Each window's own XYZ mean is removed. Reports preserve every raw and signed
+baseline-subtracted sample in CSV and record duration, timestamps, count,
+sensor/scale/map context, absolute peak, RMS and peak-to-peak values in JSON.
+Standalone SVG and offline HTML contain the three signed XYZ plots; display
+reduction retains positive/negative extrema while CSV keeps full resolution.
+Run/iteration identity and disjoint timestamps are checked. A successful
+summary requires all three complete valid capture exports. Failed/partial
+runs are labelled incomplete, preserve completed captures when available and
+cannot recommend a candidate. Output directories are atomic and do not
+overwrite prior runs. Summary links use relative filenames; no remote chart
+resources or private printer configuration/logs are included.
+
+For each X/Y axis, let `peak` be its largest absolute mean-removed deviation
+across all three windows. The initial candidate is the smallest configured
+`calibration_start_threshold + n * calibration_step` value at least
+`max(calibration_start_threshold, 1.2 * peak, peak + 0.1 g)`. Thus a 2 g peak
+gives 2.5 g with the default 0.5 g start/step. Exact measured peaks and the
+upward-rounded candidates remain separate fields. The candidate must not
+exceed `min(calibration_max_threshold, 15 g, 0.8 * sensor_full_scale_g)`.
+An over-ceiling candidate is unavailable rather than clamped downward.
+An unknown physical sensor range also prevents a candidate; either case still
+exports all three valid measured windows and their statistics.
+
+These are **initial calibration candidates, NOT calibrated impact thresholds**.
+Only a later separate `ACCEL_HOMING_CALIBRATE` command consumes the matching
+axis's candidate, leaving ordinary/manual thresholds and saved models alone.
+Unused candidates last until restart and are discarded when sensor or
+calibration context changes; a new run, cancellation, shutdown or manual
+threshold change also clears them. Saving X normally restarts Klipper, so
+remeasure stationary vibration before Y to obtain a new Y candidate.
+Existing candidate escalation, manual recentering, geometry checks and the
+strict ten-home range qualification remain in force.
+
+Stationary vibration in the current motor/fan state does not predict motor
+enable, hold-to-run-current or first-step transients. It does not certify
+contact detection or guarantee that noise will be filtered. Homing still
+requires its fresh quiet reference: high peak-to-peak variation can fail
+`no_baseline` even when the heuristic supplies a higher candidate. Motion
+proof, raw impact eligibility, freshness/fault gates and timing policies are
+unchanged.
+
 ## Centered calibration
 
 Start or resume with `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`, or `AXIS=Y`
@@ -153,7 +253,8 @@ measurement. The workflow does not assign a center coordinate or mark either
 axis homed before the actual home. No further confirmation is requested; the
 first homing pass starts after stationary preparation succeeds.
 
-The first home tests the candidate threshold, starting at 0.5 g by default.
+The first home tests the candidate threshold, starting at 0.5 g by default or
+at the available transient candidate from stationary noise measurement below.
 Calibration and saved models accept finite thresholds from 0.5 to 15 g, with
 the configured calibration ceiling and sensor-range limit still applied.
 The default step stays 0.5 g, so the first early-trigger retry uses 1.0 g.
