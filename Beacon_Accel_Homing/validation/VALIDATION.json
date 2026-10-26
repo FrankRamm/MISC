@@ -1,10 +1,10 @@
 {
-  "stage": "completed offline validation for explicit centered calibration consent correction",
-  "timestamp_utc": "2026-10-26T04:47:30.791697+00:00",
+  "stage": "completed offline validation for 2 g calibration and full-history uninstall",
+  "timestamp_utc": "2026-10-26T05:23:06.510981+00:00",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 223,
-  "passed": 222,
+  "tests_run": 254,
+  "passed": 253,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -13,11 +13,11 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 0.825,
-  "process_elapsed_seconds": 1.043,
+  "elapsed_seconds": 2.804,
+  "process_elapsed_seconds": 3.017,
   "test_returncode": 0,
-  "git_diff_check_returncode": 0,
-  "git_cached_diff_check_returncode": 0,
+  "installer_tests": 73,
+  "workflow_tests": 45,
   "printer_connections": false,
   "hardware_testing": false,
   "installation": false,
@@ -26,12 +26,43 @@
   "physical_motion": false,
   "command": "python -m unittest discover -s Beacon_Accel_Homing/tests -v",
   "log": "tests.txt",
+  "shell_syntax_checks": [
+    {
+      "command": "bash -n Beacon_Accel_Homing/uninstall.sh",
+      "returncode": 0
+    }
+  ],
+  "python_38_grammar_checks": {
+    "files": [
+      "installer.py",
+      "uninstaller.py",
+      "bootstrap.py",
+      "tests/test_installer.py"
+    ],
+    "passed": true,
+    "actual_python_38_runtime_tested": false
+  },
   "native_linux_integration_tested": false,
   "limitations": [
-    "Real symlink creation skipped because this Windows host lacks permission.",
+    "Real symlink creation skipped because this Windows host lacks permission; full restore/link-history tests use isolated link-state emulation.",
     "No printer/hardware tests or physical stopping latency/distance measurement.",
     "No live Linux systemd or Unix-socket integration run.",
     "Hosted GitHub download validation is separate; this report uses mocked offline downloads.",
-    "Unchanged shell entry points were not syntax-checked again in this run."
+    "Python 3.8 grammar parsing is not a Python 3.8 runtime compatibility test.",
+    "Unchanged install.sh/bootstrap.sh syntax checks from the previous run were not repeated."
+  ],
+  "git_diff_check_returncode": 0,
+  "git_cached_diff_check_returncode": 0,
+  "whitespace_check_scope": [
+    "Beacon_Accel_Homing/accel_homing_workflows.py",
+    "Beacon_Accel_Homing/accel_homing_model.py",
+    "Beacon_Accel_Homing/tests/test_workflows.py",
+    "Beacon_Accel_Homing/README.md",
+    "Beacon_Accel_Homing/TESTING.md",
+    "Beacon_Accel_Homing/docs/INSTALLATION.md",
+    "Beacon_Accel_Homing/docs/COMPATIBILITY.md",
+    "Beacon_Accel_Homing/examples/accel_homing.cfg",
+    "Beacon_Accel_Homing/validation/VALIDATION.json",
+    "Beacon_Accel_Homing/validation/tests.txt"
   ]
 }
