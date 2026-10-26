@@ -1,10 +1,11 @@
 {
-  "stage": "completed offline validation for motor-enable settling and fresh quiet preparation",
-  "timestamp_utc": "2026-10-26T05:47:20.476279+00:00",
+  "stage": "completed offline validation for built-in safe_z_home compatibility",
+  "timestamp_utc": "2026-10-26T12:02:44.659427+00:00",
+  "source_base_commit": "4b36a816092c638404766b153767d8661e4dfed3",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 273,
-  "passed": 272,
+  "tests_run": 288,
+  "passed": 287,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -13,19 +14,18 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 2.965,
-  "process_elapsed_seconds": 3.186,
+  "elapsed_seconds": 3.31,
   "test_returncode": 0,
-  "installer_tests": 73,
-  "workflow_tests": 45,
+  "installer_tests": 77,
+  "workflow_tests": 56,
   "module_tests": {
     "test_backends": 48,
-    "test_installer": 73,
+    "test_installer": 77,
     "test_motion_policy": 10,
     "test_session": 52,
     "test_single_touch": 16,
     "test_trigger": 29,
-    "test_workflows": 45
+    "test_workflows": 56
   },
   "preparation_fixture_tests": {
     "test_backends.GenericPreparationTest": 6,
@@ -39,51 +39,51 @@
   "physical_motion": false,
   "command": "python -m unittest discover -s Beacon_Accel_Homing/tests -v",
   "log": "tests.txt",
-  "shell_syntax_checks": [
+  "shell_syntax_checks": [],
+  "shell_syntax_checks_note": "Not repeated: shell entry-point contents match the source base commit after line-ending normalization.",
+  "shell_file_content_checks": [
     {
-      "command": "bash -n Beacon_Accel_Homing/install.sh",
-      "returncode": 0,
-      "output": ""
+      "file": "install.sh",
+      "matches_source_base": true,
+      "line_endings_normalized": true
     },
     {
-      "command": "bash -n Beacon_Accel_Homing/bootstrap.sh",
-      "returncode": 0,
-      "output": ""
+      "file": "bootstrap.sh",
+      "matches_source_base": true,
+      "line_endings_normalized": true
     },
     {
-      "command": "bash -n Beacon_Accel_Homing/uninstall.sh",
-      "returncode": 0,
-      "output": ""
+      "file": "uninstall.sh",
+      "matches_source_base": true,
+      "line_endings_normalized": true
     }
   ],
   "python_38_grammar_checks": {
     "files": [
-      "accel_homing.py",
-      "accel_homing_backends.py",
-      "accel_homing_charts.py",
-      "accel_homing_model.py",
       "accel_homing_workflows.py",
-      "beacon_accel_homing.py",
-      "bootstrap.py",
       "installer.py",
-      "tests/harness.py",
-      "tests/test_backends.py",
       "tests/test_installer.py",
-      "tests/test_motion_policy.py",
-      "tests/test_session.py",
-      "tests/test_single_touch.py",
-      "tests/test_trigger.py",
-      "tests/test_workflows.py",
-      "uninstaller.py"
+      "tests/test_workflows.py"
     ],
     "passed": true,
     "errors": [],
     "actual_python_38_runtime_tested": false
   },
+  "validated_python_sha256": {
+    "accel_homing_workflows.py": "0d270b4121e273a66aff51e067f9ebaa18e91417d03fcc8b3a5ff06f911a8761",
+    "installer.py": "ff5933b566d91e31b0c6c5bcd671708f179bcd4de8686924173b9c376bbe9d35",
+    "tests/test_installer.py": "92502fd9d19bbbe9ba9fe3fc02f0efc1f463a3630a757fc5138efdd5d4f07d23",
+    "tests/test_workflows.py": "c5e7886276af4bb87c1fb4ad1deee943520db38a447721e2a490fee432e5419b"
+  },
   "native_linux_integration_tested": false,
+  "upstream_klipper_kalico_runtime_integration_tested": false,
+  "cartographer_runtime_integration_tested": false,
   "limitations": [
     "Real symlink creation skipped because this Windows host lacks permission; full restore/link-history tests use isolated link-state emulation.",
     "No printer/hardware tests, physical homing or motor-current measurement, deployment, restart, or physical motion.",
+    "safe_z_home support is based on inspected Klipper/Kalico source contracts and synthetic handler fixtures, not a complete upstream or Cartographer runtime integration test.",
+    "Nozzle/bed clearance and physical Z holding are operator/hardware requirements, not established by these fixtures.",
+    "Native stock homing fault cleanup may release all motors, including Z.",
     "The 20% quiet limit and default enable settling delay have not been physically validated.",
     "Pre-motion preparation cannot preempt hold-to-run current changes occurring on the first step.",
     "No physical stopping latency/distance measurement.",
@@ -91,10 +91,11 @@
     "Hosted GitHub download validation is separate; this report uses mocked offline downloads.",
     "Python 3.8 grammar parsing is not a Python 3.8 runtime compatibility test."
   ],
-  "git_diff_check_returncode": 0,
-  "git_cached_diff_check_returncode": 0,
+  "git_diff_check_base": "4b36a816092c638404766b153767d8661e4dfed3",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
-  ]
+  ],
+  "git_diff_check_returncode": 0,
+  "git_cached_diff_check_returncode": 0
 }
