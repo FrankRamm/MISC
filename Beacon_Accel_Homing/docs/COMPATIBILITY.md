@@ -104,13 +104,23 @@ The preparation order is:
    configured backoff or retract.
 3. Establish a new sensor-time cutoff after that wait. Discard buffered
    samples from before the cutoff and require at least 50 fresh,
-   contiguous samples spanning `baseline_time` (default 0.1 s). On each of
-   the three sensor axes, peak-to-peak variation must not exceed 20% of the
-   active pass's impact threshold, including a calibration candidate.
+   contiguous samples spanning `baseline_time` (default 0.1 s). For native
+   Beacon, peak-to-peak variation on each of the three sensor axes must not
+   exceed 20% of the active pass's impact threshold, including a calibration
+   candidate. Configured generic accelerometers use
+   `max(0.20 * impact_threshold, baseline_noise_floor)` on each sensor axis.
 4. Freeze the validated reference before `home_start` arms trigger dispatch.
    The first valid impact at or after arming remains eligible, including
    samples delivered in the batch that crosses the arming boundary. There is
    no post-arm blanking interval or minimum-travel impact filter.
+
+`baseline_noise_floor` is in g, defaults to 0.2, and accepts finite values
+from 0 to 0.2 inclusive. Zero restores the previous 20% limit. It affects only
+configured generic accelerometers, including Cartographer's separately
+configured ADXL/LIS object. At a 0.5 g calibration candidate, the default
+stationary variation limit becomes 0.2 g; the impact threshold stays 0.5 g.
+Native Beacon retains its existing quietness, already-pressed and motion
+behavior.
 
 Acquisition has a `baseline_time + 0.5 s` deadline measured after queued setup
 and settling finish. Persistent vibration or no sample flow fails with
@@ -119,9 +129,9 @@ gapped, clipped, saturated or scale-changed data also aborts preparation.
 The reference is accumulated in constant storage; `baseline_batches` does
 not determine whether this new interval is long enough.
 
-The 20% quiet limit is an engineering policy checked by synthetic fixtures,
-not a physically validated boundary between vibration and contact. It cannot
-exclude every false home. In particular, a driver's transition from hold
+The quiet limits are engineering policies checked by synthetic fixtures;
+they are not physically validated boundaries between vibration and contact.
+These checks cannot exclude every false home. A driver's transition from hold
 current to run current on the first step occurs after the stationary check.
 Klipper documents that current changes can themselves move a motor in its
 [`hold_current` guidance](https://www.klipper3d.org/TMC_Drivers.html#prefer-to-not-specify-a-hold_current).
@@ -203,7 +213,37 @@ the calibration/test/chart workflows separately reject suspect motion/travel.
 A separate `motion_seen` proof allows slow workflow homes without changing
 Beacon's historical already-pressed cutoff.
 
-There are no new settings for this policy. With effective homing speed `v`
+If any axis of an accepted generic reference exceeds the original 20% quiet
+limit, movement proof subtracts an allowance for observed stationary noise.
+For each sensor axis `i`, the accepted window supplies its low, high and mean:
+
+```text
+noise_bound_i = max(abs(low_i - mean_i), abs(high_i - mean_i))
+proof_sum_i = max(0, abs(sum(sample_i - mean_i)) - N * noise_bound_i)
+```
+
+`N` includes the first accumulated sample. The existing physical velocity
+conversion and vector norm use these bounded sums for movement proof.
+Automatic impact-direction selection also uses the noise bound for these
+generic references. The relevant signed velocity interval must lie entirely
+at least +30 mm/s or at most -30 mm/s before inferring a direction; uncertain
+drift leaves automatic detection bidirectional.
+
+The applied bounds appear in status as
+`baseline.motion_proof_noise_bound_g` (an X/Y/Z mapping, or `None` when not
+applied) and in the console as `motion-proof noise bound XYZ ... g`.
+Raw baseline-relative acceleration, impact thresholds, manual direction
+overrides, first-impact eligibility and the startup deadline are unchanged.
+Native Beacon retains
+its existing quietness, already-pressed and motion behavior.
+
+The generic adjustment has synthetic validation only. It assumes later
+stationary noise stays within the deviations observed in the accepted
+window; a larger later disturbance can still resemble motion. Very noisy
+or slow cases may fail with `no_motion`. That failure does not automatically
+increase speed or impact thresholds.
+
+The startup deadline calculation is unchanged. With effective homing speed `v`
 (the lesser of rail speed and toolhead velocity limit), effective acceleration
 `a` (current toolhead acceleration limited by nonzero `homing_accel`), and all
 times in seconds, the calculation is:
