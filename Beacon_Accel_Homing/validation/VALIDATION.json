@@ -1,0 +1,45 @@
+{
+  "stage": "completed offline validation for testing-fork publication",
+  "timestamp_utc": "2026-10-26T02:25:44.803927+00:00",
+  "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "tests_run": 212,
+  "passed": 211,
+  "failures": 0,
+  "errors": 0,
+  "skipped": [
+    {
+      "test": "test_real_plugin_symlinks_where_supported (test_installer.HostFixture.test_real_plugin_symlinks_where_supported)",
+      "reason": "Host does not allow symlink creation"
+    }
+  ],
+  "elapsed_seconds": 0.766,
+  "shell_syntax": [
+    {
+      "file": "install.sh",
+      "returncode": 0,
+      "stderr": ""
+    },
+    {
+      "file": "bootstrap.sh",
+      "returncode": 0,
+      "stderr": ""
+    }
+  ],
+  "git_diff_check_returncode": 0,
+  "git_cached_diff_check_returncode": 0,
+  "printer_connections": false,
+  "hardware_testing": false,
+  "deployment": false,
+  "restart": false,
+  "physical_motion": false,
+  "command": "python -m unittest discover -s Beacon_Accel_Homing/tests -v",
+  "log": "tests.txt",
+  "native_linux_integration_tested": false,
+  "limitations": [
+    "Real symlink creation skipped because this Windows host lacks permission.",
+    "No printer/hardware tests or physical stopping latency/distance measurement.",
+    "No live Linux systemd or Unix-socket integration run.",
+    "Hosted GitHub download validation is separate; this report uses mocked offline downloads."
+  ]
+}
