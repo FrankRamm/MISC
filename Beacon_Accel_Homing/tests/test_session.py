@@ -460,7 +460,7 @@ class EnablePreparationTest(unittest.TestCase):
     def session(self, options=None, enabled=(False, False, False)):
         obj = make_homing(options=options)
         # This is the actual first calibration candidate, not a preparatory home.
-        obj.threshold_g["x"] = 1.0
+        obj.threshold_g["x"] = 0.5
         endstop = with_endstops(obj)["x"]
         log = []
         lines = {name: EnableLine(log, name, state) for name, state in
@@ -490,7 +490,7 @@ class EnablePreparationTest(unittest.TestCase):
         self.assertIsNone(obj.preparation)
         self.assertEqual(obj.toolhead.accel, 20000.0)
 
-    def test_corexy_enable_settle_really_completes_before_fresh_1g_trial(self):
+    def test_corexy_enable_settle_really_completes_before_fresh_0_5g_trial(self):
         obj, endstop, log, lines = self.session()
         self.assertEqual(log, [("stepper_x", 10.0), ("stepper_y", 10.0)])
         self.assertFalse(lines["stepper_z"].enabled)
@@ -503,13 +503,15 @@ class EnablePreparationTest(unittest.TestCase):
         when = round(obj.reactor.now * 1000.0) / 1000.0 + 0.005
         endstop.home_start(when, 0, 0, 0)
         self.assertEqual(len(endstop._dispatch.started), 1)
-        self.assertEqual(obj.attempt.limit_raw * obj.attempt.count_g, 1.0)
-        # The only post-arm sample is a real 3 g contact. The pre-arm 15 g
-        # enable peak must neither trigger nor hide that first sample.
+        self.assertEqual(obj.attempt.limit_raw * obj.attempt.count_g, 0.5)
+        # The only post-arm sample is a real 0.6 g contact, below the old 1 g
+        # floor. The pre-arm 15 g enable peak must neither trigger nor hide it.
         obj._inspect(batch(round(when * 1000) - 7,
                            [(counts(-15), 0, counts(1))] * 7
-                           + [(counts(-3), 0, counts(1))]))
+                           + [(counts(-0.6), 0, counts(1))]))
         self.assertEqual(obj.attempt.reason, "impact")
+        self.assertAlmostEqual(obj.attempt.onset_raw * obj.attempt.count_g, -0.6,
+                               delta=obj.attempt.count_g / 2)
         self.assertAlmostEqual(obj.onset_time(obj.attempt), when)
 
     def test_already_enabled_corexy_and_partly_enabled_keep_quiet_gate(self):
@@ -522,6 +524,35 @@ class EnablePreparationTest(unittest.TestCase):
                 self.assertTrue(lines["stepper_z"].enabled)
                 self.assertIsNotNone(obj.preparation.baseline())
                 self.assertEqual(len(obj.toolhead.waits), 1)
+
+    def test_half_g_candidate_keeps_point_one_g_all_axis_quiet_limit(self):
+        for axis in range(3):
+            for excursion, accepted in ((0.04, True), (0.06, False)):
+                with self.subTest(axis=axis, excursion_g=excursion):
+                    obj, endstop, _log, _lines = self.session()
+                    plain = obj.reactor.on_pause
+                    batches = [0]
+                    def flow():
+                        if obj.preparation is None:
+                            plain()
+                            return
+                        count_g = obj.session_scale["scale"] / 1000.0
+                        self.assertAlmostEqual(obj.preparation.limit * count_g, 0.1)
+                        batches[0] += 1
+                        values = [0, 0, counts(1)]
+                        values[axis] += counts(excursion if batches[0] % 2 else -excursion)
+                        obj._inspect(batch(round(obj.reactor.now * 1000) - 4,
+                                           [values] * 5, delta_clock=4,
+                                           receive_time=obj.reactor.now))
+                    obj.reactor.on_pause = flow
+                    if accepted:
+                        self.begin(obj, endstop)
+                        self.assertIsNotNone(obj.preparation.baseline())
+                        self.assertEqual(endstop._dispatch.started, [])
+                    else:
+                        with self.assertRaisesRegex(CommandError, "fresh quiet"):
+                            self.begin(obj, endstop)
+                        self.assert_unarmed_cleanup(obj, endstop)
 
     def test_old_delivered_peak_is_excluded_then_ringdown_must_be_quiet(self):
         obj, endstop, _log, _lines = self.session()
