@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for finite-positive manual thresholds and unchanged calibration/model bounds",
-  "timestamp_utc": "2026-10-26T20:13:50.134548+00:00",
-  "source_base_commit": "923a0845c74fe0e1f77e55f641ccd73095d3f356",
+  "stage": "completed reviewed offline validation for ACCEL_HOMING_ACCURACY and existing homing regressions",
+  "timestamp_utc": "2026-10-26T20:43:33.812276+00:00",
+  "source_base_commit": "286e50ebdc6d199fd8585f042fef6eb1e99d9b39",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 427,
-  "passed": 426,
+  "tests_run": 453,
+  "passed": 452,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,11 +14,13 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 6.837,
+  "elapsed_seconds": 7.689,
   "test_returncode": 0,
   "installer_tests": 133,
   "workflow_tests": 75,
   "module_tests": {
+    "test_accuracy_charts": 8,
+    "test_accuracy_workflow": 18,
     "test_backends": 65,
     "test_installer": 133,
     "test_manual_thresholds": 11,
@@ -49,6 +51,7 @@
     {
       "file": "install.sh",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "29a0f52e3c89deb0102bd5275f8aaa5b66dcb5af14f52405f20f1622fb914bc3",
       "source_base_sha256": "29a0f52e3c89deb0102bd5275f8aaa5b66dcb5af14f52405f20f1622fb914bc3"
@@ -56,6 +59,7 @@
     {
       "file": "bootstrap.sh",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "df7e8cfacea26b5ab10a905a2499123fc70e86756840a7dcc1a175d92a2ca170",
       "source_base_sha256": "df7e8cfacea26b5ab10a905a2499123fc70e86756840a7dcc1a175d92a2ca170"
@@ -63,6 +67,7 @@
     {
       "file": "uninstall.sh",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "8e4695af7cb8bf35c8d5b89fa239b69622699d5f2b4a219fa3f59fde0e0f2fbe",
       "source_base_sha256": "8e4695af7cb8bf35c8d5b89fa239b69622699d5f2b4a219fa3f59fde0e0f2fbe"
@@ -79,6 +84,8 @@
       "bootstrap.py",
       "installer.py",
       "tests/harness.py",
+      "tests/test_accuracy_charts.py",
+      "tests/test_accuracy_workflow.py",
       "tests/test_backends.py",
       "tests/test_installer.py",
       "tests/test_manual_thresholds.py",
@@ -89,25 +96,32 @@
       "tests/test_workflows.py",
       "uninstaller.py"
     ],
-    "scope": "All 18 production and test Python files in the package",
+    "scope": "All 20 production and test Python files in the package",
     "line_ending_only_files": [
       "tests/test_single_touch.py",
       "tests/test_trigger.py"
     ],
     "passed": true,
     "errors": [],
-    "actual_python_38_runtime_tested": false
+    "actual_python_38_runtime_tested": false,
+    "parser_runtime": "CPython 3.13.5",
+    "feature_version": [
+      3,
+      8
+    ]
   },
   "validated_python_sha256": {
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
     "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
-    "accel_homing_charts.py": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
+    "accel_homing_charts.py": "b432f7438cad4a4a9dfaa4734826b0ce74a6c0d9a604d999ce1f4a3111b5ce89",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
-    "accel_homing_workflows.py": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3",
-    "beacon_accel_homing.py": "4745d5e2fe8f26f69b6c627b8959df73912e770ee9dd8f36c2bd72d9b20d4375",
+    "accel_homing_workflows.py": "240d0b6649e24b557d0c41f1534b5604186c0116912eacd5dbd7b05ec3538eb0",
+    "beacon_accel_homing.py": "914518b1fa0e659d02e4c540f9cee7e6f8c198b7d1ba6fa7512d8a320cb17f82",
     "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
     "installer.py": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c",
     "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
+    "tests/test_accuracy_charts.py": "42fe8e6611c29967944d112b65f4924b412d32da9ed32928ee773ae57510884a",
+    "tests/test_accuracy_workflow.py": "3fa966222849e3217913232b12d16952918be239d8f69dcd3cb0bedc659d4d5e",
     "tests/test_backends.py": "455624d6f47c1f44fb003d1d196e8618bcfb18ec1fd4c7f080713c7f81ff69a1",
     "tests/test_installer.py": "6a3c2ff160f478a5316cf26370ba63dd2e74b35c56dbd82b7072df2f995f6864",
     "tests/test_manual_thresholds.py": "b551a3670369f01b1d96acada9eeef47cd13ae5a180c46777fc480b57add2baf",
@@ -148,17 +162,20 @@
     "Raising a configured travel budget authorizes more nominal commanded travel before a host stop request; it does not measure actual contact force, physical stopping distance, transport delay or missed steps.",
     "No plugin distance/speed ceiling applies when report/startup travel settings are absent; this does not guarantee a successful physical home at every configured speed.",
     "Explicit advanced travel limits remain bounded to 0.1..2.0 mm reporting and 0.1..5.0 mm startup; these engineering ranges are not physical stopping-distance certifications.",
-    "The 1.5 mm rule is a strict ten-validation-home repeatability range per axis, not an impact threshold, sample-latency distance or guaranteed stopping distance."
+    "The 1.5 mm rule is a strict ten-validation-home repeatability range per axis, not an impact threshold, sample-latency distance or guaranteed stopping distance.",
+    "ACCURACY reports repeated firmware-commanded step travel at 0.001 mm resolution, not physical endstop position, encoder accuracy or absence of skipped steps.",
+    "The CUA visual check used a labeled constructed report; it does not qualify real sensor capture, physical centering, nozzle clearance or mechanical behavior.",
+    "Fewer than two completed qualified measured homes do not establish standard deviation or variance; failed/cancelled run totals remain explicitly incomplete."
   ],
-  "git_diff_check_base": "923a0845c74fe0e1f77e55f641ccd73095d3f356",
+  "git_diff_check_base": "286e50ebdc6d199fd8585f042fef6eb1e99d9b39",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
-  "previous_validation_timestamp_utc": "2026-10-26T19:30:13.294604+00:00",
-  "validation_reason": "One final combined offline run after independent review of the manual-threshold fix and README cleanup. Shared and independent X/Y manual values in current and legacy sections, plus both SET aliases, accept finite values greater than zero without fixed 3 g or 15 g limits. The existing inclusive 80% guard applies when sensor full-scale is known, including actual active Beacon session ranges; derived trigger limits must remain finite and positive before arming. Focused fixtures cover sub-0.5 g and above-15 g values, invalid numerics, exact range boundaries, unknown native Beacon range behavior, readable small-value feedback and initial-install/update preservation. Calibration/model modules, timing/motion-policy modules, installer/uninstaller and bootstrap bytes are unchanged from the stated public base; calibration still starts at 0.5 g with separate 0.5..15 g model bounds and strict ten-validation-home travel range below 1.5 mm. No private user log or raw samples are included.",
+  "previous_validation_timestamp_utc": "2026-10-26T20:13:50.134548+00:00",
+  "validation_reason": "One final combined local synthetic run after independent Astra review of ACCEL_HOMING_ACCURACY, exact current-detector captures and the aggregate report. The new command measures fixed configured X/Y homing behavior, excludes each axis's separate discovery, retains qualified trials at any observed spread and reports population variance without saving/tuning/restarting. Existing calibration, manual-threshold, sensor/session, installer, speed and optional-policy regressions passed. Changed workflow/core/chart bytes are identified explicitly; retained behavior is supported by regression fixtures, not byte-identity claims for changed modules. No private printer data, physical measurements or hardware/service operations were used.",
   "host_service_restart_tested": false,
   "live_python_module_reload_tested": false,
   "automatic_restart_fixture_tests": 15,
@@ -166,12 +183,13 @@
   "calibration_start_minimum_g": 0.5,
   "calibration_first_retry_default_g": 1.0,
   "saved_model_minimum_g": 0.5,
-  "test_log_sha256": "cfdade8d4cbc1bd30a2a3b0a1c858bbbe96d4cbb51bbe8909125427355d0748c",
-  "suite_completed_utc": "2026-10-26T20:10:05.320041+00:00",
+  "test_log_sha256": "f5c60e8c3c6d6e7ce0072b3bd9ba21d2f96b9a944e1ee96582eb69da89a85688",
+  "suite_completed_utc": "2026-10-26T20:40:37.345347+00:00",
   "additional_unchanged_file_content_checks": [
     {
       "file": "accel_homing.py",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
       "source_base_sha256": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f"
@@ -179,34 +197,23 @@
     {
       "file": "accel_homing_backends.py",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
       "source_base_sha256": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002"
     },
     {
-      "file": "accel_homing_charts.py",
-      "matches_source_base": true,
-      "line_endings_normalized": false,
-      "sha256": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
-      "source_base_sha256": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7"
-    },
-    {
       "file": "accel_homing_model.py",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
       "source_base_sha256": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092"
     },
     {
-      "file": "accel_homing_workflows.py",
-      "matches_source_base": true,
-      "line_endings_normalized": false,
-      "sha256": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3",
-      "source_base_sha256": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3"
-    },
-    {
       "file": "bootstrap.py",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
       "source_base_sha256": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b"
@@ -214,13 +221,71 @@
     {
       "file": "installer.py",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c",
       "source_base_sha256": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c"
     },
     {
+      "file": "tests/harness.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
+      "source_base_sha256": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70"
+    },
+    {
+      "file": "tests/test_backends.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "455624d6f47c1f44fb003d1d196e8618bcfb18ec1fd4c7f080713c7f81ff69a1",
+      "source_base_sha256": "455624d6f47c1f44fb003d1d196e8618bcfb18ec1fd4c7f080713c7f81ff69a1"
+    },
+    {
+      "file": "tests/test_installer.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "6a3c2ff160f478a5316cf26370ba63dd2e74b35c56dbd82b7072df2f995f6864",
+      "source_base_sha256": "6a3c2ff160f478a5316cf26370ba63dd2e74b35c56dbd82b7072df2f995f6864"
+    },
+    {
+      "file": "tests/test_manual_thresholds.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "b551a3670369f01b1d96acada9eeef47cd13ae5a180c46777fc480b57add2baf",
+      "source_base_sha256": "b551a3670369f01b1d96acada9eeef47cd13ae5a180c46777fc480b57add2baf"
+    },
+    {
+      "file": "tests/test_motion_policy.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "118b013fb56d1493150c753fae7d35815c36afca2c5c333003a1072cb966e297",
+      "source_base_sha256": "118b013fb56d1493150c753fae7d35815c36afca2c5c333003a1072cb966e297"
+    },
+    {
+      "file": "tests/test_session.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "c92257be8586d0e654b72e1d259bb6892a1bc7add796d5fdeca4c98df87187b7",
+      "source_base_sha256": "c92257be8586d0e654b72e1d259bb6892a1bc7add796d5fdeca4c98df87187b7"
+    },
+    {
+      "file": "tests/test_workflows.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "ffc0f23e5b5496e8cfb0d41b6fdb458c73d726e76df08027cce1f5152ed4e1cf",
+      "source_base_sha256": "ffc0f23e5b5496e8cfb0d41b6fdb458c73d726e76df08027cce1f5152ed4e1cf"
+    },
+    {
       "file": "uninstaller.py",
       "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525",
       "source_base_sha256": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525"
@@ -247,9 +312,9 @@
     "scope": "Applies only if the advanced max_startup_travel=3.0 mm policy is explicitly configured."
   },
   "public_g28_safe_z_hop_intercepted": false,
-  "test_log_line_endings": "UTF-8 unittest output captured through subprocess text decoding; CRLF normalized to LF before storage. Hash covers the exact stored bytes.",
-  "test_log_crlf_count": 0,
-  "suite_started_utc": "2026-10-26T20:09:58.216165+00:00",
+  "test_log_line_endings": "stdout/stderr captured and stored as exact binary bytes without text decoding or newline conversion; SHA-256 covers those stored bytes.",
+  "test_log_crlf_count": 458,
+  "suite_started_utc": "2026-10-26T20:40:29.417838+00:00",
   "final_validation": true,
   "validated_python_hash_scope": "Actual on-disk bytes; existing source line endings preserved",
   "startup_reporting_speed_ceiling_formula": "Disabled when max_report_travel is absent; otherwise max_report_travel / max_sample_age.",
@@ -313,32 +378,60 @@
   },
   "additional_changed_file_content_checks": [
     {
+      "file": "accel_homing_charts.py",
+      "matches_source_base": false,
+      "normalized_text_matches_source_base": false,
+      "line_endings_normalized": false,
+      "sha256": "b432f7438cad4a4a9dfaa4734826b0ce74a6c0d9a604d999ce1f4a3111b5ce89",
+      "source_base_sha256": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7"
+    },
+    {
+      "file": "accel_homing_workflows.py",
+      "matches_source_base": false,
+      "normalized_text_matches_source_base": false,
+      "line_endings_normalized": false,
+      "sha256": "240d0b6649e24b557d0c41f1534b5604186c0116912eacd5dbd7b05ec3538eb0",
+      "source_base_sha256": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3"
+    },
+    {
       "file": "beacon_accel_homing.py",
       "matches_source_base": false,
+      "normalized_text_matches_source_base": false,
       "line_endings_normalized": false,
-      "sha256": "4745d5e2fe8f26f69b6c627b8959df73912e770ee9dd8f36c2bd72d9b20d4375",
-      "source_base_sha256": "7764cc5f07d55aac188474ee953f9b90e48e1bd64b0935d7d47d8895907188f5"
+      "sha256": "914518b1fa0e659d02e4c540f9cee7e6f8c198b7d1ba6fa7512d8a320cb17f82",
+      "source_base_sha256": "4745d5e2fe8f26f69b6c627b8959df73912e770ee9dd8f36c2bd72d9b20d4375"
     },
     {
-      "file": "tests/test_backends.py",
+      "file": "tests/test_accuracy_charts.py",
       "matches_source_base": false,
+      "normalized_text_matches_source_base": false,
       "line_endings_normalized": false,
-      "sha256": "455624d6f47c1f44fb003d1d196e8618bcfb18ec1fd4c7f080713c7f81ff69a1",
-      "source_base_sha256": "d93a67cdf3f464853d54f348831c7ca393d24f7e2863adcf75fcfd1591d75758"
-    },
-    {
-      "file": "tests/test_installer.py",
-      "matches_source_base": false,
-      "line_endings_normalized": false,
-      "sha256": "6a3c2ff160f478a5316cf26370ba63dd2e74b35c56dbd82b7072df2f995f6864",
-      "source_base_sha256": "84afaa1da27560a38cb107265de4bafe9587aa0d6e836e40e7eed424f54ceb5f"
-    },
-    {
-      "file": "tests/test_manual_thresholds.py",
-      "matches_source_base": false,
-      "line_endings_normalized": false,
-      "sha256": "b551a3670369f01b1d96acada9eeef47cd13ae5a180c46777fc480b57add2baf",
+      "sha256": "42fe8e6611c29967944d112b65f4924b412d32da9ed32928ee773ae57510884a",
       "source_base_sha256": null
+    },
+    {
+      "file": "tests/test_accuracy_workflow.py",
+      "matches_source_base": false,
+      "normalized_text_matches_source_base": false,
+      "line_endings_normalized": false,
+      "sha256": "3fa966222849e3217913232b12d16952918be239d8f69dcd3cb0bedc659d4d5e",
+      "source_base_sha256": null
+    },
+    {
+      "file": "tests/test_single_touch.py",
+      "matches_source_base": false,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
+      "source_base_sha256": "ed63596c6933488a4ca680b30f4e0f3ba5aebe86f35db8b0a38477fa171885f4"
+    },
+    {
+      "file": "tests/test_trigger.py",
+      "matches_source_base": false,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
+      "source_base_sha256": "4cb0c0fac5b5a0aeb3b7d93c42a6b98e0b4472b5a6af3b2f23c335a33ef2c093"
     }
   ],
   "startup_request_travel_limit_scope": "Disabled when absent; advanced explicit opt-in only.",
@@ -381,10 +474,10 @@
   "numeric_derived_timeout_travel_and_homing_deadline_checked": true,
   "firmware_velocity_limit_preserved": true,
   "configured_speed_values_auto_lowered": false,
-  "workflow_source_unchanged_from_public_base": true,
+  "workflow_source_unchanged_from_public_base": false,
   "repeatability_1_5_mm_is_not_a_latency_or_stopping_budget": true,
   "optional_policy_fixture_tests": 9,
-  "subprocess_wall_seconds": 7.103875899993,
+  "subprocess_wall_seconds": 7.9274972999992315,
   "command_working_directory": "Beacon_Accel_Homing",
   "manual_threshold_minimum_exclusive_g": 0.0,
   "manual_threshold_fixed_maximum_g": null,
@@ -404,14 +497,18 @@
     0.5,
     15.0
   ],
-  "suite_timestamps_source": "Completion from stored log modification time; start derived using recorded subprocess wall duration.",
-  "source_hash_verification_scope": "Final actual on-disk hashes identify reviewed frozen source; no before/after cryptographic snapshot was captured by this suite runner.",
-  "package_file_count": 33,
-  "package_python_file_count": 18,
+  "suite_timestamps_source": "UTC timestamps recorded immediately before and after the subprocess; wall duration measured with perf_counter.",
+  "source_hash_verification_scope": "All 20 production/test Python files hashed from actual on-disk bytes immediately before and after the final combined suite; snapshots are identical and were rechecked during evidence refresh.",
+  "package_file_count": 35,
+  "package_python_file_count": 20,
   "bootstrap_payload_file_count": 22,
   "package_files": [
     ".gitattributes",
     ".gitignore",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "TESTING.md",
     "accel_homing.py",
     "accel_homing_backends.py",
     "accel_homing_charts.py",
@@ -426,11 +523,9 @@
     "examples/beacon_accel_homing.cfg",
     "install.sh",
     "installer.py",
-    "LICENSE",
-    "NOTICE",
-    "README.md",
-    "TESTING.md",
     "tests/harness.py",
+    "tests/test_accuracy_charts.py",
+    "tests/test_accuracy_workflow.py",
     "tests/test_backends.py",
     "tests/test_installer.py",
     "tests/test_manual_thresholds.py",
@@ -441,8 +536,8 @@
     "tests/test_workflows.py",
     "uninstall.sh",
     "uninstaller.py",
-    "validation/tests.txt",
-    "validation/VALIDATION.json"
+    "validation/VALIDATION.json",
+    "validation/tests.txt"
   ],
   "bootstrap_payload_files": [
     "install.sh",
@@ -471,14 +566,11 @@
   "source_semantic_changed_paths": [
     "README.md",
     "TESTING.md",
+    "accel_homing_charts.py",
+    "accel_homing_workflows.py",
     "beacon_accel_homing.py",
-    "docs/COMPATIBILITY.md",
-    "docs/INSTALLATION.md",
-    "examples/accel_homing.cfg",
-    "examples/beacon_accel_homing.cfg",
-    "tests/test_backends.py",
-    "tests/test_installer.py",
-    "tests/test_manual_thresholds.py",
+    "tests/test_accuracy_charts.py",
+    "tests/test_accuracy_workflow.py",
     "validation/VALIDATION.json",
     "validation/tests.txt"
   ],
@@ -490,22 +582,179 @@
   "source_byte_identical_paths": [
     ".gitattributes",
     ".gitignore",
+    "NOTICE",
     "accel_homing.py",
     "accel_homing_backends.py",
-    "accel_homing_charts.py",
     "accel_homing_model.py",
-    "accel_homing_workflows.py",
     "bootstrap.py",
     "bootstrap.sh",
+    "docs/COMPATIBILITY.md",
+    "docs/INSTALLATION.md",
+    "examples/accel_homing.cfg",
+    "examples/beacon_accel_homing.cfg",
     "install.sh",
     "installer.py",
-    "NOTICE",
     "tests/harness.py",
+    "tests/test_backends.py",
+    "tests/test_installer.py",
+    "tests/test_manual_thresholds.py",
     "tests/test_motion_policy.py",
     "tests/test_session.py",
     "tests/test_workflows.py",
     "uninstall.sh",
     "uninstaller.py"
   ],
-  "readme_sha256": "3db9e55283a1505eb398a4de1b4ec7b68e307d71afcd44bc7b5c0923171be8c7"
+  "readme_sha256": "3dffae5526056fa5fc60a262240eb9955c21220f3d8f73f231626b40a460a94b",
+  "accuracy_workflow_tests": 18,
+  "accuracy_chart_tests": 8,
+  "combined_final_suite_runs": 1,
+  "test_log_bytes": 75293,
+  "test_log_encoding": "UTF-8",
+  "test_log_lf_count": 458,
+  "python_sha256_before_suite": {
+    "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
+    "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
+    "accel_homing_charts.py": "b432f7438cad4a4a9dfaa4734826b0ce74a6c0d9a604d999ce1f4a3111b5ce89",
+    "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
+    "accel_homing_workflows.py": "240d0b6649e24b557d0c41f1534b5604186c0116912eacd5dbd7b05ec3538eb0",
+    "beacon_accel_homing.py": "914518b1fa0e659d02e4c540f9cee7e6f8c198b7d1ba6fa7512d8a320cb17f82",
+    "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
+    "installer.py": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c",
+    "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
+    "tests/test_accuracy_charts.py": "42fe8e6611c29967944d112b65f4924b412d32da9ed32928ee773ae57510884a",
+    "tests/test_accuracy_workflow.py": "3fa966222849e3217913232b12d16952918be239d8f69dcd3cb0bedc659d4d5e",
+    "tests/test_backends.py": "455624d6f47c1f44fb003d1d196e8618bcfb18ec1fd4c7f080713c7f81ff69a1",
+    "tests/test_installer.py": "6a3c2ff160f478a5316cf26370ba63dd2e74b35c56dbd82b7072df2f995f6864",
+    "tests/test_manual_thresholds.py": "b551a3670369f01b1d96acada9eeef47cd13ae5a180c46777fc480b57add2baf",
+    "tests/test_motion_policy.py": "118b013fb56d1493150c753fae7d35815c36afca2c5c333003a1072cb966e297",
+    "tests/test_session.py": "c92257be8586d0e654b72e1d259bb6892a1bc7add796d5fdeca4c98df87187b7",
+    "tests/test_single_touch.py": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
+    "tests/test_trigger.py": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
+    "tests/test_workflows.py": "ffc0f23e5b5496e8cfb0d41b6fdb458c73d726e76df08027cce1f5152ed4e1cf",
+    "uninstaller.py": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525"
+  },
+  "python_sha256_after_suite": {
+    "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
+    "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
+    "accel_homing_charts.py": "b432f7438cad4a4a9dfaa4734826b0ce74a6c0d9a604d999ce1f4a3111b5ce89",
+    "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
+    "accel_homing_workflows.py": "240d0b6649e24b557d0c41f1534b5604186c0116912eacd5dbd7b05ec3538eb0",
+    "beacon_accel_homing.py": "914518b1fa0e659d02e4c540f9cee7e6f8c198b7d1ba6fa7512d8a320cb17f82",
+    "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
+    "installer.py": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c",
+    "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
+    "tests/test_accuracy_charts.py": "42fe8e6611c29967944d112b65f4924b412d32da9ed32928ee773ae57510884a",
+    "tests/test_accuracy_workflow.py": "3fa966222849e3217913232b12d16952918be239d8f69dcd3cb0bedc659d4d5e",
+    "tests/test_backends.py": "455624d6f47c1f44fb003d1d196e8618bcfb18ec1fd4c7f080713c7f81ff69a1",
+    "tests/test_installer.py": "6a3c2ff160f478a5316cf26370ba63dd2e74b35c56dbd82b7072df2f995f6864",
+    "tests/test_manual_thresholds.py": "b551a3670369f01b1d96acada9eeef47cd13ae5a180c46777fc480b57add2baf",
+    "tests/test_motion_policy.py": "118b013fb56d1493150c753fae7d35815c36afca2c5c333003a1072cb966e297",
+    "tests/test_session.py": "c92257be8586d0e654b72e1d259bb6892a1bc7add796d5fdeca4c98df87187b7",
+    "tests/test_single_touch.py": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
+    "tests/test_trigger.py": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
+    "tests/test_workflows.py": "ffc0f23e5b5496e8cfb0d41b6fdb458c73d726e76df08027cce1f5152ed4e1cf",
+    "uninstaller.py": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525"
+  },
+  "python_hashes_before_suite_utc": "2026-10-26T20:40:29.324410+00:00",
+  "python_hashes_after_suite_utc": "2026-10-26T20:40:37.348517+00:00",
+  "python_sources_unchanged_during_suite": true,
+  "git_index_sha256_before_suite": "ea9f38fd54035beaa4301181035c5ab6f720cdd16f2496ae58b87bce5e465b56",
+  "git_index_sha256_after_suite": "ea9f38fd54035beaa4301181035c5ab6f720cdd16f2496ae58b87bce5e465b56",
+  "git_index_unchanged_during_suite": true,
+  "git_index_matches_root_backup": true,
+  "source_added_paths": [
+    "tests/test_accuracy_charts.py",
+    "tests/test_accuracy_workflow.py"
+  ],
+  "source_modified_paths": [
+    "README.md",
+    "TESTING.md",
+    "accel_homing_charts.py",
+    "accel_homing_workflows.py",
+    "beacon_accel_homing.py",
+    "validation/VALIDATION.json",
+    "validation/tests.txt"
+  ],
+  "source_semantic_comparison": "Actual current bytes compared with source_base_commit Git blobs after CRLF-to-LF normalization; additions are included in semantic changes and also listed separately.",
+  "repository_source_semantic_changed_paths": [
+    "Beacon_Accel_Homing/README.md",
+    "Beacon_Accel_Homing/TESTING.md",
+    "Beacon_Accel_Homing/accel_homing_charts.py",
+    "Beacon_Accel_Homing/accel_homing_workflows.py",
+    "Beacon_Accel_Homing/beacon_accel_homing.py",
+    "Beacon_Accel_Homing/tests/test_accuracy_charts.py",
+    "Beacon_Accel_Homing/tests/test_accuracy_workflow.py",
+    "Beacon_Accel_Homing/validation/VALIDATION.json",
+    "Beacon_Accel_Homing/validation/tests.txt"
+  ],
+  "repository_root_readme_sha256": "a8a2d08f7683e1d441d08163fdf3e96a53207eaba1dc7bcf91633c8e6486378d",
+  "repository_root_readme_semantically_changed": false,
+  "testing_md_sha256": "3a6925647118707a6f368b8f15d65373447f0f3465a444bbf9e688db046d82fe",
+  "calibration_behavior_regression_tests_passed": true,
+  "manual_threshold_behavior_regression_tests_passed": true,
+  "speed_and_optional_policy_regression_tests_passed": true,
+  "accuracy": {
+    "command": "ACCEL_HOMING_ACCURACY",
+    "default_axes": "XY",
+    "allowed_axes": [
+      "X",
+      "Y",
+      "XY"
+    ],
+    "default_measured_samples_per_axis": 10,
+    "measured_sample_bounds_inclusive": [
+      2,
+      50
+    ],
+    "discovery_homes_per_axis": 1,
+    "discovery_in_statistics": false,
+    "maximum_xy_homing_attempts": 102,
+    "calibration_attempt_limit_reused": false,
+    "threshold_tuned": false,
+    "configured_homing_speed_changed": false,
+    "model_staged_or_saved": false,
+    "save_config_or_restart_requested": false,
+    "z_motion_requested": false,
+    "qualified_trial_spread_causes_calibration_style_abort": false,
+    "statistics": [
+      "count",
+      "min_mm",
+      "max_mm",
+      "mean_mm",
+      "spread_mm",
+      "stddev_mm",
+      "variance_mm2"
+    ],
+    "variance_definition": "population (divide by N)",
+    "minimum_measured_samples_for_variance_and_stddev": 2,
+    "commanded_travel_resolution_mm": 0.001,
+    "physical_position_or_stop_accuracy_measured": false,
+    "current_detector_reference_and_source_record_identity_required": true,
+    "exact_detector_threshold_onset_peak_and_speed_metadata": true,
+    "negative_permuted_native_mapping_tested_synthetically": true,
+    "raw_capture_limit_samples_per_trial": 200000,
+    "raw_capture_arrays_retained_in_status": false,
+    "partial_trials_and_completed_capture_paths_retained": true,
+    "cleanup_failure_can_publish_complete": false,
+    "aggregate_formats": [
+      "csv",
+      "svg",
+      "html",
+      "json"
+    ]
+  },
+  "visual_review": {
+    "performed_by": "root agent",
+    "tool": "CUA",
+    "source": "constructed synthetic complete accuracy report",
+    "label": "SIMULATED / NOT PRINTER MEASUREMENT",
+    "hardware_measurement": false,
+    "readable_statistics_table": true,
+    "trial_selector_tested": true,
+    "selected_axis": "Y",
+    "selected_measurement": 10,
+    "displayed_exact_threshold_g": 0.750001,
+    "measured_onset_display_verified": true,
+    "scope": "Root visually inspected the generated HTML report and selected Y measurement 10; separate from the final combined unittest execution."
+  }
 }
