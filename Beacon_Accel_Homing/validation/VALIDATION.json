@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for configured-sensor baseline floor and conservative motion/direction evidence",
-  "timestamp_utc": "2026-10-26T16:01:05.649781+00:00",
-  "source_base_commit": "39f5693c17f6f815df92c9976c38afcd3c9dd2d0",
+  "stage": "completed offline validation for optional travel policies and unchanged ten-home repeatability",
+  "timestamp_utc": "2026-10-26T19:30:13.294604+00:00",
+  "source_base_commit": "04dfb5e45830b1cbd670f58dd756ac207dfa1f5f",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 364,
-  "passed": 363,
+  "tests_run": 414,
+  "passed": 413,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,14 +14,14 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 5.01,
+  "elapsed_seconds": 5.988,
   "test_returncode": 0,
-  "installer_tests": 100,
+  "installer_tests": 131,
   "workflow_tests": 75,
   "module_tests": {
     "test_backends": 65,
-    "test_installer": 100,
-    "test_motion_policy": 24,
+    "test_installer": 131,
+    "test_motion_policy": 43,
     "test_session": 55,
     "test_single_touch": 16,
     "test_trigger": 29,
@@ -30,7 +30,9 @@
   "preparation_fixture_tests": {
     "test_backends.GenericPreparationTest": 10,
     "test_session.EnablePreparationTest": 16,
-    "test_backends.BaselineFloorTest": 13
+    "test_backends.BaselineFloorTest": 13,
+    "test_motion_policy.ConfigurableStartupBudgetTests": 10,
+    "test_motion_policy.OptionalTravelPolicyTests": 9
   },
   "printer_connections": false,
   "hardware_testing": false,
@@ -96,22 +98,22 @@
   },
   "validated_python_sha256": {
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
-    "accel_homing_backends.py": "03048914a73c8d7b846e826f28a72cd506e0e9d110d99a8278d0633d81e53ba6",
+    "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
     "accel_homing_charts.py": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_workflows.py": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3",
-    "beacon_accel_homing.py": "f9bd17f7ce5a30593afa84c90f1ec128a425298ef74859ee7fb1b6e70d4ab276",
+    "beacon_accel_homing.py": "7764cc5f07d55aac188474ee953f9b90e48e1bd64b0935d7d47d8895907188f5",
     "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
-    "installer.py": "ec4d1f131659099a20bcc16f94e753f84c7e233c7c6d47b15b906d1f99484937",
-    "tests/harness.py": "7a418b30ef79060a8f74251ec9b69721e6afbefcbc3404f7d05d06a271534e18",
-    "tests/test_backends.py": "1694cdede413e434f70868c54fcd07a57a0baf947303c2cc0a5eb3bedb584d85",
-    "tests/test_installer.py": "4bc3794c4f6b3a90107d46cb77c2c654e84f78237d56137b13728172761f816b",
-    "tests/test_motion_policy.py": "b5a9362830d0b2c3b002390c7e3f4ed1c6f2233c89c1b4aa104d1abcd2896ec7",
+    "installer.py": "c60247fff822129e008e1728980dcb0e6ef1b686c7f77c6b28fd59e606c3262c",
+    "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
+    "tests/test_backends.py": "d93a67cdf3f464853d54f348831c7ca393d24f7e2863adcf75fcfd1591d75758",
+    "tests/test_installer.py": "84afaa1da27560a38cb107265de4bafe9587aa0d6e836e40e7eed424f54ceb5f",
+    "tests/test_motion_policy.py": "118b013fb56d1493150c753fae7d35815c36afca2c5c333003a1072cb966e297",
     "tests/test_session.py": "c92257be8586d0e654b72e1d259bb6892a1bc7add796d5fdeca4c98df87187b7",
     "tests/test_single_touch.py": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
     "tests/test_trigger.py": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
     "tests/test_workflows.py": "ffc0f23e5b5496e8cfb0d41b6fdb458c73d726e76df08027cce1f5152ed4e1cf",
-    "uninstaller.py": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23"
+    "uninstaller.py": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525"
   },
   "native_linux_integration_tested": false,
   "upstream_klipper_kalico_runtime_integration_tested": false,
@@ -133,24 +135,27 @@
     "The fixed <1.5 mm repeatability rule applies to new geometry-qualified validation windows; existing saved models remain loadable without retroactive certification.",
     "Commanded travel and decimal range comparison do not measure absolute position, prove correct-stop contact or rule out skipped steps.",
     "The new preflight protects workflow entry; ordinary public G28 and safe_z_home remain unchanged, so a configured Z hop can precede a later X/Y policy refusal.",
-    "Temporary live acceleration reductions can invalidate a previously configured plan; this patch does not automatically restore limits or raise acceleration.",
+    "With an explicit advanced travel policy, temporary live acceleration reductions can invalidate an earlier admissible plan; acceleration is never raised automatically.",
     "Admitted 75 mm/s moving/no-motion traces use constructed sensor delivery and fake clocks; no real sensor/MCU/host timing or higher-speed hardware behavior was qualified.",
-    "The independent fixed 50 mm/s cap is removed, but default reporting settings still give 50 mm/s and all reporting/startup/watchdog guards remain enforced.",
     "Default installation preserves the currently configured speed; it does not restore a historical value from old backups or auto-tune timing/acceleration.",
     "The configured 0.2 g quiet floor and native 20% rule have not been qualified on hardware; modeled ranges are synthetic and do not establish a physical sensor-noise cause or fix.",
     "The conservative motion/direction correction assumes future stationary disturbance stays within the observed accepted-reference envelope; arbitrary later bias or disturbances are not bounded by these fixtures.",
     "Expanded references can leave too little evidence to prove real low-speed motion; the unchanged no_motion deadline then fails closed without automatically changing speed or acceleration.",
-    "The ideal true-motion fixture uses 4000 mm/s^2 because an ideal 5000 mm/s^2 sample is already above the unchanged 0.5 g impact threshold; this is a synthetic design choice, not a requested printer retune."
+    "The ideal true-motion fixture uses 4000 mm/s^2 because an ideal 5000 mm/s^2 sample is already above the unchanged 0.5 g impact threshold; this is a synthetic design choice, not a requested printer retune.",
+    "Raising a configured travel budget authorizes more nominal commanded travel before a host stop request; it does not measure actual contact force, physical stopping distance, transport delay or missed steps.",
+    "No plugin distance/speed ceiling applies when report/startup travel settings are absent; this does not guarantee a successful physical home at every configured speed.",
+    "Explicit advanced travel limits remain bounded to 0.1..2.0 mm reporting and 0.1..5.0 mm startup; these engineering ranges are not physical stopping-distance certifications.",
+    "The 1.5 mm rule is a strict ten-validation-home repeatability range per axis, not an impact threshold, sample-latency distance or guaranteed stopping distance."
   ],
-  "git_diff_check_base": "39f5693c17f6f815df92c9976c38afcd3c9dd2d0",
+  "git_diff_check_base": "04dfb5e45830b1cbd670f58dd756ac207dfa1f5f",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
-  "previous_validation_timestamp_utc": "2026-10-26T15:17:10.237719+00:00",
-  "validation_reason": "One final combined offline run after independent review. Configured batch backends use finite baseline_noise_floor in [0, 0.2] g (default 0.2); native Beacon keeps the original 20% quiet gate and raw motion/pressed decisions. Only accepted configured references exceeding the old 20% gate receive conservative uncertainty bounds for movement proof and automatic direction. A floor-only experiment reproduced false parked motion proof; the final correction rejects modeled balanced/slow/asymmetric parked bias without changing raw impact, thresholds or startup deadlines. Fixtures include true 50 mm/s ramps at 4000 mm/s^2 in both directions and clock epochs, first +/-0.51 g contacts after uncertain raw speed exceeds 30 mm/s, first/odd sample integration counts, safe low-speed no_motion, 0.21 g rejection and original timestamp/enable guards. All traces are synthetic, not a recording of a user device. Existing 0.5 g calibration start, strict ten-home <1.5 mm repeatability and configured-speed preservation remain unchanged.",
+  "previous_validation_timestamp_utc": "2026-10-26T19:04:23.087165+00:00",
+  "validation_reason": "One final combined offline run after independent review. Configured sensor report/startup travel policies are disabled when absent, represented by None/null rather than infinity. Default 75 and 100 mm/s plans connect, preflight and prepare without changing configured speed, sample age, interval or acceleration. Explicit finite bounded report/startup settings remain independently enforced with strict comparisons and final preparation rechecks. All effective/derived numeric values must remain finite; status and replay fallbacks handle absent policies without invalid JSON. Actual stale/missing/frozen/data-error and startup no_motion handling, conservative baseline movement/direction proof and raw impacts are unchanged. The workflow source is byte-identical to the published base: calibration still requires ten qualified validation homes with strict max-minus-min travel below 1.5 mm separately per axis. Installer fixtures cover the X75/Y50 target without budget flags, configured-speed preservation, explicit opt-ins, retained-axis checks and valid undo. The harness numeric getter models absent optional defaults without accepting explicit invalid None values. No private user log or raw samples are included.",
   "host_service_restart_tested": false,
   "live_python_module_reload_tested": false,
   "automatic_restart_fixture_tests": 15,
@@ -162,17 +167,9 @@
     3.0,
     15.0
   ],
-  "test_log_sha256": "56608074a5a40c928463ab1488b96aba467d2565734eca9a4e42a390c55febec",
-  "suite_completed_utc": "2026-10-26T16:01:05.290059+00:00",
-  "additional_unchanged_file_content_checks": [
-    {
-      "file": "uninstaller.py",
-      "matches_source_base": true,
-      "line_endings_normalized": false,
-      "sha256": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23",
-      "source_base_sha256": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23"
-    }
-  ],
+  "test_log_sha256": "2fc02c8c41e314b3c980148e0ab4a2b35e2e7429c1c4d573ccaad9ad8b73976c",
+  "suite_completed_utc": "2026-10-26T19:30:12.919220+00:00",
+  "additional_unchanged_file_content_checks": [],
   "quiet_reference_peak_to_peak_limit_default_g": 0.2,
   "repeatability_fixture_tests": 12,
   "calibration_validation_homes": 10,
@@ -182,29 +179,31 @@
   "calibration_repeatability_scope": "Ten distinct consecutive geometry-qualified validation homes at the same axis/candidate/run",
   "calibration_existing_early_hits_reset_window": true,
   "legacy_saved_models_retroactively_qualified": false,
-  "startup_request_travel_limit_mm": 3.0,
-  "startup_workflow_preflight": "Read-only requested-axis validation against live velocity/acceleration before workflow effects",
+  "startup_request_travel_limit_mm": null,
+  "startup_workflow_preflight": "Read-only requested-axis numeric-validity and explicitly configured travel-policy checks before workflow effects; no default travel ceiling.",
   "startup_diagnostic_example": {
     "speed_mm_s": 50.0,
     "live_acceleration_mm_s2": 1500.0,
     "nominal_request_travel_mm": 3.2333333333333334,
     "conservative_homing_speed_ceiling_mm_s": 47.0965,
-    "physical_stopping_guaranteed": false
+    "physical_stopping_guaranteed": false,
+    "max_startup_travel_mm": 3.0,
+    "scope": "Applies only if the advanced max_startup_travel=3.0 mm policy is explicitly configured."
   },
   "public_g28_safe_z_hop_intercepted": false,
   "test_log_line_endings": "Raw captured bytes preserved; CRLF normalized only in parser input",
-  "test_log_crlf_count": 369,
-  "suite_started_utc": "2026-10-26T16:01:00.279656+00:00",
+  "test_log_crlf_count": 419,
+  "suite_started_utc": "2026-10-26T19:30:06.930887+00:00",
   "source_bytes_unchanged_during_suite": true,
   "final_validation": true,
   "validated_python_hash_scope": "Actual on-disk bytes; existing source line endings preserved",
-  "startup_reporting_speed_ceiling_formula": "max_report_travel / max_sample_age",
+  "startup_reporting_speed_ceiling_formula": "Disabled when max_report_travel is absent; otherwise max_report_travel / max_sample_age.",
   "independent_fixed_50_mm_s_cap": false,
   "installer_preserves_configured_homing_speed_by_default": true,
   "installer_explicit_homing_speed_is_only_speed_edit": true,
   "installer_auto_tunes_timing_or_acceleration": false,
   "installer_restores_historical_speed_automatically": false,
-  "higher_speed_support": "Conditional on explicitly configured reporting and startup budgets; synthetic fixtures do not qualify hardware timing",
+  "higher_speed_support": "No default plugin travel/speed ceiling. Finite prepared plans retain firmware velocity limits, actual sample-quality guards and startup no_motion handling; successful physical homing at arbitrary speeds is not established.",
   "quiet_baseline_diagnostics": {
     "retained_after_cleanup": true,
     "gate_changed": true,
@@ -254,6 +253,60 @@
     "unexpanded_reference_behavior_changed": false,
     "floor_only_false_motion_reproduced_and_corrected_synthetically": true,
     "stationary_reference_noise_is_a_guaranteed_future_bound": false,
-    "insufficient_low_speed_evidence": "Fails existing no_motion policy; no automatic speed/acceleration edit"
-  }
+    "insufficient_low_speed_evidence": "Fails existing no_motion policy; no automatic speed/acceleration edit",
+    "scope_note": "This block describes the unchanged bounded-noise proof correction; optional travel admission policies are separately disabled when absent."
+  },
+  "additional_changed_file_content_checks": [
+    {
+      "file": "uninstaller.py",
+      "matches_source_base": false,
+      "line_endings_normalized": false,
+      "sha256": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525",
+      "source_base_sha256": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23",
+      "reason": "Recognize and validate owned explicit travel-budget overrides during uninstall."
+    }
+  ],
+  "startup_request_travel_limit_scope": "Disabled when absent; advanced explicit opt-in only.",
+  "max_startup_travel_default_mm": null,
+  "max_startup_travel_range_mm": [
+    0.1,
+    5.0
+  ],
+  "max_report_travel_default_mm": null,
+  "max_report_travel_range_mm": [
+    0.1,
+    2.0
+  ],
+  "nominal_policy_comparison": "Only explicitly configured limits apply; required <= configured in runtime and installer.",
+  "startup_timeout_formula_changed": false,
+  "report_age_interval_or_acceleration_auto_tuned": false,
+  "native_beacon_budget_overrides_supported": false,
+  "retained_plugin_axes_preflight_for_shared_budget_override": true,
+  "retained_active_second_speed_and_rail_acceleration_checked": true,
+  "owned_override_uninstall_validation": true,
+  "explicit_75_budget_example": {
+    "homing_speed_mm_s": 75.0,
+    "effective_acceleration_mm_s2": 5000.0,
+    "max_sample_age_s": 0.02,
+    "stream_interval_s": 0.005,
+    "required_report_travel_mm": 1.5,
+    "required_startup_travel_mm": 4.1625,
+    "configured_report_travel_mm": 1.5,
+    "configured_startup_travel_mm": 4.5,
+    "startup_timeout_s": 0.06,
+    "lower_live_acceleration_mm_s2": 1500.0,
+    "lower_acceleration_required_startup_mm": 5.475,
+    "lower_acceleration_admitted": false,
+    "physical_stopping_guaranteed": false,
+    "scope": "Advanced opt-in illustration only; these settings are not required for default 75 mm/s admission."
+  },
+  "default_plugin_homing_speed_ceiling": null,
+  "travel_policies_independently_optional": true,
+  "disabled_policy_status_uses_json_null": true,
+  "numeric_derived_timeout_travel_and_homing_deadline_checked": true,
+  "firmware_velocity_limit_preserved": true,
+  "configured_speed_values_auto_lowered": false,
+  "workflow_source_unchanged_from_public_base": true,
+  "repeatability_1_5_mm_is_not_a_latency_or_stopping_budget": true,
+  "optional_policy_fixture_tests": 9
 }
