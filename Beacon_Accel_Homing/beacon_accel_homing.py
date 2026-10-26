@@ -4,20 +4,27 @@
 # accelerometer and fires the stepper MCU trsync from the host. One touch per
 # home. The homing axis is watched in either direction until the toolhead
 # travels, then only against the travel (or in a configured direction). A
-# start with the toolhead already pressed against the stop is recognised by
-# the steps running while the toolhead does not move.
+# legacy Beacon path recognizes pressed starts from commanded versus measured
+# motion. Configured batch sensors fail homing if startup motion is unverified.
 #
-# Status: experimental and vibe-coded. Working on three printers so far.
+# Experimental. The inherited upstream Beacon implementation reports use on
+# three printers; these generic adapters have only been tested synthetically.
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import collections
 import logging
+import math
 import struct
 import sys
 import threading
 
 import mcu
+
+try:
+    from .accel_homing_backends import ConfiguredAccelBackend, motion_proof_window, select_sensor
+except ImportError:  # Standalone offline replay harness
+    from accel_homing_backends import ConfiguredAccelBackend, motion_proof_window, select_sensor
 
 SAMPLE = struct.Struct("<hhh")
 CLIPPED = 0x7FFF
@@ -44,11 +51,17 @@ GAP_SAMPLES = 5            # missing samples that make the integrated speed untr
 ENABLE_SETTLE = 0.25       # s, motors switched on before homing settle before the reading
 AXES = {"x": 0, "y": 1}
 FAILURES = {
-    "no_data": "no accelerometer data from the Beacon",
+    "no_data": "no fresh accelerometer data",
     "no_baseline": "no stationary accelerometer baseline before the move",
     "travel": "no impact within the expected travel",
     "frozen": "accelerometer readings did not change while the steps ran",
     "scale": "another Beacon accelerometer client changed the range during homing",
+    "stale_data": "accelerometer sample timestamps are stale or in the future",
+    "invalid_data": "invalid or repeated accelerometer samples",
+    "data_error": "accelerometer reported errors or overflows",
+    "sample_gap": "accelerometer samples are missing or irregular",
+    "sample_rate": "accelerometer sample rate is too low",
+    "no_motion": "toolhead motion was not verified before the startup deadline",
 }
 
 
@@ -59,9 +72,19 @@ def clock_after(clock, reference):
 
 def axis_values(data, index):
     """Raw samples of one sensor axis of a Beacon batch, without a Python loop."""
+    if isinstance(data, tuple):
+        return data[index::3]
     if NATIVE_LE:
         return memoryview(data).cast("h")[index::3]
     return [sample[index] for sample in SAMPLE.iter_unpack(data)]
+
+
+def sample_count(data):
+    return len(data) // (3 if isinstance(data, tuple) else 6)
+
+
+def sample_slice(data, count):
+    return data[:count * (3 if isinstance(data, tuple) else 6)]
 
 
 def decode_clips(raw, previous, clips):
@@ -135,6 +158,8 @@ class Attempt:
         self.first_clock = self.last_end_clock = None
         self.auto_direction = 0     # impact direction found from the travel
         self.moving = False         # toolhead seen moving with the steps
+        self.motion_seen = False    # relative motion proof, including slow homes
+        self.effective_speed = self.effective_accel = None
         self.varied = False         # readings changed at least once (sensor not frozen)
         self.gap = False            # samples were missing, so the speed is not known
         self.pressed_checks = 0
@@ -146,6 +171,7 @@ class Attempt:
         self.impact_peak = 0.0
         self.impact_until = None
         self.record = None
+        self.start_position = self.expected_travel = None
 
 
 class BeaconAccelEndstop:
@@ -211,7 +237,15 @@ class BeaconAccelHoming:
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.name = config.get_name()
-        self.beacon_name = config.get("beacon", "beacon")
+        if not callable(getattr(mcu, "TriggerDispatch", None)):
+            raise config.error("accel_homing: this fork/version has no MCU TriggerDispatch;"
+                               " update to a compatible Klipper or Kalico version")
+        other = "accel_homing" if self.name == "beacon_accel_homing" else "beacon_accel_homing"
+        if config.has_section(other):
+            raise config.error("Use only one [accel_homing] or [beacon_accel_homing] section")
+        self.sensor_name = select_sensor(config)
+        self.is_beacon = self.sensor_name.split()[0] == "beacon"
+        self.beacon_name = self.sensor_name
         if config.get("mcu", None) is not None:
             config.deprecate("mcu")  # the stepper MCU now comes from the steppers
         threshold = config.getfloat("threshold", 8.0, minval=3.0, maxval=15.0)
@@ -226,11 +260,27 @@ class BeaconAccelHoming:
         self.stream_timeout = config.getfloat("stream_timeout", 0.05, minval=0.01, maxval=0.5)
         self.travel_margin = config.getfloat("travel_margin", 1.1, minval=1.0, maxval=2.0)
         self.watchdog_margin = config.getfloat("watchdog_margin", 0.15, minval=0.0, maxval=2.0)
-        if not config.has_section(self.beacon_name):
-            raise config.error("beacon_accel_homing needs beacon_klipper and a [%s] section"
-                               % (self.beacon_name,))
-        # Load Beacon first, so its MCU is configured before our connect handler runs.
-        self.printer.load_object(config, self.beacon_name)
+        scalar_options = {"threshold": threshold, "homing_accel": self.homing_accel,
+                          "back_off_dist": self.back_off_dist, "baseline_time": self.baseline_time,
+                          "stream_timeout": self.stream_timeout, "travel_margin": self.travel_margin,
+                          "watchdog_margin": self.watchdog_margin}
+        scalar_options.update((axis + "_threshold", value) for axis, value in self.threshold_g.items())
+        for option, value in scalar_options.items():
+            if not math.isfinite(value):
+                raise config.error("accel_homing: %s must be finite" % option)
+        # Load the sensor first so its MCU is configured before our connect handler.
+        self.sensor = self.printer.load_object(config, self.sensor_name)
+        self.backend = None if self.is_beacon else ConfiguredAccelBackend(self, config, self.sensor)
+        if self.backend is not None and config.get("threshold", None) is None:
+            default_threshold = max(3.0, min(8.0, self.backend.full_scale * 0.5))
+            if self.backend.full_scale * 0.8 < 3.0:
+                raise config.error("accel_homing: configured sensor range is too small"
+                                   " for the minimum 3 g homing threshold")
+            for axis in AXES:
+                if config.get(axis + "_threshold", None) is None:
+                    self.threshold_g[axis] = default_threshold
+        if self.backend is not None and self.stream_timeout > self.backend.max_age:
+            self.stream_timeout = self.backend.max_age
 
         self.lock = threading.Lock()
         self.endstops = {}
@@ -239,6 +289,8 @@ class BeaconAccelHoming:
         self.impact_window = 0
         self.beacon_freq = 1.0
         self.saved_handler = None
+        self.sensor_clock = self.clock_to_time = None
+        self.sensor_fault = None
         self.scale = self.session_scale = None
         self.clip_values = (CLIPPED, -CLIPPED - 1)
         self.stream_alone = False
@@ -255,21 +307,34 @@ class BeaconAccelHoming:
         self.homed_before = self.last_pass = None
         self.last = {}
         self.history = collections.deque(maxlen=20)
+        self.capture_batches = None
+        self.capture_samples = self.capture_dropped = 0
+        self.capture_limit = 200000
+        self.capture_baseline = None
         self.watchdog = self.reactor.register_timer(self._watchdog)
         self.idle_timer = self.reactor.register_timer(self._idle_check)
 
         self.printer.lookup_object("pins").register_chip("beacon_accel", self)
+        self.printer.lookup_object("pins").register_chip("accel_homing", self)
         self.printer.register_event_handler("klippy:connect", self._handle_connect)
         self.printer.register_event_handler("homing:home_rails_begin", self._handle_rails_begin)
         self.printer.register_event_handler("homing:home_rails_end", self._handle_rails_end)
         self.printer.register_event_handler("homing:homing_move_begin", self._handle_move_begin)
         self.printer.register_event_handler("homing:homing_move_end", self._handle_move_end)
         self.printer.register_event_handler("stepper_enable:motor_off", self._end_session)
+        self.printer.register_event_handler("klippy:shutdown", self._end_session)
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command("BEACON_ACCEL_HOMING_STATUS", self.cmd_STATUS,
                                desc="Report the last Beacon accelerometer homing results")
         gcode.register_command("SET_BEACON_ACCEL_HOMING", self.cmd_SET,
                                desc="Change the threshold or impact sign until restart")
+        gcode.register_command("SET_ACCEL_HOMING", self.cmd_SET,
+                               desc="Change independent X/Y thresholds until restart")
+        try:
+            from .accel_homing_workflows import AccelHomingWorkflows
+        except ImportError:
+            from accel_homing_workflows import AccelHomingWorkflows
+        self.workflows = AccelHomingWorkflows(self, config)
 
     # Pin chip
     def setup_pin(self, pin_type, pin_params):
@@ -287,13 +352,21 @@ class BeaconAccelHoming:
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object("toolhead")
         self.main_mcu = self.printer.lookup_object("mcu")
-        self._attach_beacon()
-        self.impact_window = int(self.beacon._mcu.seconds_to_clock(IMPACT_WINDOW))
-        self.beacon_freq = float(self.beacon._mcu.seconds_to_clock(1.0))
+        if self.is_beacon:
+            self._attach_beacon()
+            self.sensor_clock = self.beacon._mcu
+            self.clock_to_time = self.beacon._clock32_to_time
+        else:
+            self.helper = self.backend.helper
+            self.scale = {"name": "normalized_g", "id": None, "scale": 1.0}
+            self.sensor_clock = self.backend
+            self.clock_to_time = self.backend.clock_to_time
+        self.impact_window = int(self.sensor_clock.seconds_to_clock(IMPACT_WINDOW))
+        self.beacon_freq = float(self.sensor_clock.seconds_to_clock(1.0))
         full_scale = self._full_scale_g(self.scale)
         if full_scale is not None and max(self.threshold_g.values()) > 0.8 * full_scale:
             raise self.printer.config_error(
-                "beacon_accel_homing: threshold must stay below %.1f g, the Beacon"
+                "beacon_accel_homing: threshold must stay below %.1f g, the"
                 " accelerometer range is %.0f g" % (0.8 * full_scale, full_scale))
         for endstop in self.endstops.values():
             endstop.setup_trigger(self._trigger_command)
@@ -304,7 +377,13 @@ class BeaconAccelHoming:
                 " acceleration. Update it or set homing_accel: 0")
         configfile = self.printer.lookup_object("configfile")
         for rail in getattr(self.toolhead.get_kinematics(), "rails", []):
-            if any(es in self.endstops.values() for es, _name in rail.get_endstops()):
+            axes = [axis for axis, es in self.endstops.items()
+                    if any(es is candidate for candidate, _name in rail.get_endstops())]
+            if axes:
+                for axis in axes:
+                    self.rails_by_axis[axis] = rail
+                if self.backend is not None:
+                    self.backend.validate_rail(rail.get_homing_info(), self.printer.config_error)
                 for msg in homing_warnings(rail.get_name(), rail.get_homing_info()):
                     configfile.runtime_warning(msg)
 
@@ -345,16 +424,27 @@ class BeaconAccelHoming:
         beacon.compat_mcu_register_response(self._batch_hook, BEACON_ACCEL_DATA)
 
     def _full_scale_g(self, scale):
+        if self.backend is not None:
+            return self.backend.full_scale
         clip = getattr(self.helper, "_clip_values", (None,))[0]
         return clip * scale["scale"] / 1000.0 if clip else None
 
     def _raw_axis(self, axis):
         """Sensor index and sign of a machine axis, from Beacon's accel_axes_map."""
+        if self.backend is not None:
+            return AXES[axis], 1  # The configured driver already applies axes_map.
         index, sign = self.helper.config.axes_map[AXES[axis]]
         return index, sign
 
     # Stream and acceleration, owned only for the duration of a homing session
     def _start_stream(self):
+        self.sensor_fault = None
+        if self.backend is not None:
+            self.session_scale = self.scale
+            self.full_scale_g = self.backend.full_scale
+            self.backend.start()
+            self.stream_on = True
+            return
         helper = self.helper
         # Streaming alone at our own scale: a Beacon client starting later
         # (the web API dump) would switch the sensor range mid-move.
@@ -369,6 +459,10 @@ class BeaconAccelHoming:
         self.full_scale_g = self._full_scale_g(self.session_scale)
 
     def _stop_stream(self):
+        if self.backend is not None:
+            self.stream_on = False
+            self.backend.stop()
+            return
         if self.stream_on:
             self.stream_on = False
             if not self.helper._stream_en:
@@ -428,11 +522,15 @@ class BeaconAccelHoming:
                         axes[axis] = rail
         if not axes:
             return
+        self.workflows.check_home_axes(axes)
         self._end_session()
         if len(axes) > 1:
             raise self.printer.command_error("beacon_accel_homing homes one axis at a time")
         if self.helper is None:
-            raise self.printer.command_error("beacon_accel_homing: Beacon accelerometer is not available")
+            raise self.printer.command_error("beacon_accel_homing: accelerometer is not available")
+        if self.backend is not None:
+            for rail in axes.values():
+                self.backend.validate_rail(rail.get_homing_info(), self.printer.command_error)
         self.rails_by_axis.update(axes)
         self.session_axes = axes
         self.passes = 0
@@ -442,18 +540,26 @@ class BeaconAccelHoming:
         self.homing_active = True
         self.last_activity = started = self.reactor.monotonic()
         self.reactor.update_timer(self.idle_timer, started + 0.5)
-        self._limit_accel()
-        self._enable_motors(list(axes)[0])
-        self._back_off_others(list(axes)[0])
-        self.last_batch = None
-        self._start_stream()
+        try:
+            self._limit_accel()
+            self._enable_motors(list(axes)[0])
+            self._back_off_others(list(axes)[0])
+            self.last_batch = None
+            self._start_stream()
+        except Exception:
+            self._end_session()
+            raise
         # Wait in real time until accelerometer data actually flows.
         while self.last_batch is None or self.last_batch < started:
             now = self.reactor.monotonic()
+            if self.sensor_fault is not None:
+                reason = self.sensor_fault
+                self._end_session()
+                raise self.printer.command_error("accel_homing: %s" % FAILURES[reason])
             if now - started > STREAM_START_TIMEOUT:
                 self._end_session()
                 raise self.printer.command_error(
-                    "beacon_accel_homing: Beacon accelerometer stream did not start")
+                    "beacon_accel_homing: accelerometer stream did not start")
             self.reactor.pause(now + 0.005)
 
     def _homed(self, axis):
@@ -563,6 +669,7 @@ class BeaconAccelHoming:
         record["travel_mm"] = None if travel is None else round(abs(travel), 3)
         attempt.halt_delta = self._travel(positions, attempt.axis, halt=True)
         self.last_pass = attempt
+        self.workflows.check_home_result(record)
         logging.info("beacon_accel_homing: %s, %.4f s after arm", describe(record),
                      record["trigger_after_arm_s"] or 0.0)
         if travel is not None:
@@ -606,6 +713,11 @@ class BeaconAccelHoming:
         self.passes += 1
         info = rail.get_homing_info()
         max_velocity, accel = self.toolhead.get_max_velocity()
+        if (not all(math.isfinite(value) and value > 0 for value in
+                    (max_velocity, accel, info.speed, info.second_homing_speed))
+                or not math.isfinite(self.threshold_g[axis])):
+            raise self.printer.command_error("accel_homing: homing speed, acceleration"
+                                             " and threshold must be finite positive values")
         if self.passes == 1:
             low, high = rail.get_range()
             travel, speed = (high - low) * self.travel_margin, info.speed
@@ -614,6 +726,8 @@ class BeaconAccelHoming:
             travel, speed = 2.0 * retract + 3.0, info.second_homing_speed
         # The toolhead never moves faster than its max_velocity.
         speed = min(speed, max_velocity)
+        if self.backend is not None:
+            self.backend.validate_motion_plan(speed, accel, self.printer.command_error)
         # Cruise time plus the time lost while ramping up to speed.
         deadline = print_time + travel / speed + speed / accel + self.watchdog_margin
         count_g = self.session_scale["scale"] / 1000.0
@@ -624,12 +738,18 @@ class BeaconAccelHoming:
                 " %.1f g threshold" % (self.full_scale_g, threshold))
         index, map_sign = self._raw_axis(axis)
         direction = self.impact_sign[axis]
-        beacon_mcu = self.beacon._mcu
+        if self.sensor_fault is not None:
+            raise self.printer.command_error("accel_homing: %s" % FAILURES[self.sensor_fault])
+        beacon_mcu = self.sensor_clock
         attempt = Attempt(endstop, self.passes, print_time,
                           beacon_mcu.print_time_to_clock(print_time) & 0xFFFFFFFF,
                           deadline, beacon_mcu.print_time_to_clock(deadline) & 0xFFFFFFFF,
                           index, map_sign, direction, threshold / count_g, count_g)
         attempt.steppers = endstop.get_steppers()
+        attempt.effective_speed, attempt.effective_accel = speed, accel
+        if hasattr(self.toolhead, "get_position"):
+            attempt.start_position = self.toolhead.get_position()[AXES[axis]]
+            attempt.expected_travel = abs(attempt.start_position - info.position_endstop)
         return attempt
 
     def arm(self, attempt):
@@ -674,19 +794,22 @@ class BeaconAccelHoming:
             attempt.reason = "pressed"
             if attempt.record is not None:
                 attempt.record["result"] = "pressed"
+        if attempt.record is not None:
+            attempt.record["moving"] = attempt.moving
+            attempt.record["motion_seen"] = attempt.motion_seen or attempt.moving
         if attempt.reason == "pressed":
             return attempt.arm_time
         if attempt.onset_batch is None:
             return 0.0
         return self.onset_time(attempt)
 
-    def _commanded_speed(self, attempt, print_time):
+    def _commanded_speed(self, attempt, print_time, window=COMMAND_WINDOW):
         """Stepper speed along the move at a print time, from the step history."""
         speed = 0.0
         for stepper in attempt.steppers:
             moved = (stepper.get_past_mcu_position(print_time)
-                     - stepper.get_past_mcu_position(print_time - COMMAND_WINDOW))
-            speed = max(speed, abs(moved) * stepper.get_step_dist() / COMMAND_WINDOW)
+                     - stepper.get_past_mcu_position(print_time - window))
+            speed = max(speed, abs(moved) * stepper.get_step_dist() / window)
         return speed
 
     def _measured_speed(self, attempt):
@@ -703,15 +826,58 @@ class BeaconAccelHoming:
             # Missing samples leave the integrated speed too low, so a moving
             # toolhead could look pressed. Only an impact can end such a move.
             return None
-        measured_at = self.beacon._clock32_to_time(attempt.last_end_clock)
+        measured_at = self.clock_to_time(attempt.last_end_clock)
         commanded = self._commanded_speed(attempt, measured_at - MOTION_LAG)
+        measured = self._measured_speed(attempt)
+        # Workflow proof must also work when the configured rail or toolhead
+        # velocity limit is below the legacy pressed-start cutoff.  A slightly
+        # wider step-history window avoids single-step quantization at very low
+        # speeds.  This does not alter Beacon's pressed-start decision below.
+        effective = attempt.effective_speed
+        if effective is None:
+            effective = self.backend.max_speed if self.backend is not None else PRESSED_MIN_SPEED
+        proof_min_speed = min(PRESSED_MIN_SPEED, 0.5 * effective)
+        window = motion_proof_window(effective)
+        proof_commanded = (commanded if window == COMMAND_WINDOW else
+                           self._commanded_speed(attempt, measured_at - MOTION_LAG, window))
+        if proof_commanded >= proof_min_speed and measured >= MOVING_RATIO * proof_commanded:
+            attempt.motion_seen = True
+        if self.backend is not None:
+            # A generic stream may prove motion at its actual homing speed,
+            # but missing motion is never a successful pressed-start home.
+            if attempt.motion_seen:
+                attempt.moving = True
+                return False
+            return None
         if commanded < PRESSED_MIN_SPEED:
             return None
-        measured = self._measured_speed(attempt)
         if measured >= MOVING_RATIO * commanded:
             attempt.moving = True
             return False
         return True if measured < PRESSED_RATIO * commanded else None
+
+    def _motion_startup_plan(self, attempt):
+        speed, accel = self.toolhead.get_max_velocity()
+        speed = attempt.effective_speed or min(speed, self.backend.max_speed)
+        accel = attempt.effective_accel or (min(accel, self.homing_accel)
+                                           if self.homing_accel else accel)
+        return speed, accel, self.backend.motion_startup_timeout(speed, accel)
+
+    def _check_no_motion(self, attempt, print_time):
+        """Generic-only fail-closed startup check, independent of impact.
+
+        The reporting/lag allowance leaves the complete acceleration ramp in
+        fresh samples before proof is required.  If proof is still absent,
+        stop with an error instead of pushing until the full-travel watchdog.
+        """
+        self._motion_state(attempt)
+        if attempt.motion_seen or attempt.moving:
+            return False
+        _speed, _accel, timeout = self._motion_startup_plan(attempt)
+        if print_time < attempt.arm_time + timeout:
+            return False
+        self._fire(attempt, "no_motion", mcu.MCU_trsync.REASON_HOST_REQUEST)
+        return True
 
     def _fire(self, attempt, reason, code):
         with self.lock:
@@ -734,11 +900,19 @@ class BeaconAccelHoming:
         if eventtime - attempt.last_data > self.stream_timeout:
             self._fire(attempt, "no_data", mcu.MCU_trsync.REASON_HOST_REQUEST)
             return self.reactor.NEVER
+        if self.backend is not None and self.backend.last_sample_time is not None:
+            if print_time - self.backend.last_sample_time > self.backend.max_age:
+                self._fire(attempt, "stale_data", mcu.MCU_trsync.REASON_HOST_REQUEST)
+                return self.reactor.NEVER
         if print_time > attempt.deadline + self.stream_timeout:
             self._fire(attempt, "travel", mcu.MCU_trsync.REASON_HOST_REQUEST)
             return self.reactor.NEVER
         if attempt.moving:
             return eventtime + WATCHDOG_INTERVAL
+        if self.backend is not None:
+            if self._check_no_motion(attempt, print_time):
+                return self.reactor.NEVER
+            return eventtime + EARLY_INTERVAL
         if self._check_pressed(attempt):
             return self.reactor.NEVER
         return eventtime + EARLY_INTERVAL
@@ -770,12 +944,28 @@ class BeaconAccelHoming:
             self._inspect(params)
         except Exception:
             logging.exception("beacon_accel_homing: batch inspection failed")
+            self._sensor_fault("invalid_data")
         if self.helper._stream_en:
             self.saved_handler(params)
 
     def _inspect(self, params):
+        try:
+            self._inspect_batch(params)
+        finally:
+            # Optional raw references are retained only after detector/trigger
+            # processing.  Conversion for charts is deferred to stop_capture.
+            if self.capture_batches is not None:
+                self._capture_batch(params)
+
+    def _sensor_fault(self, reason):
+        self.sensor_fault = reason
+        attempt = self.attempt
+        if attempt is not None and not attempt.done:
+            self._fire(attempt, reason, mcu.MCU_trsync.REASON_HOST_REQUEST)
+
+    def _inspect_batch(self, params):
         data = params["data"]
-        count = len(data) // 6
+        count = sample_count(data)
         if count < 2:
             return
         now = params.get("#receive_time") or self.reactor.monotonic()
@@ -792,7 +982,7 @@ class BeaconAccelHoming:
             self._track_impact(attempt, params, data, count)
             return
         helper = self.helper
-        if (self.stream_alone and helper._stream_en
+        if (self.backend is None and self.stream_alone and helper._stream_en
                 and helper._scale.get("id") != self.session_scale.get("id")):
             self._fire(attempt, "scale", mcu.MCU_trsync.REASON_HOST_REQUEST)
             return
@@ -819,10 +1009,10 @@ class BeaconAccelHoming:
         if clock_after(start_clock, attempt.deadline_clock):
             self._fire(attempt, "travel", mcu.MCU_trsync.REASON_HOST_REQUEST)
             return
-        data = data[:count * 6]
-        raw = (memoryview(data).cast("h") if NATIVE_LE
+        data = sample_slice(data, count)
+        raw = (data if isinstance(data, tuple) else memoryview(data).cast("h") if NATIVE_LE
                else [v for sample in SAMPLE.iter_unpack(data) for v in sample])
-        if CLIPPED in raw:
+        if self.backend is None and CLIPPED in raw:
             raw = decode_clips(raw, attempt.last_samples, self.clip_values)
         values = raw[attempt.index::3]
         top, bottom = max(values), min(values)
@@ -884,9 +1074,10 @@ class BeaconAccelHoming:
         if attempt.impact_until is None or not clock_after(attempt.impact_until, params["start_clock"]):
             return
         if values is None:
-            values = axis_values(data[:count * 6], attempt.index)
+            values = axis_values(sample_slice(data, count), attempt.index)
         top, bottom = max(values), min(values)
-        peak = (self.full_scale_g / attempt.count_g if top == CLIPPED and self.full_scale_g
+        peak = (self.full_scale_g / attempt.count_g
+                if self.backend is None and top == CLIPPED and self.full_scale_g
                 else max(top - attempt.baseline, attempt.baseline - bottom))
         if peak > attempt.impact_peak:
             attempt.impact_peak = peak
@@ -897,7 +1088,8 @@ class BeaconAccelHoming:
         totals, counts = [0, 0, 0], [0, 0, 0]
         for data in list(self.recent):
             for index in range(3):
-                values = [v for v in axis_values(data[:len(data) // 6 * 6], index) if v != CLIPPED]
+                values = [v for v in axis_values(sample_slice(data, sample_count(data)), index)
+                          if self.backend is not None or v != CLIPPED]
                 totals[index] += sum(values)
                 counts[index] += len(values)
         if min(counts) < BASELINE_MIN_SAMPLES:
@@ -906,8 +1098,8 @@ class BeaconAccelHoming:
 
     def onset_time(self, attempt):
         start_clock, delta_clock, position, count = attempt.onset_batch
-        start = self.beacon._clock32_to_time(start_clock)
-        end = self.beacon._clock32_to_time(start_clock + delta_clock)
+        start = self.clock_to_time(start_clock)
+        end = self.clock_to_time(start_clock + delta_clock)
         return start + (end - start) * position / max(count - 1, 1)
 
     def _velocity(self, attempt):
@@ -919,6 +1111,66 @@ class BeaconAccelHoming:
                 * MM_PER_S2_PER_G * attempt.sample_dt)
 
     # Reporting
+    def start_capture(self):
+        """Capture one requested workflow in memory; no streaming or motion."""
+        with self.lock:
+            if self.capture_batches is not None:
+                raise self.printer.command_error("accel_homing: capture already active")
+            self.capture_batches = []
+            self.capture_samples = self.capture_dropped = 0
+            self.capture_baseline = None
+
+    def _capture_batch(self, params):
+        data = params["data"]
+        count = sample_count(data)
+        if count < 2:
+            return
+        with self.lock:
+            if self.capture_batches is None:
+                return
+            if self.capture_samples + count > self.capture_limit:
+                self.capture_dropped += count
+                return
+            self.capture_batches.append((params["start_clock"], params["delta_clock"],
+                                         data, self.session_scale["scale"] / 1000.0))
+            self.capture_samples += count
+            attempt = self.attempt or self.last_pass
+            if self.capture_baseline is None and attempt is not None and attempt.bases is not None:
+                mapping = [self._raw_axis(a) for a in ("x", "y")]
+                mapping.append((2, 1) if self.backend is not None else self.helper.config.axes_map[2])
+                self.capture_baseline = tuple(attempt.bases[i] * sign * attempt.count_g
+                                              for i, sign in mapping)
+
+    def stop_capture(self):
+        """Convert bounded captured batches to machine-axis g off the trigger path.
+
+        `samples` include gravity and bias; `baseline_g` must be subtracted when
+        comparing channels to directional impact thresholds in charts.
+        """
+        with self.lock:
+            batches, self.capture_batches = self.capture_batches or [], None
+            dropped, baseline = self.capture_dropped, self.capture_baseline
+        mapping = ([(0, 1), (1, 1), (2, 1)] if self.backend is not None
+                   else self.helper.config.axes_map)
+        samples, previous = [], [0, 0, 0]
+        for start_clock, delta_clock, data, count_g in batches:
+            count = sample_count(data)
+            raw = (list(data) if isinstance(data, tuple)
+                   else [v for row in SAMPLE.iter_unpack(sample_slice(data, count)) for v in row])
+            if self.backend is None and CLIPPED in raw:
+                raw = decode_clips(raw, previous, self.clip_values)
+            previous = raw[-3:]
+            start, end = self.clock_to_time(start_clock), self.clock_to_time(start_clock + delta_clock)
+            dt = (end - start) / (count - 1)
+            for number in range(count):
+                xyz = raw[number * 3:number * 3 + 3]
+                samples.append((start + number * dt,) + tuple(
+                    xyz[index] * sign * count_g for index, sign in mapping))
+        if baseline is None and samples:
+            resting = samples[:min(50, len(samples))]
+            baseline = tuple(sum(row[i] for row in resting) / len(resting) for i in (1, 2, 3))
+        return {"samples": samples, "dropped": dropped, "baseline_g": baseline}
+
     def _record(self, attempt):
         to_g = attempt.count_g
         if attempt.reason != "impact":
@@ -942,6 +1194,12 @@ class BeaconAccelHoming:
             "noise_g": round(attempt.noise_checked * to_g, 2),
             "velocity_mm_s": None if velocity is None else round(velocity, 1),
             "moving": attempt.moving,
+            "motion_seen": attempt.motion_seen or attempt.moving,
+            "arm_time_s": attempt.arm_time,
+            "onset_time_s": self.onset_time(attempt) if onset else None,
+            "start_position_mm": attempt.start_position,
+            "expected_travel_mm": attempt.expected_travel,
+            "backend": "beacon_raw" if self.backend is None else self.backend.kind,
             "trigger_after_arm_s": round(self.onset_time(attempt) - attempt.arm_time, 4) if onset else None,
         }
         attempt.record = result
@@ -956,24 +1214,40 @@ class BeaconAccelHoming:
             "back_off_dist": self.back_off_dist,
             "homing": self.homing_active,
             "last": {axis: dict(r) for axis, r in self.last.items()},
+            "sensor": self.sensor_name,
+            "backend": {"type": "beacon_raw", "sensor": self.sensor_name,
+                        "latency_guaranteed": False} if self.backend is None else self.backend.get_status(),
+            "workflows": self.workflows.get_status(eventtime),
         }
 
     def cmd_STATUS(self, gcmd):
+        kind = "beacon_raw" if self.backend is None else self.backend.kind
+        gcmd.respond_info("accel_homing: sensor %s, backend %s, X %.2f g, Y %.2f g"
+                          % (self.sensor_name, kind, self.threshold_g["x"], self.threshold_g["y"]))
+        if self.backend is not None:
+            gcmd.respond_info("accel_homing: requested report interval %.4f s, sample-age limit"
+                              " %.4f s, observed rate %s Hz, maximum homing speed %.1f mm/s;"
+                              " total stop latency is not guaranteed"
+                              % (self.backend.interval, self.backend.max_age,
+                                 self.backend.observed_rate, self.backend.max_speed))
         if not self.history:
             gcmd.respond_info("beacon_accel_homing: no homes recorded since restart")
             return
         gcmd.respond_info("\n".join(describe(r) for r in self.history))
 
     def cmd_SET(self, gcmd):
+        self.workflows.check_settings_change()
         axis = gcmd.get("AXIS").lower()
         if axis not in AXES:
             raise gcmd.error("AXIS must be X or Y")
         threshold = gcmd.get_float("THRESHOLD", None, minval=3.0, maxval=15.0)
         sign = gcmd.get_int("IMPACT_SIGN", None, minval=-1, maxval=1)
         if threshold is not None:
+            if not math.isfinite(threshold):
+                raise gcmd.error("THRESHOLD must be finite")
             full_scale = self._full_scale_g(self.scale) if self.helper is not None else None
             if full_scale is not None and threshold > 0.8 * full_scale:
-                raise gcmd.error("THRESHOLD must stay below %.1f g, the Beacon accelerometer"
+                raise gcmd.error("THRESHOLD must stay below %.1f g, the accelerometer"
                                  " range is %.0f g" % (0.8 * full_scale, full_scale))
             self.threshold_g[axis] = threshold
         if sign is not None:
