@@ -147,6 +147,8 @@ class FakeConfig:
         return self.options.get(name, default)
 
     def _number(self, kind, name, default, minval=None, maxval=None):
+        if name not in self.options and default is None:
+            return None
         value = kind(self.options.get(name, default))
         if (minval is not None and value < minval) or (maxval is not None and value > maxval):
             raise ConfigError("%s out of range" % name)

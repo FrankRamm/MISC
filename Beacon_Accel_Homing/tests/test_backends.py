@@ -815,7 +815,7 @@ class SubscriptionAndPolicyTest(unittest.TestCase):
         self.assertEqual(obj.backend.helper.update_interval, 0.1)
 
     def test_excessive_rail_speed_rejected_before_any_motion(self):
-        obj = generic()
+        obj = generic(options={"max_report_travel": 1.0})
         rail = FakeRail(with_endstops(obj)["x"], info(speed=100, retract=0))
         with self.assertRaisesRegex(CommandError, "exceeds 50.0"):
             obj._handle_rails_begin(None, [rail])
