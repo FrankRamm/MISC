@@ -93,6 +93,11 @@ base file: use a readable running command, or stop and resolve the instance
 explicitly. More than one matching checkout/config/service or accelerometer
 causes an actionable error. No service is started by the installer.
 
+Discovery cannot prove that no other instance uses a checkout. Custom stopped
+instances outside the recognized paths, unreadable service definitions and
+unresolved environment/drop-in configuration may not be discovered. Review
+those host-specific instances when a checkout is shared.
+
 When running, Klipper must report ready, `idle_timeout` Ready/Idle, no active
 print and no pause. If the selected API is inaccessible, its identity is
 unknown, or status is unsafe, installation aborts. Stop the selected instance
@@ -149,7 +154,7 @@ ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
 ```
 
 `CENTERED=1` states that the toolhead is already physically centered and
-authorizes the first candidate home, starting at 3 g by default. It does not
+authorizes the first candidate home, starting at 2 g by default. It does not
 measure the manual position. After an early trigger, XY is released and made
 unhomed; center it manually again and reissue the same calibration command to
 resume, keeping the same `AXIS` and optional `SAVE_CONFIG` value.
@@ -160,7 +165,67 @@ repeat the preparation and use `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` for Y.
 See the [full calibration steps](../README.md#calibrate-x-then-y) for validation,
 manual threshold overrides and optional saving behavior.
 
-## Backups, rollback and repeated installation
+## Uninstall and restore the pre-installation configuration
+
+Run this single line as the existing Klipper service user in the Linux host
+shell:
+
+```bash
+bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/uninstall.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing'
+```
+
+This downloads the actual `uninstall.sh` before executing it. The standalone
+script uses the same complete, verified, commit-pinned package download as
+installation. It always selects full uninstallation. No extracted ZIP or
+source-cache path is needed. For a preview, append `--dry-run` to the final
+`bash "$t"` invocation. Instance selection options such as `--config`,
+`--klipper-path`, `--service` and `--klippy-socket` work there too.
+
+From a verified source cache or complete Git checkout, the offline equivalent
+is:
+
+```bash
+bash /path/to/Beacon_Accel_Homing/uninstall.sh
+```
+
+An ordinary extracted folder without verified cache metadata or tracked Git
+files uses the hosted verified download instead.
+
+Full uninstallation follows all active installation and upgrade transactions
+for the selected config back to the first recorded baseline. It restores the
+previous X/Y endstops, retract/speed settings, sensorless driver options and
+plugin links. A plugin section, file or link that already existed before the
+first recorded install is restored to that baseline rather than deleted.
+
+It removes installer-created includes/configuration and saved
+`accel_homing_model` sections introduced by this installation. Pre-existing
+plugin models are restored. Other `SAVE_CONFIG` data, including Beacon and
+bed-mesh models, and unrelated later configuration edits are preserved.
+Source caches, chart output and all backup history remain on disk.
+
+Module links belong to the checkout and can serve several printer instances.
+If another discovered config uses that checkout and restoration would change
+those links, uninstall refuses before writes. Resolve that shared-checkout
+dependency manually, accounting for any custom instances discovery cannot see.
+
+Restoration requires an intact, unambiguous backup history and recognizable
+installer edits. A changed managed setting/link, unrelated sections added to
+an installer-created config file, a missing original link target, unrecorded
+plugin references, broken restored includes or incomplete history causes a
+conflict before configuration/plugin writes. The error identifies the affected
+path and backup for review. There is no force option that overwrites later edits.
+
+Older version-1 backups recorded only changed files. If they lack the main
+config baseline needed to distinguish pre-existing saved models from later
+calibration, full uninstall refuses rather than guessing. New backups retain
+all baseline config files, including an unchanged main config, so routine
+calibration can be removed without losing other saved data.
+
+Running Klipper must pass the same selected-instance idle checks as install.
+Uninstallation never stops/restarts the service or starts movement. Review
+the restored config and issue **`RESTART` yourself only while idle**.
+
+## Backups, single-transaction rollback and recovery
 
 Each changed installation saves a private transaction directory beside the
 main config under `.accel_homing_backups/<UTC-timestamp>-<id>/`. Its
@@ -170,23 +235,57 @@ failures restore already-applied changes automatically. Power-loss or process
 termination recovery may need manual inspection of a `prepared` manifest.
 Concurrent changes after planning are rejected.
 
-The installer prints the actual backup and a complete rollback command. Use
-that path, for example:
+Before restoring files, full uninstall writes another transaction backup of
+the current configuration and links, including plugin models it will remove.
+It prints `Uninstalled. Current-state backup: ...` and a complete
+`Undo this uninstall` command. That command uses `install.sh --rollback` with
+the new backup, restoring the state immediately before uninstall if the
+restored files/links have not changed since. Keep this backup as well as the
+original installation history.
+
+The installer prints the actual backup and a complete rollback command. Keep
+that first-installation backup and every later transaction directory. Full
+uninstall needs their history to identify the original configuration.
+
+`--rollback` restores exactly one selected transaction. Use its printed path,
+for example:
 
 ```bash
 bash /path/to/Beacon_Accel_Homing/install.sh --rollback "$HOME/printer_data/config/.accel_homing_backups/ACTUAL-BACKUP-DIRECTORY"
 ```
 
-Rollback restores the selected transaction, including original endstops and
-sensorless settings. It refuses if any affected file/link was edited after
-installation, preserving later changes for manual reconciliation.
-`--uninstall`/`-u` selects the latest unchanged installed transaction for the
-detected config; after multiple upgrades this rolls back one upgrade, not the
-entire installation history. `--dry-run` can be combined with rollback.
+Rollback refuses if any affected file/link was edited after that transaction,
+preserving later changes for manual reconciliation. After an upgrade, it
+returns to the previous installed version; it does not remove the complete
+installation. `--dry-run` can be combined with rollback. The installer's
+`--uninstall`/`-u` is equivalent to the full `uninstall.sh` operation above;
+`uninstall.sh` itself rejects `--rollback` to keep those actions distinct.
+
+When restoration reports a conflict, keep the printer idle and preserve the
+current config plus the entire `.accel_homing_backups` directory. Inspect the
+reported original backup's `manifest.json`: each changed path has its original
+`before` state, with base64 file contents, permissions, or the original link
+target. Compare those values with the live file and the recorded `after`
+state. Reconcile only the installer-managed settings, retaining unrelated
+edits and saved data. Restore original endstop/sensorless options before
+removing plugin includes or module links. Do not delete the backups or copy
+an old whole `printer.cfg` over current calibration data.
+
+If the original link target has been removed, recover that original source at
+the recorded path before retrying. Restoring a link to a missing Python module
+would leave Klipper unable to load the previous plugin.
+
+For an older incomplete backup, use a genuine pre-installation config copy
+to identify the original endstops, sensorless settings and plugin models.
+If no such baseline exists, the recorded changed-file snapshots can recover
+their original settings, but unrecorded saved-model ownership needs manual
+review. The uninstaller cannot reconstruct information that was never backed
+up.
 
 A second install of the same package/config makes no further edits or backups.
-An installer never changes firmware, wiring or physical geometry. After install
-or rollback, review the result and issue `RESTART` yourself only while idle.
+An installer never changes firmware, wiring or physical geometry. After install,
+uninstall or rollback, review the result and issue `RESTART` yourself only while
+idle.
 
 ## Pin a specific published commit
 

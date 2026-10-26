@@ -45,7 +45,7 @@ preparation is complete and authorizes movement; it is not a sensor position
 measurement. The workflow does not assign a center coordinate or mark either
 axis homed before the actual home.
 
-The first home tests the candidate threshold, starting at 3 g by default.
+The first home tests the candidate threshold, starting at 2 g by default.
 One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
 An early trigger raises the candidate, resets validation progress, releases
