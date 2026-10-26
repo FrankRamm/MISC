@@ -16,9 +16,9 @@ import types
 import uuid
 
 try:
-    from .accel_homing_charts import write_capture
+    from .accel_homing_charts import write_accuracy, write_capture
 except ImportError:
-    from accel_homing_charts import write_capture
+    from accel_homing_charts import write_accuracy, write_capture
 
 try:
     from .homing import PrinterHoming as _PrinterHoming
@@ -101,6 +101,8 @@ class AccelHomingWorkflows:
                  "Test X then Y from an explicitly confirmed center"),
                 ("ACCEL_HOMING_CHARTS_GENERATE", self.cmd_CHARTS,
                  "Home X then Y and export measured acceleration CSV/SVG/HTML"),
+                ("ACCEL_HOMING_ACCURACY", self.cmd_ACCURACY,
+                 "Measure repeated X/Y commanded homing travel and accelerometer captures"),
                 ("ACCEL_HOMING_STATUS", self.cmd_STATUS,
                  "Show calibration progress, model and chart output paths")):
             self.gcode.register_command(name, callback, desc=description)
@@ -332,6 +334,7 @@ class AccelHomingWorkflows:
             self.in_home, self.home_axis = False, None
 
     def _finish(self, result, release=False):
+        session = self.session
         try:
             self._restore()
             if release:
@@ -339,10 +342,18 @@ class AccelHomingWorkflows:
                     self._disable_xy()
                 except Exception:
                     logging.exception("accel_homing: unable to release/invalidate XY during cleanup")
+        except Exception as exc:
+            if session is not None and session["mode"] == "accuracy":
+                result = {"result": "aborted", "reason": "workflow cleanup failed: %s" % exc}
+            raise
         finally:
-            self.last_result = result
-            self.session = None
-            self.reactor.update_timer(self.timer, self.reactor.NEVER)
+            try:
+                if session is not None and session["mode"] == "accuracy":
+                    result = self._accuracy_result(session, result)
+            finally:
+                self.last_result = result
+                self.session = None
+                self.reactor.update_timer(self.timer, self.reactor.NEVER)
 
     def _shutdown(self, *args):
         if self.session is not None:
@@ -385,10 +396,10 @@ class AccelHomingWorkflows:
             raise self._error("workflow requires both X and Y unhomed; release XY and "
                               "manually center the toolhead before running with CENTERED=1")
 
-    def _begin(self, gcmd, mode, axis=None):
+    def _begin(self, gcmd, mode, axis=None, axes=None):
         if self.session is not None:
             raise gcmd.error("A workflow is already active; use ACCEL_HOMING_CANCEL first")
-        axes = [axis] if axis else ["x", "y"]
+        axes = axes if axes is not None else [axis] if axis else ["x", "y"]
         self._preflight(axes)
         self._require_unhomed_xy()
         self.session = {"mode": mode, "axis": axis, "state": "starting",
@@ -398,7 +409,8 @@ class AccelHomingWorkflows:
                         "records": [], "paths": [], "candidate": self.start_threshold,
                         "saved_thresholds": dict(self.owner.threshold_g),
                         "saved_back_off": self.owner.back_off_dist,
-                        "save_config": bool(gcmd.get_int("SAVE_CONFIG", 1, minval=0, maxval=1))}
+                        "save_config": (mode == "calibration" and bool(gcmd.get_int(
+                            "SAVE_CONFIG", 1, minval=0, maxval=1)))}
 
     def _wait_center(self, reason):
         self._restore()
@@ -426,10 +438,9 @@ class AccelHomingWorkflows:
         if axis not in AXES:
             raise self._error("workflow homing requires exactly one X or Y axis")
         session = self.session
-        if session["attempts"] >= self.max_attempts:
+        if session["attempts"] >= session.get("attempt_limit", self.max_attempts):
             raise self._error("maximum homing attempts reached")
-        if self._printing():
-            raise self._error("printing or pause detected during workflow")
+        self._check_running(session)
         session["attempts"] += 1
         if threshold is not None:
             if threshold > self._threshold_limit():
@@ -440,24 +451,35 @@ class AccelHomingWorkflows:
         self.in_home, self.home_axis = True, axis
         capture_started = False
         try:
-            self.owner.start_capture()
-            capture_started = True
-            letter = axis.upper()
-            gcmd = self.gcode.create_gcode_command("G28", "G28 " + letter, {letter: ""})
-            # safe_z_home can hop Z even for G28 X/Y. Invoke only its verified
-            # stock predecessor for this trial, retaining the public wrapper
-            # and all normal homing events. Recheck after capture setup yields.
-            self._stock_g28()(gcmd)
-            self.owner.toolhead.wait_moves()
-        finally:
-            self.in_home, self.home_axis = False, None
             try:
-                self.owner._end_session()
+                self.owner.start_capture()
+                capture_started = True
+                letter = axis.upper()
+                gcmd = self.gcode.create_gcode_command("G28", "G28 " + letter, {letter: ""})
+                # safe_z_home can hop Z even for G28 X/Y. Invoke only its verified
+                # stock predecessor for this trial, retaining the public wrapper
+                # and all normal homing events. Recheck after capture setup yields.
+                self._check_running(session)
+                self._stock_g28()(gcmd)
+                self.owner.toolhead.wait_moves()
             finally:
-                capture = self.owner.stop_capture() if capture_started else {"samples": [], "dropped": 0}
+                self.in_home, self.home_axis = False, None
+                try:
+                    self.owner._end_session()
+                finally:
+                    capture = self.owner.stop_capture() if capture_started else {"samples": [], "dropped": 0}
+        except Exception:
+            if session["mode"] == "accuracy" and self.session is session:
+                self._remember_accuracy_record(session, axis, old_record)
+            raise
+        self._check_running(session)
         record = self.owner.last.get(axis)
         if record is None or record is old_record:
             raise self._error("G28 returned without a new accelerometer homing result")
+        if not isinstance(record, dict) or record.get("axis") != axis:
+            raise self._error("G28 returned an unexpected homing result axis")
+        source_record = record
+        detector_record = capture.pop("_record", None)
         record = dict(record)
         record["run_id"] = session["run_id"]
         record["workflow_attempt"] = session["attempts"]
@@ -466,6 +488,8 @@ class AccelHomingWorkflows:
         record["workflow_phase"] = ("validation" if session["candidate_qualified"]
                                     else "discovery") if session["mode"] == "calibration" \
             else session["mode"]
+        if session["mode"] == "accuracy":
+            record = self._remember_accuracy_record(session, axis, old_record, record)
         if len(capture.get("samples", ())) < 2 or capture.get("dropped", 0):
             raise self._error("homing capture is empty or incomplete; sensor data is not usable")
         previous = None
@@ -475,11 +499,89 @@ class AccelHomingWorkflows:
                     or (previous is not None and sample[0] <= previous):
                 raise self._error("homing capture has invalid or stale sensor samples")
             previous = sample[0]
-        session["records"].append(record)
-        self._info("%s home: result %s; onset %s g; peak %s g; commanded travel %s mm" % (
+        if session["mode"] == "accuracy":
+            self._validate_accuracy_capture(session, axis, source_record, detector_record,
+                                            record, capture)
+            record["capture_valid"] = True
+        else:
+            session["records"].append(record)
+        self._info("%s home: result %s; onset %s g; peak %s g; threshold %s g; "
+                   "commanded travel %s mm" % (
             axis.upper(), record.get("result"), record.get("onset_g"),
-            record.get("impact_peak_g"), record.get("travel_mm")))
+            record.get("impact_peak_g"), record.get("threshold_g"), record.get("travel_mm")))
         return record, capture
+
+    def _check_running(self, session):
+        if session is None or self.session is not session:
+            raise self._error("workflow cancelled or interrupted")
+        if hasattr(self.printer, "is_shutdown") and self.printer.is_shutdown():
+            raise self._error("printer is shut down")
+        if self._printing():
+            raise self._error("printing or pause detected during workflow")
+
+    def _remember_accuracy_record(self, session, axis, old_record, record=None):
+        if record is None:
+            source = self.owner.last.get(axis)
+            if not isinstance(source, dict) or source is old_record:
+                return None
+            record = dict(source)
+        record.update(run_id=session["run_id"], workflow_attempt=session["attempts"],
+                      workflow_threshold_g=session["saved_thresholds"][axis],
+                      workflow_phase=("discovery" if session["sample_index"] == 0
+                                      else "measurement"),
+                      accuracy_sample=session["sample_index"], capture_valid=False)
+        invalid = [key for key, value in record.items()
+                   if isinstance(value, float) and not math.isfinite(value)]
+        if invalid:
+            # An invalid observed value must never prevent an honest partial
+            # failure report from retaining earlier measurements as strict JSON.
+            record.update((key, None) for key in invalid)
+            record["invalid_numeric_fields"] = invalid
+        session["records"].append(record)
+        session["pending_record"] = record
+        return record
+
+    def _validate_accuracy_capture(self, session, axis, source_record, detector_record,
+                                   record, capture):
+        detector = capture.get("detector")
+        baseline = capture.get("baseline_g")
+        arm, onset = record.get("arm_time_s"), record.get("onset_time_s")
+        finite = lambda value: (isinstance(value, (int, float)) and not isinstance(value, bool)
+                                and math.isfinite(value))
+        if (detector_record is not source_record or not isinstance(detector, dict)
+                or capture.get("fault") or capture.get("error")
+                or detector.get("axis") != axis or detector.get("attempt_count") != 1
+                or not isinstance(baseline, (tuple, list)) or len(baseline) != 3
+                or not all(finite(value) for value in baseline)
+                or not finite(arm) or detector.get("arm_time_s") != arm
+                or not finite(detector.get("threshold_g")) or detector["threshold_g"] <= 0
+                or detector.get("direction") not in (-1, 0, 1)
+                or not finite(detector.get("homing_speed_mm_s"))
+                or detector["homing_speed_mm_s"] <= 0
+                or not finite(detector.get("homing_accel_mm_s2"))
+                or detector["homing_accel_mm_s2"] <= 0
+                or not math.isclose(detector["threshold_g"], session["saved_thresholds"][axis],
+                                    rel_tol=1e-12, abs_tol=1e-12)
+                or (session.get("last_arm_time") is not None
+                    and arm <= session["last_arm_time"])):
+            raise self._error("homing capture does not belong to the current detector/reference")
+        samples = capture["samples"]
+        if not samples[0][0] < arm <= samples[-1][0]:
+            raise self._error("homing capture lacks the current pre-arm reference or armed samples")
+        if record.get("result") == "impact" and (
+                not finite(onset) or detector.get("onset_time_s") != onset
+                or not arm <= onset <= samples[-1][0]
+                or not finite(detector.get("onset_g"))
+                or not finite(detector.get("impact_peak_g")) or detector["impact_peak_g"] < 0):
+            raise self._error("homing capture lacks the current measured impact")
+        record["threshold_g"] = detector["threshold_g"]
+        record["onset_g"] = detector.get("onset_g")
+        record["impact_peak_g"] = detector.get("impact_peak_g")
+        record["direction"] = detector.get("direction")
+        record["configured_homing_speed_mm_s"] = self.owner.rails_by_axis[axis].get_homing_info().speed
+        record["homing_speed_mm_s"] = detector.get("homing_speed_mm_s")
+        record["homing_accel_mm_s2"] = detector.get("homing_accel_mm_s2")
+        session["last_arm_time"] = arm
 
     def _quality(self, axis, record):
         result = record.get("result")
@@ -509,6 +611,8 @@ class AccelHomingWorkflows:
 
     def _recenter(self, axis):
         # Called only after _quality accepted this exact axis's current home.
+        session = self.session
+        self._check_running(session)
         if axis not in self.owner.toolhead.get_kinematics().get_status(
                 self.reactor.monotonic()).get("homed_axes", ""):
             raise self._error("axis lost homing before return to center")
@@ -518,6 +622,7 @@ class AccelHomingWorkflows:
         info = self.owner.rails_by_axis[axis].get_homing_info()
         self.owner.toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
         self.owner.toolhead.wait_moves()
+        self._check_running(session)
 
     def _calibrate_trials(self):
         session = self.session
@@ -722,6 +827,154 @@ class AccelHomingWorkflows:
     def cmd_CHARTS(self, gcmd):
         self._start_xy(gcmd, "charts")
 
+    def cmd_ACCURACY(self, gcmd):
+        requested = str(gcmd.get("AXIS", "XY")).strip().lower()
+        if requested not in ("x", "y", "xy"):
+            raise gcmd.error("AXIS must be X, Y or XY")
+        samples = gcmd.get_int("SAMPLES", 10, minval=2, maxval=50)
+        # Accuracy never stages/saves a model or restarts Klipper, including if
+        # a SAVE_CONFIG token was copied from a calibration command.
+        if gcmd.get("SAVE_CONFIG", None) is not None:
+            raise gcmd.error("SAVE_CONFIG is not supported by ACCEL_HOMING_ACCURACY")
+        self._require_centered(gcmd)
+        axes = list(requested)
+        self._begin(gcmd, "accuracy", axes=axes)
+        session = self.session
+        session.update(state="running", axes=axes, samples_requested=samples,
+                       attempt_limit=len(axes) * (samples + 1), sample_index=0,
+                       configured_speeds={axis: self.owner.rails_by_axis[axis].get_homing_info().speed
+                                          for axis in axes},
+                       pending_record=None, last_arm_time=None,
+                       axis_results={axis: {"requested_samples": samples, "complete": False,
+                                            "discovery": None, "discovery_capture_paths": None,
+                                            "trials": [], "statistics": None,
+                                            "capture_paths": [], "rejected": None}
+                                     for axis in axes})
+        self._info("Accuracy uses the configured homing speed and threshold. CENTERED=1 "
+                   "confirms manually centered XY with nozzle clearance; each axis's first "
+                   "home is discovery only and is excluded from measured statistics")
+        try:
+            self._accuracy_trials(session)
+            self._check_running(session)
+            self._finish({"result": "complete"})
+            if self.last_result["result"] != "complete":
+                raise self._error(self.last_result.get("reason", "accuracy export failed"))
+        except Exception as exc:
+            if self.session is session:
+                self._finish({"result": "aborted", "reason": str(exc)}, release=True)
+            raise
+
+    @staticmethod
+    def _accuracy_statistics(records):
+        if not records:
+            return None
+        travels = [record["travel_mm"] for record in records]
+        count = len(travels)
+        mean = math.fsum(travels) / count
+        variance = (math.fsum((value - mean) ** 2 for value in travels) / count
+                    if count >= 2 else None)
+        return {"count": count, "min_mm": min(travels), "max_mm": max(travels),
+                "mean_mm": mean, "spread_mm": AccelHomingWorkflows._repeatability_spread(records),
+                "stddev_mm": math.sqrt(variance) if variance is not None else None,
+                "variance_mm2": variance,
+                "variance_definition": ("population (divide by N)" if count >= 2 else
+                                        "population (divide by N); at least 2 measured homes required")}
+
+    def _accuracy_trials(self, session):
+        for axis_index, axis in enumerate(session["axes"]):
+            session["axis"] = axis
+            axis_result = session["axis_results"][axis]
+            for sample_index in range(session["samples_requested"] + 1):
+                self._check_running(session)
+                session["sample_index"] = sample_index
+                session["pending_record"] = None
+                record, capture = self._home(axis)
+                quality, reason = self._quality(axis, record)
+                if quality != "good":
+                    axis_result["rejected"] = record
+                elif sample_index == 0:
+                    axis_result["discovery"] = record
+                else:
+                    axis_result["trials"].append(record)
+                    axis_result["capture_paths"].append(None)
+                    axis_result["statistics"] = self._accuracy_statistics(axis_result["trials"])
+                    axis_result["complete"] = len(axis_result["trials"]) == session["samples_requested"]
+                try:
+                    paths = write_capture(self.charts_directory,
+                                          "%s_a%03d" % (session["run_id"], session["attempts"]),
+                                          axis, capture, record)
+                finally:
+                    # Bound memory to one capture, even on export rejection.
+                    del capture
+                self._check_running(session)
+                session["paths"].append({"axis": axis, "phase": record["workflow_phase"],
+                                         "sample_index": sample_index,
+                                         "workflow_attempt": record["workflow_attempt"], **paths})
+                if quality != "good":
+                    axis_result["rejection_capture_paths"] = paths
+                    raise self._error(reason + "; no automatic move follows this result; manually recenter")
+                if sample_index == 0:
+                    axis_result["discovery_capture_paths"] = paths
+                    self._info("%s discovery home qualified; excluded from accuracy statistics" % axis.upper())
+                else:
+                    axis_result["capture_paths"][-1] = paths
+                    self._info("%s accuracy measurement %d/%d retained" % (
+                        axis.upper(), sample_index, session["samples_requested"]))
+                # Only a qualified current home authorizes a return to center.
+                # X must also return after its final trial before Y discovery.
+                if sample_index < session["samples_requested"] or axis_index < len(session["axes"]) - 1:
+                    self._recenter(axis)
+
+    def _accuracy_result(self, session, ending):
+        pending = session.get("pending_record")
+        if pending is not None:
+            axis_result = session["axis_results"][session["axis"]]
+            if pending is not axis_result["discovery"] and not any(
+                    pending is record for record in axis_result["trials"]):
+                axis_result["rejected"] = pending
+        for axis, axis_result in session["axis_results"].items():
+            stats = axis_result["statistics"] = self._accuracy_statistics(axis_result["trials"])
+            count = len(axis_result["trials"])
+            axis_result["complete"] = count == session["samples_requested"]
+            detail = ("count %d/%d; no qualified measured homes" % (count, session["samples_requested"])
+                      if stats is None else
+                      "count %d/%d; min %.3f mm; max %.3f mm; mean %.6f mm; spread %.3f mm; "
+                      "stddev %s mm; variance %s mm^2 (%s)" % (
+                          count, session["samples_requested"], stats["min_mm"], stats["max_mm"],
+                          stats["mean_mm"], stats["spread_mm"],
+                          "unavailable" if stats["stddev_mm"] is None else "%.6f" % stats["stddev_mm"],
+                          "unavailable" if stats["variance_mm2"] is None else "%.9f" % stats["variance_mm2"],
+                          stats["variance_definition"]))
+            self._info("%s accuracy %s: %s" % (axis.upper(),
+                                              "complete" if axis_result["complete"] else "incomplete", detail))
+            if stats is not None and stats["spread_mm"] >= REPEATABILITY_LIMIT_MM:
+                self._info("%s observed spread is at or above the existing %.2f mm calibration "
+                           "criterion; all qualified accuracy trials remain in this report" % (
+                               axis.upper(), REPEATABILITY_LIMIT_MM))
+        result = {"mode": "accuracy", "run_id": session["run_id"],
+                  "axes": list(session["axes"]), "samples_requested": session["samples_requested"],
+                  "fixed_thresholds_g": {axis: session["saved_thresholds"][axis]
+                                         for axis in session["axes"]},
+                  "configured_homing_speeds_mm_s": dict(session["configured_speeds"]),
+                  "attempts": session["attempts"], "axis_results": session["axis_results"],
+                  "records": list(session["records"]), "paths": list(session["paths"]), **ending}
+        try:
+            paths = write_accuracy(self.charts_directory, session["run_id"],
+                                   session["axis_results"], result["result"], result.get("reason"))
+            result["summary_paths"] = paths
+            self._info("Accuracy report files:\n" + "\n".join(
+                "%s: %s" % (kind.upper(), path) for kind, path in paths.items()))
+        except Exception as exc:
+            logging.exception("accel_homing: unable to export accuracy summary")
+            result["chart_error"] = str(exc)
+            if result["result"] == "complete":
+                result["result"] = "aborted"
+                result["reason"] = "accuracy summary export failed: %s" % exc
+        self._info("Accuracy run %s: %s. Commanded travel is reported to 0.001 mm; "
+                   "these measurements do not certify physical stop position" % (
+                       session["run_id"], result["result"]))
+        return result
+
     def _test_xy(self):
         session = self.session
         for axis in "xy":
@@ -753,7 +1006,18 @@ class AccelHomingWorkflows:
             key: session.get(key) for key in ("mode", "state", "axis", "candidate", "successes",
                                              "candidate_qualified", "attempts", "run_id", "expires",
                                              "repeatability_spread_mm")}
-        if active is not None:
+        if session is not None and session["mode"] == "accuracy":
+            active = {key: session.get(key) for key in ("mode", "state", "axis", "attempts", "run_id")}
+            active.update(axes=list(session["axes"]),
+                          samples_requested=session["samples_requested"],
+                          sample_index=session["sample_index"],
+                          fixed_thresholds_g={axis: session["saved_thresholds"][axis]
+                                              for axis in session["axes"]},
+                          configured_homing_speeds_mm_s=dict(session["configured_speeds"]),
+                          completed_samples={axis: len(item["trials"])
+                                             for axis, item in session["axis_results"].items()},
+                          axis_results=session["axis_results"])
+        elif active is not None:
             active["repeatability_limit_mm"] = REPEATABILITY_LIMIT_MM
         return {"model": self.model_name, "manual_threshold_overrides": sorted(self.manual_axes),
                 "active": active, "last_result": self.last_result,

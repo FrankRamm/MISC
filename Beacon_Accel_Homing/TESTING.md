@@ -24,6 +24,8 @@ Focused installer/bootstrap/uninstall and workflow/homing-path checks:
 ```bash
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_installer.py -v
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_workflows.py -v
+python -m unittest discover -s Beacon_Accel_Homing/tests -p test_accuracy_workflow.py -v
+python -m unittest discover -s Beacon_Accel_Homing/tests -p test_accuracy_charts.py -v
 ```
 
 Focused motor-enable and fresh-reference fixtures, run from
@@ -41,7 +43,7 @@ failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. All three shell entry points are byte-identical to the source base
-`923a0845c74fe0e1f77e55f641ccd73095d3f356`, so their syntax checks were not repeated. No native
+`286e50ebdc6d199fd8585f042fef6eb1e99d9b39`, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -57,7 +59,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The final combined offline verification run discovered **427 tests: 426 passed,
+The final combined offline verification run discovered **453 tests: 452 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -112,7 +114,7 @@ suspect travel without automatic returns, and measured chart export. Synthetic
 chart fixtures are explicitly marked as simulated.
 
 Safe Z compatibility fixtures verify the recognized built-in handler over
-stock `G28`, including a nonzero configured `z_hop`. CALIBRATE, TEST and CHARTS
+stock `G28`, including a nonzero configured `z_hop`. CALIBRATE, TEST, CHARTS and ACCURACY
 use only the verified stock X/Y handler, with no safe Z hop or change to the
 public `G28` registration. Handler validation repeats before each trial.
 Unknown/custom wrappers, nested handler chains, mismatched registrations,
@@ -147,6 +149,46 @@ validation evidence and requiring a fresh discovery. The save-path fixtures
 also reject incomplete, reused, foreign-axis/candidate/run or malformed windows
 and recompute the range before writes. Legacy saved models remain accepted;
 their old distances do not acquire the new qualification on loading.
+
+Accuracy adds **26 tests**: **18** in `test_accuracy_workflow` and **8** in
+`test_accuracy_charts`. `ACCEL_HOMING_ACCURACY` accepts X, Y or XY (default),
+with 2–50 measured homes per axis and a default of ten. Each axis first needs
+a separate geometry-qualified discovery home from the manually confirmed
+center. That home is excluded from the measured statistics. Qualified homes
+authorize the following return to center; the final X return occurs before Y
+discovery. Suspect geometry, missing motion, stale or invalid captures and
+sensor faults stop the run without retries, threshold changes or another
+automatic return. The maximum XY case makes 102 synthetic homes independently
+of the calibration attempt limit. The workflow never stages a model, calls
+SAVE_CONFIG, changes configured homing speed or requests a Z move.
+
+Known-distance fixtures verify independent X/Y count, minimum, maximum, mean,
+max-minus-min range, population standard deviation and population variance
+(divide by the measured count). Discovery/manual centering stays excluded.
+Qualified observations remain in the report when their range is at or above
+1.5 mm; this command does not apply calibration's acceptance rule. Failed or
+cancelled runs retain completed captures and report their measured/requested
+counts as incomplete. Fewer than two measured homes leave standard deviation
+and variance unavailable. Tests cover cancellation and shutdown during waits,
+recenter/export errors and a final restoration error; none can publish a
+successful run after that failure.
+
+Each bounded raw capture is bound to its current detector attempt and source
+record. Tests reject a previous pass's baseline, reused records, nonadvancing
+arm times, multiple detector attempts, absent pre-arm samples and incomplete
+impact data. Exact detector threshold/onset/peak values survive a 0.001 g
+configured threshold; negative/permuted native sensor mappings retain the
+machine-axis sign. Capture conversion happens after trigger handling, and
+raw sample arrays are released after each trial and excluded from status.
+The aggregate CSV/SVG/HTML/JSON preserves individual measured-acceleration
+charts, signed trigger thresholds and the commanded-travel statistics.
+
+The root agent also used CUA to inspect a generated **SIMULATED / NOT PRINTER
+MEASUREMENT** complete HTML report: the statistics table was readable, its
+trial selector selected Y measurement 10, and that trace displayed the exact
+0.750001 g threshold and measured onset. This visual check is separate from
+the combined unittest run and used constructed data only. It does not validate
+hardware capture, physical centering, nozzle clearance or mechanical accuracy.
 
 Direct-command fixtures check that no separate centering-confirmation command
 is registered and no `action:prompt_*` messages are emitted during successful
@@ -184,11 +226,13 @@ existing shared/X/Y values below 3 g through initial installation and update
 in either section. The next-float fixture uses portable struct operations;
 Python 3.8 runtime compatibility was not exercised.
 
-The recorded run used CPython 3.13.5 on Windows: **427 tests in 6.837 seconds**.
-The full UTF-8 unittest output is retained in `validation/tests.txt`; subprocess
-text decoding normalized CRLF to LF before storage. The JSON report hashes the
-exact stored log and all 18 Python sources. The package inventory contains
-**33 files**, with **22 immutable bootstrap payload files**; no private user log
+The recorded run used CPython 3.13.5 on Windows: **453 tests in 7.689 seconds**
+(7.9274973 seconds subprocess wall time). The full UTF-8 unittest output is
+retained in `validation/tests.txt` as its exact binary-captured bytes, without
+newline conversion: **75,293 bytes and 458 CRLF pairs**. The JSON report hashes
+that stored log and all **20 Python sources both before and after** the run;
+the two source snapshots match. The package inventory contains **35 files**,
+with **22 immutable bootstrap payload files**; no private user log
 or raw hardware samples are included.
 
 Motor-enable and fresh-reference checks include **26 tests** in
@@ -321,16 +365,18 @@ use their planned single-pass settings after installer-owned overrides are
 removed; unselected rails keep their settings. Uninstall validates owned
 opt-in values while retaining later-edit and unrelated-setting protections.
 
-The workflow source is byte-identical to the public source base: the strict
-**max-minus-min travel <1.5 mm across ten qualified validation homes** remains
-separate for each calibrated axis. This is a repeatability rule, not an
+The calibration regression fixtures preserve the strict
+**max-minus-min travel <1.5 mm across ten qualified validation homes**, separate
+for each calibrated axis. The workflow, core capture and chart source changed
+for ACCURACY; preserved behavior is established by the regression fixtures,
+not by byte identity for those files. This is a repeatability rule, not an
 impact threshold, latency distance or physical stopping guarantee. Optional
 travel limits describe nominal command travel before a host request; their
 engineering ranges do not certify hardware safety. No current printer
 settings were changed and no private user log or raw measurements were
 included in this package.
 
-All **18 production and test Python files** listed in
+All **20 production and test Python files** listed in
 `validation/VALIDATION.json` passed Python 3.8
 grammar parsing on the current Python 3.13 host. No Python 3.8 runtime was
 executed; syntax parsing alone does not establish complete runtime compatibility.

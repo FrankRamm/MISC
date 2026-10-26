@@ -401,6 +401,8 @@ class BeaconAccelHoming:
         self.capture_samples = self.capture_dropped = 0
         self.capture_limit = 200000
         self.capture_baseline = None
+        self.capture_attempt = None
+        self.capture_attempts = 0
         self.watchdog = self.reactor.register_timer(self._watchdog)
         self.idle_timer = self.reactor.register_timer(self._idle_check)
 
@@ -1070,6 +1072,12 @@ class BeaconAccelHoming:
         with self.lock:
             self.tail = None
             self.attempt = attempt
+            if self.capture_batches is not None:
+                # Bind the capture to this detector instance, never a previous
+                # last_pass observed while an already-running sensor streams.
+                if self.capture_attempt is not attempt:
+                    self.capture_attempts += 1
+                self.capture_attempt = attempt
         self.reactor.update_timer(self.watchdog, self.reactor.NOW)
 
     def disarm(self):
@@ -1476,6 +1484,8 @@ class BeaconAccelHoming:
             self.capture_batches = []
             self.capture_samples = self.capture_dropped = 0
             self.capture_baseline = None
+            self.capture_attempt = None
+            self.capture_attempts = 0
 
     def _capture_batch(self, params):
         data = params["data"]
@@ -1491,12 +1501,6 @@ class BeaconAccelHoming:
             self.capture_batches.append((params["start_clock"], params["delta_clock"],
                                          data, self.session_scale["scale"] / 1000.0))
             self.capture_samples += count
-            attempt = self.attempt or self.last_pass
-            if self.capture_baseline is None and attempt is not None and attempt.bases is not None:
-                mapping = [self._raw_axis(a) for a in ("x", "y")]
-                mapping.append((2, 1) if self.backend is not None else self.helper.config.axes_map[2])
-                self.capture_baseline = tuple(attempt.bases[i] * sign * attempt.count_g
-                                              for i, sign in mapping)
 
     def stop_capture(self):
         """Convert bounded captured batches to machine-axis g off the trigger path.
@@ -1507,8 +1511,27 @@ class BeaconAccelHoming:
         with self.lock:
             batches, self.capture_batches = self.capture_batches or [], None
             dropped, baseline = self.capture_dropped, self.capture_baseline
+            attempt, self.capture_attempt = self.capture_attempt, None
+            attempt_count, self.capture_attempts = self.capture_attempts, 0
+            fault = self.sensor_fault
         mapping = ([(0, 1), (1, 1), (2, 1)] if self.backend is not None
                    else self.helper.config.axes_map)
+        detector = None
+        if attempt is not None and attempt.bases is not None:
+            baseline = tuple(attempt.bases[index] * sign * attempt.count_g
+                             for index, sign in mapping)
+            detector = {"axis": attempt.axis, "arm_time_s": attempt.arm_time,
+                        "onset_time_s": (self.onset_time(attempt)
+                                         if attempt.onset_batch is not None else None),
+                        "threshold_g": attempt.limit_raw * attempt.count_g,
+                        "onset_g": (attempt.onset_raw * attempt.count_g
+                                    if attempt.onset_batch is not None else None),
+                        "impact_peak_g": (attempt.impact_peak * attempt.count_g
+                                          if attempt.onset_batch is not None else None),
+                        "direction": attempt.direction or attempt.auto_direction,
+                        "homing_speed_mm_s": attempt.effective_speed,
+                        "homing_accel_mm_s2": attempt.effective_accel,
+                        "attempt_count": attempt_count}
         samples, previous = [], [0, 0, 0]
         for start_clock, delta_clock, data, count_g in batches:
             count = sample_count(data)
@@ -1526,7 +1549,11 @@ class BeaconAccelHoming:
         if baseline is None and samples:
             resting = samples[:min(50, len(samples))]
             baseline = tuple(sum(row[i] for row in resting) / len(resting) for i in (1, 2, 3))
-        return {"samples": samples, "dropped": dropped, "baseline_g": baseline}
+        return {"samples": samples, "dropped": dropped, "baseline_g": baseline, "fault": fault,
+                "detector": detector,
+                # Used only for in-process provenance; workflows remove this
+                # reference before exporting metadata or publishing status.
+                "_record": None if attempt is None else attempt.record}
 
     def _record(self, attempt):
         to_g = attempt.count_g

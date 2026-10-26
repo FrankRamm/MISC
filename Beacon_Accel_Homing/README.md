@@ -42,12 +42,12 @@ options and recovery, see [installation details](docs/INSTALLATION.md).
 
 Use an already working, firmly mounted sensor that follows each tested axis,
 with the correct `axes_map`. Check [sensor and workflow compatibility](docs/COMPATIBILITY.md).
-Calibration, TEST and CHARTS require Cartesian/CoreXY, independent Z and stock
+Calibration, TEST, CHARTS and ACCURACY require Cartesian/CoreXY, independent Z and stock
 `G28`, directly or beneath the built-in `[safe_z_home]`.
 
 ## Calibrate X, then Y
 
-Before **CALIBRATE, TEST or CHARTS**, keep the printer idle and unpaused.
+Before **CALIBRATE, TEST, CHARTS or ACCURACY**, keep the printer idle and unpaused.
 **Physically center XY by hand and leave both axes unhomed in Klipper.** Use
 your machine's XY motor controls while keeping Z supported. Ensure nozzle/bed
 clearance for XY travel: these workflows do not perform a Z hop.
@@ -62,6 +62,7 @@ the stationary preparation check.
 | `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` | Calibrate or resume Y after repeating the preparation. |
 | `ACCEL_HOMING_TEST CENTERED=1` | Test current X/Y thresholds with the same preparation. |
 | `ACCEL_HOMING_CHARTS_GENERATE CENTERED=1` | Run that test and export acceleration charts. |
+| `ACCEL_HOMING_ACCURACY AXIS=X SAMPLES=10 CENTERED=1` | Repeat X homes and export travel statistics and measured acceleration charts. |
 | `ACCEL_HOMING_STATUS` | Show thresholds, progress, results and chart paths. |
 | `ACCEL_HOMING_CANCEL` | Cancel pending calibration and restore temporary settings. |
 | `SET_ACCEL_HOMING AXIS=X THRESHOLD=0.5` | Change X temporarily until restart; use `AXIS=Y` for Y. |
@@ -82,6 +83,9 @@ preparation and calibrate Y; each axis is saved independently.
 
 TEST and CHARTS home X, return X alone to center, then home Y. Charts export
 CSV, JSON, SVG and HTML; their paths appear in the console and STATUS.
+ACCURACY uses the same preparation, excludes one qualifying home per axis,
+then measures `SAMPLES` repeats (2–50; default 10). Omit `AXIS` to test X and Y.
+It reports commanded-travel variation without tuning or saving thresholds.
 Recalibrate after changes to mounting, belts, sensor orientation, speed or current.
 
 ## Set thresholds manually
@@ -382,7 +386,7 @@ physical behavior need operator validation.
 </details>
 
 <details>
-<summary>Test results, charts and temporary thresholds</summary>
+<summary>Test results, accuracy, charts and temporary thresholds</summary>
 
 TEST and CHARTS need the same existing manual XY center, both axes unhomed
 and nozzle/bed clearance as calibration. `CENTERED=1` declares that preparation
@@ -391,9 +395,36 @@ XY release or a separate confirmation and never request a Z move. Both axes
 must use suitable accelerometer endstops. A suspect home aborts without an
 automatic return.
 
+`ACCEL_HOMING_ACCURACY AXIS=X SAMPLES=10 CENTERED=1` uses the same preparation.
+`AXIS=X` or `AXIS=Y` tests that installed axis; omitting `AXIS` tests X then Y.
+It first qualifies a home, excludes it from statistics, returns that trusted
+axis to center and records the requested number of additional homes. Each
+accepted home is followed by a return of that axis to center only when another
+home or axis is needed. Thresholds, homing speed and current remain unchanged;
+the command neither stages a model nor saves configuration or restarts Klipper.
+A suspect home aborts without another automatic move. Use the accessible
+emergency stop if active movement must be interrupted; `ACCEL_HOMING_CANCEL`
+is not an immediate emergency stop for a running console command.
+
+The accuracy report includes each home's commanded travel, measured onset and
+peak in g, actual configured trigger threshold, and min/max/mean/range, population
+standard deviation (mm) and population variance (mm²). Range is maximum minus
+minimum; variance divides the squared deviations from the mean by N. A partial
+run is explicitly incomplete; fewer than two measured homes have no reported
+standard deviation or variance. The qualifying home is always excluded.
+Travel is the firmware's commanded step distance, recorded to **0.001 mm**,
+not an encoder measurement of physical stop position. These statistics describe
+variation across those repeated commands; they do not prove absolute accuracy,
+absence of skipped steps, or calibration qualification for any sample count.
+The HTML opens with a travel chart and statistics, then lets you select each
+home's embedded X/Y/Z acceleration trace. CSV and JSON retain the individual
+values and references to the complete per-home captures.
+
 The console reports acceleration at impact detection, its measured peak in g
 and commanded travel. Charts show X/Y/Z acceleration relative to the stationary
-baseline, threshold and impact marker when available. Outputs include
+baseline, configured trigger threshold and detected onset marker when available.
+That threshold is the value used by the detector, not a newly calibrated minimum
+g requirement. The measured onset and peak can differ from it. Outputs include
 full-resolution CSV, metadata JSON and ready-to-open SVG/HTML without plotting
 tools to install. The default `accel_homing_charts/` directory is beside the
 main `printer.cfg`; `charts_directory` changes it. See the
