@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for 1 g calibration and automatic host-service activation",
-  "timestamp_utc": "2026-10-26T13:25:44.290374+00:00",
-  "source_base_commit": "0c8496a45163bf3fd88d656e9b12af013c76211f",
+  "stage": "completed offline validation for 0.5 g calibration and saved models",
+  "timestamp_utc": "2026-10-26T13:57:47.504660+00:00",
+  "source_base_commit": "4094a0fdfa641ebd91f667717a46a176ae6cf1f0",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 308,
-  "passed": 307,
+  "tests_run": 309,
+  "passed": 308,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,7 +14,7 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 4.541,
+  "elapsed_seconds": 4.809,
   "test_returncode": 0,
   "installer_tests": 92,
   "workflow_tests": 61,
@@ -22,14 +22,14 @@
     "test_backends": 48,
     "test_installer": 92,
     "test_motion_policy": 10,
-    "test_session": 52,
+    "test_session": 53,
     "test_single_touch": 16,
     "test_trigger": 29,
     "test_workflows": 61
   },
   "preparation_fixture_tests": {
     "test_backends.GenericPreparationTest": 6,
-    "test_session.EnablePreparationTest": 13
+    "test_session.EnablePreparationTest": 14
   },
   "printer_connections": false,
   "hardware_testing": false,
@@ -45,47 +45,69 @@
     {
       "file": "install.sh",
       "matches_source_base": true,
-      "line_endings_normalized": false
+      "line_endings_normalized": false,
+      "sha256": "29a0f52e3c89deb0102bd5275f8aaa5b66dcb5af14f52405f20f1622fb914bc3",
+      "source_base_sha256": "29a0f52e3c89deb0102bd5275f8aaa5b66dcb5af14f52405f20f1622fb914bc3"
     },
     {
       "file": "bootstrap.sh",
       "matches_source_base": true,
-      "line_endings_normalized": false
+      "line_endings_normalized": false,
+      "sha256": "df7e8cfacea26b5ab10a905a2499123fc70e86756840a7dcc1a175d92a2ca170",
+      "source_base_sha256": "df7e8cfacea26b5ab10a905a2499123fc70e86756840a7dcc1a175d92a2ca170"
     },
     {
       "file": "uninstall.sh",
       "matches_source_base": true,
-      "line_endings_normalized": false
+      "line_endings_normalized": false,
+      "sha256": "8e4695af7cb8bf35c8d5b89fa239b69622699d5f2b4a219fa3f59fde0e0f2fbe",
+      "source_base_sha256": "8e4695af7cb8bf35c8d5b89fa239b69622699d5f2b4a219fa3f59fde0e0f2fbe"
     }
   ],
   "python_38_grammar_checks": {
     "files": [
+      "accel_homing.py",
+      "accel_homing_backends.py",
+      "accel_homing_charts.py",
       "accel_homing_model.py",
       "accel_homing_workflows.py",
+      "beacon_accel_homing.py",
+      "bootstrap.py",
       "installer.py",
+      "tests/harness.py",
+      "tests/test_backends.py",
       "tests/test_installer.py",
+      "tests/test_motion_policy.py",
       "tests/test_session.py",
       "tests/test_single_touch.py",
       "tests/test_trigger.py",
-      "tests/test_workflows.py"
+      "tests/test_workflows.py",
+      "uninstaller.py"
     ],
-    "line_ending_only_files": [
-      "tests/test_single_touch.py",
-      "tests/test_trigger.py"
-    ],
+    "scope": "All production and test Python files in the package",
+    "line_ending_only_files": [],
     "passed": true,
     "errors": [],
     "actual_python_38_runtime_tested": false
   },
   "validated_python_sha256": {
-    "accel_homing_model.py": "ae5d816868787dc303b783bb302a07efd32b08f3baad4f6acc3e849ceb6afa46",
-    "accel_homing_workflows.py": "275e846dc732409c954897a623aa8e2ee67507da5cb32f33b7cb25b55d6276b1",
+    "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
+    "accel_homing_backends.py": "ce22a0a59c6a05f3d7954e853c2dcd17bf0b3b51cb1e9e78efa944878824f536",
+    "accel_homing_charts.py": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
+    "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
+    "accel_homing_workflows.py": "cb215ff2f4e81a43a0d3b09010ca25e941429ab4e135ffd9826dab0f6896872b",
+    "beacon_accel_homing.py": "c8d1d4ba9fd545b8950211f66d82f9de01fc5d465dd3dc944c09eb9fa14979bd",
+    "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
     "installer.py": "2d6aec46b1cea15c66ba80f8a3f48e01c90a5e560b8fa1dae7ad70007d1b41e3",
+    "tests/harness.py": "7a418b30ef79060a8f74251ec9b69721e6afbefcbc3404f7d05d06a271534e18",
+    "tests/test_backends.py": "2719a148fe1da5f283409b6a3ba26976e5d5352a7b296d79b771576c2cc94e30",
     "tests/test_installer.py": "16d826fab9e0ee54c4d747607be2314d0cd2734b71e7013cf692c2631a71c441",
-    "tests/test_session.py": "6b430edf1506b7a84c8da28316d37860a75585ac85fbcfe3022ecb548da84d5b",
+    "tests/test_motion_policy.py": "5a9fa4cd4497c739bd5a757be506a67afeefa235f03c456c020ac2bc457bf763",
+    "tests/test_session.py": "eb4173a267895bf2eba87993a8190d690de978ffe0067c6d16dd0989bf1a36fd",
     "tests/test_single_touch.py": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
     "tests/test_trigger.py": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
-    "tests/test_workflows.py": "915e3044bfe27c455d7611791a47a62a5a2381f93455dd78a4fcd22658f50778"
+    "tests/test_workflows.py": "188f69ea6248795144cba3f3a7377caf30f6788cc640579447b5cf27013cab48",
+    "uninstaller.py": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23"
   },
   "native_linux_integration_tested": false,
   "upstream_klipper_kalico_runtime_integration_tested": false,
@@ -105,25 +127,36 @@
     "Automatic host-service activation uses mocked process/systemd/privilege fixtures; no real service restart or live Python module reload was performed.",
     "The postrestart process check does not prove Klipper Ready state, module behavior, or hardware correctness; the final idle check cannot atomically lock other clients out."
   ],
-  "git_diff_check_base": "0c8496a45163bf3fd88d656e9b12af013c76211f",
+  "git_diff_check_base": "4094a0fdfa641ebd91f667717a46a176ae6cf1f0",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
-  "process_elapsed_seconds": 5.522,
-  "previous_validation_timestamp_utc": "2026-10-26T12:55:16.209072+00:00",
-  "validation_reason": "Final combined run after reviewer clearance for 1 g calibration/model acceptance and automatic selected-host-service activation.",
+  "previous_validation_timestamp_utc": "2026-10-26T13:25:44.290374+00:00",
+  "validation_reason": "Final combined run after reviewer clearance for the 0.5 g calibration start and saved-model floor; save policy, repeat-validation algorithm and automatic selected-host-service activation are unchanged.",
   "host_service_restart_tested": false,
   "live_python_module_reload_tested": false,
   "automatic_restart_fixture_tests": 15,
-  "calibration_start_default_g": 1.0,
-  "calibration_start_minimum_g": 1.0,
-  "calibration_first_retry_default_g": 1.5,
-  "saved_model_minimum_g": 1.0,
+  "calibration_start_default_g": 0.5,
+  "calibration_start_minimum_g": 0.5,
+  "calibration_first_retry_default_g": 1.0,
+  "saved_model_minimum_g": 0.5,
   "manual_threshold_range_g": [
     3.0,
     15.0
-  ]
+  ],
+  "test_log_sha256": "c7b0ebf92620bc50d672cd62cac4e9453ad231196f14b5be75fe05765c63bf7c",
+  "suite_completed_utc": "2026-10-26T13:56:20.146317+00:00",
+  "additional_unchanged_file_content_checks": [
+    {
+      "file": "uninstaller.py",
+      "matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23",
+      "source_base_sha256": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23"
+    }
+  ],
+  "quiet_reference_peak_to_peak_limit_default_g": 0.1
 }

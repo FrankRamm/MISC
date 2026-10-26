@@ -171,8 +171,9 @@ test_threshold_above_sensor_range_is_rejected (test_session.ConnectChecksTest.te
 test_all_axes_noise_and_absent_data_abort_before_dispatch (test_session.EnablePreparationTest.test_all_axes_noise_and_absent_data_abort_before_dispatch) ... ok
 test_already_enabled_corexy_and_partly_enabled_keep_quiet_gate (test_session.EnablePreparationTest.test_already_enabled_corexy_and_partly_enabled_keep_quiet_gate) ... ok
 test_beacon_reference_uses_sensor_clock_conversion_and_wrap_epoch (test_session.EnablePreparationTest.test_beacon_reference_uses_sensor_clock_conversion_and_wrap_epoch) ... ok
-test_corexy_enable_settle_really_completes_before_fresh_1g_trial (test_session.EnablePreparationTest.test_corexy_enable_settle_really_completes_before_fresh_1g_trial) ... ok
+test_corexy_enable_settle_really_completes_before_fresh_0_5g_trial (test_session.EnablePreparationTest.test_corexy_enable_settle_really_completes_before_fresh_0_5g_trial) ... ok
 test_enable_settle_setting_is_finite_bounded_and_optional (test_session.EnablePreparationTest.test_enable_settle_setting_is_finite_bounded_and_optional) ... ok
+test_half_g_candidate_keeps_point_one_g_all_axis_quiet_limit (test_session.EnablePreparationTest.test_half_g_candidate_keeps_point_one_g_all_axis_quiet_limit) ... ok
 test_invalid_reference_streams_abort_before_dispatch (test_session.EnablePreparationTest.test_invalid_reference_streams_abort_before_dispatch) ... ok
 test_long_baseline_does_not_depend_on_recent_batch_capacity (test_session.EnablePreparationTest.test_long_baseline_does_not_depend_on_recent_batch_capacity) ... ok
 test_long_queued_settle_does_not_trigger_idle_cleanup (test_session.EnablePreparationTest.test_long_queued_settle_does_not_trigger_idle_cleanup) ... ok
@@ -308,6 +309,6 @@ test_separate_confirmation_command_and_method_are_removed (test_workflows.TestAn
 test_suspect_xy_results_finalize_rejection_without_more_homes_or_model_saving (test_workflows.TestAndChartWorkflowTests.test_suspect_xy_results_finalize_rejection_without_more_homes_or_model_saving) ... ok
 
 ----------------------------------------------------------------------
-Ran 308 tests in 4.541s
+Ran 309 tests in 4.809s
 
 OK (skipped=1)
