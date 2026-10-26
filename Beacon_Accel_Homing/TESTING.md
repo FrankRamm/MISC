@@ -43,7 +43,7 @@ failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. All three shell entry points are byte-identical to the source base
-`286e50ebdc6d199fd8585f042fef6eb1e99d9b39`, so their syntax checks were not repeated. No native
+`3940fa06c71431103371eb24512b147c2df511b4`, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -59,7 +59,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The final combined offline verification run discovered **453 tests: 452 passed,
+The final combined offline verification run discovered **468 tests: 467 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -226,12 +226,14 @@ existing shared/X/Y values below 3 g through initial installation and update
 in either section. The next-float fixture uses portable struct operations;
 Python 3.8 runtime compatibility was not exercised.
 
-The recorded run used CPython 3.13.5 on Windows: **453 tests in 7.689 seconds**
-(7.9274973 seconds subprocess wall time). The full UTF-8 unittest output is
+The recorded run used CPython 3.13.5 on Windows: **468 tests in 8.636 seconds**
+(8.8765742 seconds subprocess wall time). The full UTF-8 unittest output is
 retained in `validation/tests.txt` as its exact binary-captured bytes, without
-newline conversion: **75,293 bytes and 458 CRLF pairs**. The JSON report hashes
+newline conversion: **78,305 bytes and 473 CRLF pairs**. The JSON report hashes
 that stored log and all **20 Python sources both before and after** the run;
-the two source snapshots match. The package inventory contains **35 files**,
+the two source snapshots match. All **35 package files** were also identical
+between the snapshots taken during the suite; this summary, the new log and
+the validation report were written afterward. The package inventory contains **35 files**,
 with **22 immutable bootstrap payload files**; no private user log
 or raw hardware samples are included.
 
@@ -264,10 +266,46 @@ Configured baseline-floor checks add **13 tests** in
 `baseline_noise_floor` accepts 0–0.2 g and defaults to 0.2 g for configured
 batch backends. Their effective quiet limit is the larger of that floor and
 20% of the active impact threshold. A zero floor restores the prior rule;
-thresholds at least 1 g retain their prior limit. Native Beacon keeps its
-original 20% gate and raw moving/pressed-start decisions, including the 0.1 g
-quiet limit at a 0.5 g candidate. The configured floor does not raise the
-impact threshold or reduce the required sample count, duration or freshness.
+thresholds at least 1 g retain their prior limit. Native Beacon independently
+uses `max(0.20 * threshold, min(0.5 g, threshold))`; the generic setting does
+not control it. At a 0.5 g candidate, native preparation accepts at most
+0.5 g peak-to-peak variation on every sensor axis while the actual impact
+threshold remains 0.5 g. Neither policy reduces the required reference
+sample count, duration or freshness.
+
+**15 tests** in `test_motion_policy.NativeExpandedReferenceTests` use constructed native
+Beacon samples with X/Y/Z peak-to-peak ranges of approximately
+0.367/0.430/0.422 g. Those values are regression inputs based on a reported
+summary, not a replay of raw printer data or a new measurement. The fixtures
+check reference admission at 0.5 g, the cap at lower manual thresholds,
+all-axis rejection above the floor, balanced/biased/asymmetric parked noise,
+and motion/contact behavior across X/Y directions and batch/watchdog phases.
+Movement uses conservative lower velocity bounds; a retained early peak must
+reach half the full effective speed and still needs the later commanded
+history. Pressed detection uses the current upper bound, so ambiguous
+low-acceleration evidence fails with `no_motion`.
+
+Additional cases retain valid motion across sensor-clock wrap, reject an
+exact-end duplicate across that wrap, and reject nonfinite derived deadlines
+before arming. A changing parked bias cannot select an impact direction or
+hide either first-contact sign. A sufficiently small current upper bound
+still allows a justified expanded-reference pressed start after the usual
+two distinct checks; the wider-noise parked fixtures remain `no_motion`.
+
+The full 75 mm/s, 5000 mm/s² ramp fixtures use a 1 g detector threshold to
+observe motion without the ramp itself exceeding the trigger. A separate
+0.5 g fixture verifies that real startup acceleration above 0.5 g still
+triggers immediately and is rejected by workflow qualification. Increasing
+quiet admission does not make a 0.5 g candidate qualify at every acceleration.
+Both first-contact directions remain eligible, including a single retained
+post-arm sample after an old pre-arm transient. Expanded-native stale,
+future, duplicate, reversed, zero-interval and nonfinite packets are refused;
+gaps before motion proof cannot establish it, and frozen startup traces fail
+closed. Their finite startup
+calculation is 90 ms at 75 mm/s, 5000 mm/s² and a 50 ms native stream timeout,
+bounded also by the existing travel deadline. These are synthetic software
+requests, not measured stopping latency or a hardware guarantee. Quiet native
+references retain the legacy pressed-start and stream watchdog path.
 
 For a configured reference whose actual accepted variation exceeds the old
 20% gate, movement proof uses a conservative lower bound. Each axis freezes
@@ -305,7 +343,7 @@ do not certify hardware noise, physical contact or stopping distance.
 
 These fixtures advance fake host/print/sensor clocks and check ordering before
 trigger dispatch is armed. They do not measure mechanical settling, qualify
-the configured floor or native 20% rule on hardware, or prevent a driver's
+the configured floor or native bounded floor on hardware, or prevent a driver's
 first-step hold-to-run current transient. No physical homing or motor-current measurement was made.
 The 0.5 g starting value does not establish a physical fix for skipped steps
 or inconsistent homing. Commanded/firmware step travel is not an encoder
@@ -314,7 +352,7 @@ less-than-1.5 mm validation range check do not establish precise physical
 repeatability, correct-stop contact or absence of skipped steps.
 
 `test_motion_policy.py` adds offline coverage for relative motion proof at low
-speeds, preservation of legacy Beacon pressed-start behavior, generic
+speeds, preservation of quiet native Beacon pressed-start behavior, generic
 `no_motion` failures, startup deadline/budget calculations, and rejection of
 plans above an explicitly configured 3 mm nominal limit before enabling/backoff.
 Additional fixtures cover read-only requested-axis preflight from an unhomed

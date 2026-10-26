@@ -287,15 +287,28 @@ any settling delay after enabling motors, then collects a new sensor reference.
 setting it to zero keeps the quiet-data check.
 
 The reference needs at least 50 fresh contiguous samples spanning
-`baseline_time` (0.1 s by default). Native Beacon keeps its existing limit:
-peak-to-peak variation on every sensor axis at most 20% of that pass's impact
-threshold. Configured generic accelerometers, including Cartographer's
-separate ADXL/LIS sensor, use `max(0.20 * threshold, baseline_noise_floor)`.
+`baseline_time` (0.1 s by default). Native Beacon permits peak-to-peak
+variation on every sensor axis up to
+`max(0.20 * threshold, min(0.5 g, threshold))`. The 0.5 g floor allows a 0.5 g
+calibration candidate to acquire its reference; lower manual thresholds also
+cap that floor. It is not a configuration option and does not raise the
+impact threshold.
+Configured generic accelerometers, including Cartographer's separate ADXL/LIS
+sensor, use `max(0.20 * threshold, baseline_noise_floor)`.
 `baseline_noise_floor` defaults to **0.2 g** and accepts finite values from
 **0 to 0.2 g**; zero restores the previous 20% rule. With a 0.5 g calibration
 candidate, the default quiet limit is 0.2 g while the impact threshold remains
-0.5 g. This setting does not affect native Beacon's quietness, already-pressed
-or motion behavior.
+0.5 g. This setting does not affect native Beacon.
+
+When a native Beacon reference exceeds the original 20% limit, movement
+proof discounts the observed stationary-noise envelope. Already-pressed
+detection uses the current upper velocity bound; ambiguous evidence fails
+with `no_motion` by a calculated startup deadline. It does not count as a
+successful pressed start. References within the old limit retain the legacy
+path. Neither path changes raw impact detection or introduces a blind
+interval. These policies have synthetic validation only; they do not prove
+physical contact or stopping distance. See
+[native Beacon motion checks](docs/COMPATIBILITY.md#native-beacon-with-an-expanded-reference).
 
 Acquisition is limited to `baseline_time + 0.5 s` after setup completes.
 Earlier buffered data cannot qualify. Data faults abort; persistent noise or
@@ -323,7 +336,8 @@ installation preserves any finite positive configured `homing_speed`, including
 75 or 100 mm/s, without adding distance caps. Only an explicit installer
 `--homing-speed N` requests a speed edit. Normal toolhead velocity and
 acceleration limits still apply; acceleration is never raised automatically.
-Beacon retains its existing speed and already-pressed behavior.
+Native Beacon keeps configured speeds; its expanded-reference checks are
+described above.
 
 `max_report_travel` and `max_startup_travel` are independent optional limits,
 disabled when absent. An existing explicit value stays active. The installer
