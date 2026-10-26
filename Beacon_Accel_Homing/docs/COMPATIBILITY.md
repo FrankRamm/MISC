@@ -38,10 +38,14 @@ scheduling and cannot guarantee a hard end-to-end stop latency.
 
 ## Loading code and configuration
 
-After installing, updating, uninstalling or rolling back Python code/module
-links, manually restart the selected Klipper host process while idle. Use the
-actual service and restart command printed by the installer, or the correct
-host process manager when no service was detected. No restart is automatic.
+Installing or updating Python code/module links automatically restarts the
+verified systemd service for the selected Klipper instance, after successful
+installation and a fresh identity/idle check. The installer obtains any
+needed sudo privilege before writing files. `--no-restart` opts out; use it
+for a service manager the installer cannot verify and restart that host
+process manually while idle. Full uninstall and explicit rollback also leave
+the host-process restart to the operator. See
+[the activation contract](INSTALLATION.md#automatic-host-service-restart).
 
 Console `RESTART` and `FIRMWARE_RESTART` recreate printer objects within the
 same Python process. Extras use normal cached imports, so those commands do
@@ -134,7 +138,12 @@ measurement. The workflow does not assign a center coordinate or mark either
 axis homed before the actual home. No further confirmation is requested; the
 first homing pass starts after stationary preparation succeeds.
 
-The first home tests the candidate threshold, starting at 2 g by default.
+The first home tests the candidate threshold, starting at 1 g by default.
+Calibration and saved models accept finite thresholds from 1 to 15 g, with
+the configured calibration ceiling and sensor-range limit still applied.
+The default step stays 0.5 g, so the first early-trigger retry uses 1.5 g.
+Previous models at 2 g or above remain valid; manual threshold settings and
+temporary SET commands retain their 3–15 g range.
 One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
 An early trigger raises the candidate, resets validation progress, releases

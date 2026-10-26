@@ -11,7 +11,10 @@ required before contribution upstream. This is not an endorsed upstream release.
 
 Prerequisites: the existing Linux Klipper service user, Python 3.8+, `bash`, `curl`,
 an installed Klipper/Kalico/compatible checkout, and an already
-configured supported accelerometer. No Git checkout or sudo is required.
+configured supported accelerometer. The default activation also requires a
+verifiable systemd service and permission to restart it; the installer requests
+your sudo password when needed. Run the command as the service user, without
+prefixing the complete installation with `sudo`. No Git checkout is required.
 
 Run this single line as that service user on the Linux printer host:
 
@@ -30,17 +33,74 @@ aborts before plugin/config installation.
 
 The installer activates the plugin section and X/Y endstops, not just plugin
 links. It still refuses ambiguous hosts, accelerometers and unsafe/custom
-homing configuration until explicitly resolved. Review the resulting config
-and mounting, then **restart the selected Klipper host process yourself while
-idle**. Run the host command printed by the installer, using its exact service
-name. If no service was detected, use that instance's actual host service
-manager. The installer does not restart Klipper or start homing/calibration.
+homing configuration until explicitly resolved. After installation succeeds,
+it rechecks the selected instance and **automatically restarts its verified
+systemd service**. It does not start homing or calibration. Review the resulting
+config and mounting before either.
 
 Console `RESTART` and `FIRMWARE_RESTART` do not reload already imported Python
 modules. A real host-process restart is required after installing/updating
 code or changing module links. Later configuration-only threshold edits can
 use console `RESTART`; normal calibration `SAVE_CONFIG` also remains unchanged.
 See [the source evidence](COMPATIBILITY.md#loading-code-and-configuration).
+
+## Automatic host-service restart
+
+The installer restarts the selected instance's exact verified systemd unit;
+it does not assume a service named `klipper.service`. It checks the loaded
+unit and effective `ExecStart` against the selected checkout, main config,
+API socket and any running process. For running instances, it also verifies
+the main process identity. Environment-based units can use that live process
+as evidence without executing or interpreting their environment files.
+Automatic restart supports the system manager; user systemd managers require
+`--no-restart` and manual activation.
+
+An unknown service manager, unverifiable unit/process or unavailable restart
+permission fails before installation writes. The installer obtains any needed
+sudo privilege before the initial idle check and file changes, with at most
+60 seconds for authorization. It then runs the service restart noninteractively
+with a 45-second timeout. Read-only service and privilege probes have five-second
+timeouts. The installation command itself does not need to run as root.
+
+After a successful transaction, the installer repeats unit/process identity
+and, for a running instance, read-only printer idle/pause checks immediately
+before restart. Once the
+service restart completes, it verifies a new active Klipper process matching
+the selected instance. This is a full host-process restart, which loads changed
+Python modules. It is separate from calibration's normal `SAVE_CONFIG` restart.
+The process check does not establish that Klipper reached Ready, that a module
+works correctly, or that hardware behavior is correct.
+These checks cannot atomically prevent another client from starting work after
+the last idle response; keep the printer idle throughout installation.
+
+A stopped selected service can be started by the default restart when its
+effective `ExecStart` literally identifies the same checkout, config and API
+socket. Stopped environment-based or wrapped commands cannot supply live
+process identity and need `--no-restart`.
+
+To install without restarting or starting the service:
+
+```bash
+bash /path/to/Beacon_Accel_Homing/install.sh --no-restart
+```
+
+For a hosted installation, append `--no-restart` to the final `bash "$t"`
+invocation in the download command. After reviewing the result, restart the
+selected host process yourself while idle, using the printed service command
+or that instance's actual process manager. An unsupported manager requires
+this option. Dry runs, full uninstall and explicit rollback never restart or
+start the service automatically.
+
+Installing the same unchanged package/config creates no managed config/link
+edits or new transaction backup, but still restarts the verified service by
+default so code activation does not depend on whether files needed changing.
+Its activation receipt is updated. `--no-restart` skips that activation too.
+If activation fails after installation, the installed files and transaction
+backup remain available and the command returns a failure. The separate
+`activation.json` beside the backup (or `.accel_homing_activation.json` when
+there is no backup) records the activation result without changing transaction
+history hashes. A failed activation is not a successful deployment; review the
+reported failure before retrying or rolling back.
 
 Sources remain under
 `~/.local/share/accel-homing/FrankRamm--MISC-<full-commit-SHA>/`, with the exact
@@ -75,8 +135,9 @@ bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --re
 to the verified new source. Keep all source directories and transaction backups
 for rollback. Without this option, a different existing link target is refused
 before any installation writes; a completed download alone does not update
-the installed plugin. Then review the changes and manually restart the
-selected host process while idle, using the printed service command.
+the installed plugin. A successful update automatically restarts the verified
+selected service after the same fresh idle and identity checks as installation.
+Append `--no-restart` to defer that activation to a manual host-process restart.
 
 For a pinned update, use the same reviewed full commit SHA in the download URL
 and `--ref`, retaining `--replace-existing-links`; see
@@ -105,7 +166,11 @@ bash /path/to/Beacon_Accel_Homing/install.sh --klipper-path "$HOME/kalico" --con
 ```
 
 Only the full existing sensor section is selected. Suffix case is preserved.
-If a live process does not expose `-a`, add `--klippy-socket /actual/klippy_uds`.
+`--klippy-socket /actual/klippy_uds` can supply a known selected-instance
+socket for read-only idle checks. Automatic restart additionally requires that
+socket to match the verified service/process arguments; the override cannot
+replace that identity evidence. If a running process does not expose `-a`,
+use `--no-restart` with the known socket and activate the host process manually.
 The socket's `info.config_file` and available checkout identity must match the
 selected target before its idle evidence is accepted. Another idle printer's
 socket cannot authorize changes to the selected instance.
@@ -120,7 +185,8 @@ unit files, then common stopped-host paths. Units requiring unresolved
 environment variables, systemd specifiers or drop-ins are not guessed from the
 base file: use a readable running command, or stop and resolve the instance
 explicitly. More than one matching checkout/config/service or accelerometer
-causes an actionable error. No service is started by the installer.
+causes an actionable error. The default activation can start a stopped verified
+systemd service; `--no-restart` leaves it stopped.
 
 Discovery cannot prove that no other instance uses a checkout. Custom stopped
 instances outside the recognized paths, unreadable service definitions and
@@ -129,9 +195,10 @@ those host-specific instances when a checkout is shared.
 
 When running, Klipper must report ready, `idle_timeout` Ready/Idle, no active
 print and no pause. If the selected API is inaccessible, its identity is
-unknown, or status is unsafe, installation aborts. Stop the selected instance
-yourself and retry if offline repair is necessary. The installer never stops
-or restarts it for you.
+unknown, or status is unsafe, installation aborts. For offline repair, stop the
+selected instance yourself and use `--no-restart` to keep it stopped while
+reviewing the result. The installer does not stop an active print or override
+an unsafe status to complete installation.
 
 ## Changes and conflicts
 
@@ -193,12 +260,18 @@ ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
 ```
 
 `CENTERED=1` states that the toolhead is already physically centered and
-authorizes the first candidate home, starting at 2 g by default. It does not
+authorizes the first candidate home, starting at 1 g by default. It does not
 measure the manual position. After an early trigger, XY is released and made
 unhomed; center it manually again and reissue the same calibration command to
 resume, keeping the same `AXIS` and optional `SAVE_CONFIG` value. The console
 reports manual-recentering instructions; the pending calibration retains its
-configured timeout.
+configured timeout. The default 0.5 g step makes the first retry 1.5 g.
+Calibration and saved models accept finite values from 1 g; existing models
+at 2 g or above remain valid. Manual threshold settings and temporary SET
+commands retain their 3–15 g range. An explicit existing
+`calibration_start_threshold` is preserved; set it to `1` or leave it absent
+to use the new default. Updating does not replace a saved model's threshold;
+run calibration to create a new one.
 
 TEST and CHARTS require the same existing manual XY center, both axes unhomed
 and nozzle/bed clearance. Start them directly with
@@ -331,12 +404,14 @@ their original settings, but unrecorded saved-model ownership needs manual
 review. The uninstaller cannot reconstruct information that was never backed
 up.
 
-A second install of the same package/config makes no further edits or backups.
-An installer never changes firmware, wiring or physical geometry. After install,
-update, uninstall or rollback that changes code/module links, review the result
-and manually restart the selected Klipper host process while idle. Restoring
-old module links also requires a real process restart; console `RESTART` does
-not reload the previous Python implementation.
+A second install of the same package/config makes no further managed
+config/link edits or transaction backups, but repeats default service
+activation and updates its receipt. `--no-restart` records the opt-out without
+restarting the service.
+An installer never changes firmware, wiring or physical geometry. Full uninstall
+and explicit rollback require a manual restart of the selected host process
+while idle. Restoring old module links also requires a real process restart;
+console `RESTART` does not reload the previous Python implementation.
 
 ## Pin a specific published commit
 
@@ -352,7 +427,9 @@ For an existing installation, append `--replace-existing-links` to that final
 `bash "$t"` command after reviewing the selected release, as in the update
 command above. This option preserves the old targets in the transaction backup.
 
-No Git dependency, automatic update manager, service restart or motion is added.
+No Git dependency, automatic update manager or motion is added. Installation
+and updates use the automatic host-service restart described above unless
+`--no-restart` is selected.
 
 The offline download fixtures in `tests/test_installer.py` verify branch
 resolution, complete downloads, integrity checks, retained credits and
