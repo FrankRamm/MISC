@@ -134,18 +134,28 @@ or restarts it for you.
   sensor drivers and an unincluded pre-existing `accel_homing.cfg` fail before
   config writes. Unsupported config structure requires manual resolution.
 
-`[homing_override]`, `[safe_z_home]` or a `G28` macro require manual review.
-After adapting their behavior you can explicitly acknowledge that review with
-`--acknowledge-homing-override`; this is not automatic validation. The supervised
-calibration/test/chart commands still reject a wrapped `G28` because even an
-X-only invocation can cause Z movement. Resolve those wrappers to use workflows.
+Standard Klipper/Kalico `[safe_z_home]` is accepted without an acknowledgement
+flag. Its section and existing probe/Z settings are preserved. This includes
+Cartographer configurations that use the built-in safe Z homing path.
+Calibration/test/chart workflows verify the active built-in handler and its
+underlying stock `G28`, then call that stock handler for X or Y only so the
+wrapper's `z_hop` is not invoked. Normal `G28` continues through the existing
+safe Z handler. See [the source contract](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
+
+`[homing_override]` and `G28` macros still require manual review before
+installation. After adapting their behavior you can explicitly acknowledge
+that review with `--acknowledge-homing-override`; this does not validate a
+custom path. Workflows still reject these paths and unknown wrapper chains,
+including a custom handler beneath or above `safe_z_home`.
 
 ## Prepare calibration after restarting
 
 Before the first calibration command, use the XY motor controls appropriate
 for your machine and physically center the toolhead by hand in both X and Y,
-keeping Z supported. Both XY axes must be unhomed in Klipper. Do not run a
-preparatory home or assign coordinates to mark either axis homed.
+keeping Z supported. Ensure nozzle/bed clearance for XY travel before
+CALIBRATE, TEST or CHARTS; those workflows do not perform the safe Z hop.
+Both XY axes must be unhomed in Klipper. Do not run a preparatory home or
+assign coordinates to mark either axis homed.
 
 Then run in the printer console:
 

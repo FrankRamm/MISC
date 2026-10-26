@@ -20,6 +20,7 @@ Source contracts inspected for this work:
 | [Kalico](https://github.com/KalicoCrew/kalico/tree/0057b6a153170807e99080360c1ef15a2078f672) | `0057b6a153170807e99080360c1ef15a2078f672`: corresponding MCU, bulk sensor and ADXL interfaces |
 | [Beacon](https://github.com/beacon3d/beacon_klipper/blob/3eb0134607664734ccf5cd94cb51840e1c8b27b3/beacon.py) | `3eb0134607664734ccf5cd94cb51840e1c8b27b3`: raw accelerator helper, scale and axes map |
 | [Cartographer configuration](https://github.com/Cartographer3D/docs/blob/2e7c69641fb106cf9c59d70f3987008a1117c887/cartographer-probe/installation-and-setup/installation/klipper-configuation.md) | Separate configured `[adxl345]` or `[lis2dw]` object through its MCU; scanner distance data is not substituted for acceleration |
+| [Klipper safe_z_home](https://github.com/Klipper3d/klipper/blob/ee2c6fb6b00b2b5d097ef70d0868df7d74943b51/klippy/extras/safe_z_home.py), [Kalico safe_z_home](https://github.com/KalicoCrew/kalico/blob/0057b6a153170807e99080360c1ef15a2078f672/klippy/extras/safe_z_home.py) | Built-in `SafeZHoming.cmd_G28` retains the previous handler as `prev_G28`; configured `z_hop` runs before axis selection |
 
 These revisions establish API assumptions, not a promise that only those
 revisions run or that later versions remain compatible. Standard generic
@@ -34,6 +35,35 @@ error-incremented, unchanged/frozen, malformed or saturated data. It restores
 the previous reporting interval on completion/failure. Beacon retains its
 direct raw path and existing trigger dispatch. Both rely on host/transport
 scheduling and cannot guarantee a hard end-to-end stop latency.
+
+## safe_z_home and X/Y-only workflows
+
+The standard Klipper/Kalico `[safe_z_home]` is supported without the installer's
+`--acknowledge-homing-override` flag. Cartographer's
+[Klipper setup guide](https://docs.cartographer3d.com/cartographer-probe/installation-and-setup/software-configuration/klipper-setup)
+recommends this built-in path for homing Z at a suitable bed position.
+The installer preserves the section and probe/Z settings.
+
+Even `G28 X` sent to the standard safe Z handler can run its configured
+`z_hop` before checking which axes were requested. CALIBRATE, TEST and CHARTS
+therefore verify that the active `G28` is either stock or the recognized
+built-in `SafeZHoming.cmd_G28` whose `prev_G28` is stock. They call the verified
+stock handler directly for the requested X or Y axis only, rechecking the path
+before every trial. Both active and ready G28 registrations must agree.
+This bypass is limited to workflow homes; it neither replaces the registered
+`G28` command nor changes normal safe Z homing, Cartographer probing, saved Z
+data or the wrapper's settings. Ordinary `G28 X/Y` retains any configured safe
+Z hop.
+
+`homing_override`, G28 macros, unrecognized/replaced handlers and chains with
+a custom handler above or below `safe_z_home` remain unsupported by workflows.
+Validation fails before the affected homing attempt, including when
+installation was manually acknowledged. This support follows inspected source
+contracts and offline fixtures; no Cartographer or safe Z path was physically
+tested for this fix.
+The independent-Z and other workflow restrictions still apply.
+Before manual centering and these X/Y-only workflows, the operator must ensure
+nozzle/bed clearance for XY travel because the safe Z hop will not run.
 
 ## Pre-motion stationary preparation
 
@@ -145,8 +175,9 @@ axis, be mounted firmly and have the correct machine `axes_map`. Toolhead-only
 sensors do not measure moving-bed Y impacts. Multi-MCU motor arrangements,
 unusual kinematics, independent carriages, endstop geometry and every possible
 ADXL carrier have not been physically validated. Supervised workflows limit
-their supported kinematics to Cartesian/CoreXY with independent Z and stock
-G28; they reject homing wrappers and potentially Z-coupled paths.
+their supported kinematics to Cartesian/CoreXY with independent Z and verified
+stock G28, either directly or beneath the recognized built-in `safe_z_home`.
+Other homing wrappers and potentially Z-coupled paths remain rejected.
 
 Distance qualification uses commanded/firmware step positions. An accelerometer
 plus step counts cannot distinguish every jam, skipped step or wrong physical
