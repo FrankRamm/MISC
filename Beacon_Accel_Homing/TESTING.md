@@ -20,6 +20,13 @@ Focused installer/bootstrap/uninstall check:
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_installer.py -v
 ```
 
+Focused motor-enable and fresh-reference fixtures, run from
+`Beacon_Accel_Homing/tests/`:
+
+```bash
+python -m unittest test_session.EnablePreparationTest test_backends.GenericPreparationTest -v
+```
+
 The recorded combined run includes **73 installer/bootstrap/uninstall tests:
 72 passed and one real POSIX symlink test was skipped** because the Windows
 host does not permit symlink creation. Temporary regular-file fixtures cover
@@ -27,12 +34,11 @@ installation, config idempotence, backup/rollback, full-history restore,
 failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
-claiming a host integration test. The new `uninstall.sh` passed Git Bash
-`bash -n`; the earlier passing checks for unchanged `install.sh` and
-`bootstrap.sh` were not repeated. No native Linux systemd/Unix-socket
-integration run was performed here.
+claiming a host integration test. All three shell entry points (`install.sh`,
+`bootstrap.sh` and `uninstall.sh`) passed Git Bash `bash -n`. No native Linux
+systemd/Unix-socket integration run was performed here.
 
-The combined offline verification run discovered **254 tests: 253 passed,
+The combined offline verification run discovered **273 tests: 272 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -88,6 +94,25 @@ including a clean 2 g calibration and a 2.5 g calibration after an early trigger
 They check that the saved threshold and ten successes survive restart loading,
 with the same sensor/geometry checks and no extra homing request.
 
+Motor-enable and fresh-reference checks add **19 tests** in
+`test_session.EnablePreparationTest` (13) and
+`test_backends.GenericPreparationTest` (6), with parameterized subcases. They
+cover disabled, partly enabled and already enabled CoreXY motors; actual
+completion of queued settling/backoff/retract before the cutoff; a fresh
+reference for the 2 g candidate and every pass; exclusion of old/buffered
+impacts; ringdown and noise on all sensor axes; and rejection of invalid,
+stale, future, nonmonotonic, gapped, clipped or scale-changed references.
+They also exercise bounded failure with persistent noise or no data,
+long references independent of retained-batch capacity, cancellation during
+queue waits and acquisition, Beacon clock conversion/wrap, pending-sample
+freshness, preservation of an immediate real impact in a batch crossing
+arming, and other accelerometer clients surviving success/failure cleanup.
+
+These fixtures advance fake host/print/sensor clocks and check ordering before
+trigger dispatch is armed. They do not measure mechanical settling, validate
+the 20% quiet limit on hardware, or prevent a driver's first-step hold-to-run
+current transient. No physical homing or motor-current measurement was made.
+
 `test_motion_policy.py` adds offline coverage for relative motion proof at low
 speeds, preservation of legacy Beacon pressed-start behavior, generic
 `no_motion` failures, startup deadline/budget calculations, and rejection of
@@ -95,7 +120,6 @@ plans above the fixed 3 mm nominal command budget before enabling/backoff.
 Those checks establish software behavior only; no physical stop travel or
 end-to-end host/MCU latency was measured.
 
-Changed `installer.py`, `uninstaller.py`, `bootstrap.py` and
-`tests/test_installer.py` passed Python 3.8 grammar parsing on the current
-Python 3.13 host. No Python 3.8 runtime was executed; syntax parsing alone
-does not establish complete runtime compatibility.
+All plugin Python source and test files passed Python 3.8 grammar parsing on
+the current Python 3.13 host. No Python 3.8 runtime was executed; syntax
+parsing alone does not establish complete runtime compatibility.

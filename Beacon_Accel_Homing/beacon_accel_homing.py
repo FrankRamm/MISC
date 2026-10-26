@@ -49,10 +49,11 @@ COMMAND_WINDOW = 0.004     # s, window for the commanded speed
 EARLY_INTERVAL = 0.003     # s, watchdog interval until the toolhead is seen moving
 GAP_SAMPLES = 5            # missing samples that make the integrated speed untrustworthy
 ENABLE_SETTLE = 0.25       # s, motors switched on before homing settle before the reading
+BASELINE_NOISE_RATIO = 0.20  # all-axis peak-to-peak / current impact threshold
 AXES = {"x": 0, "y": 1}
 FAILURES = {
     "no_data": "no fresh accelerometer data",
-    "no_baseline": "no stationary accelerometer baseline before the move",
+    "no_baseline": "no fresh quiet accelerometer baseline before the move",
     "travel": "no impact within the expected travel",
     "frozen": "accelerometer readings did not change while the steps ran",
     "scale": "another Beacon accelerometer client changed the range during homing",
@@ -63,6 +64,39 @@ FAILURES = {
     "sample_rate": "accelerometer sample rate is too low",
     "no_motion": "toolhead motion was not verified before the startup deadline",
 }
+
+
+class QuietReference:
+    """Constant-size stationary-window statistics, protected by the owner lock."""
+
+    def __init__(self, axis, cutoff, duration, limit):
+        self.axis, self.cutoff, self.duration, self.limit = axis, cutoff, duration, limit
+        self.first = self.last = None
+        self.count = 0
+        self.totals = [0.0, 0.0, 0.0]
+        self.low = self.high = None
+
+    def add(self, when, values):
+        low = list(values) if self.low is None else [min(a, b) for a, b in zip(self.low, values)]
+        high = list(values) if self.high is None else [max(a, b) for a, b in zip(self.high, values)]
+        if any(b - a > self.limit for a, b in zip(low, high)):
+            # A transient or a change between otherwise flat batches starts a
+            # new candidate; the entire new quiet interval must follow it.
+            self.first, self.count = None, 0
+            self.totals = [0.0, 0.0, 0.0]
+            low = high = list(values)
+        if self.first is None:
+            self.first = when
+        self.last = when
+        self.count += 1
+        self.totals = [a + b for a, b in zip(self.totals, values)]
+        self.low, self.high = low, high
+
+    def baseline(self):
+        if (self.count < BASELINE_MIN_SAMPLES or self.first is None
+                or self.last - self.first + 0.000000001 < self.duration):
+            return None
+        return tuple(value / self.count for value in self.totals)
 
 
 def clock_after(clock, reference):
@@ -257,11 +291,14 @@ class BeaconAccelHoming:
         self.back_off_dist = config.getfloat("back_off_dist", 5.0, minval=0.0, maxval=20.0)
         self.baseline_batches = config.getint("baseline_batches", 25, minval=10, maxval=200)
         self.baseline_time = config.getfloat("baseline_time", 0.1, minval=0.05, maxval=1.0)
+        self.enable_settle_time = config.getfloat("enable_settle_time", ENABLE_SETTLE,
+                                                  minval=0.0, maxval=2.0)
         self.stream_timeout = config.getfloat("stream_timeout", 0.05, minval=0.01, maxval=0.5)
         self.travel_margin = config.getfloat("travel_margin", 1.1, minval=1.0, maxval=2.0)
         self.watchdog_margin = config.getfloat("watchdog_margin", 0.15, minval=0.0, maxval=2.0)
         scalar_options = {"threshold": threshold, "homing_accel": self.homing_accel,
                           "back_off_dist": self.back_off_dist, "baseline_time": self.baseline_time,
+                          "enable_settle_time": self.enable_settle_time,
                           "stream_timeout": self.stream_timeout, "travel_margin": self.travel_margin,
                           "watchdog_margin": self.watchdog_margin}
         scalar_options.update((axis + "_threshold", value) for axis, value in self.threshold_g.items())
@@ -298,6 +335,8 @@ class BeaconAccelHoming:
         self.recent = collections.deque(maxlen=self.baseline_batches)
         self.attempt = self.tail = self.pending_move = None
         self.homing_active = self.stream_on = False
+        self.preparing = False
+        self.preparation = None
         self.session_axes = {}
         self.rails_by_axis = {}
         self.passes = 0
@@ -492,6 +531,9 @@ class BeaconAccelHoming:
     def _end_session(self, *args):
         """Stop the stream and restore the acceleration. Safe to call any time."""
         self.homing_active = False
+        with self.lock:
+            self.preparation = None
+        self.preparing = False
         self.session_axes = {}
         self.reactor.update_timer(self.idle_timer, self.reactor.NEVER)
         if self.helper is not None:
@@ -504,7 +546,7 @@ class BeaconAccelHoming:
         # left open closes itself once nothing has been armed for a while.
         if not self.homing_active:
             return self.reactor.NEVER
-        if self.attempt is None and eventtime - self.last_activity > IDLE_CLEANUP:
+        if not self.preparing and self.attempt is None and eventtime - self.last_activity > IDLE_CLEANUP:
             logging.info("beacon_accel_homing: closing a homing session left open")
             self._end_session()
             return self.reactor.NEVER
@@ -540,15 +582,23 @@ class BeaconAccelHoming:
         self.homing_active = True
         self.last_activity = started = self.reactor.monotonic()
         self.reactor.update_timer(self.idle_timer, started + 0.5)
+        self.preparing = True
         try:
             self._limit_accel()
             self._enable_motors(list(axes)[0])
             self._back_off_others(list(axes)[0])
+            if not self.homing_active or self.session_axes is not axes:
+                raise self.printer.command_error("accel_homing: homing preparation cancelled")
             self.last_batch = None
+            # Enabling/backoff may itself yield while the toolhead drains a
+            # large queue. Sensor startup gets its own actual start time.
+            self.last_activity = started = self.reactor.monotonic()
             self._start_stream()
         except Exception:
             self._end_session()
             raise
+        finally:
+            self.preparing = False
         # Wait in real time until accelerometer data actually flows.
         while self.last_batch is None or self.last_batch < started:
             now = self.reactor.monotonic()
@@ -595,7 +645,7 @@ class BeaconAccelHoming:
             line.motor_enable(print_time)
         logging.info("beacon_accel_homing: switched on %d motors before homing %s",
                      len(lines), axis.upper())
-        self.toolhead.dwell(ENABLE_SETTLE)
+        self.toolhead.dwell(self.enable_settle_time)
 
     def _back_off_others(self, homing_axis):
         """Move axes this module homed off their stops before homing another one.
@@ -655,7 +705,94 @@ class BeaconAccelHoming:
         # A standstill right before every pass (first touch and second touch)
         # gives the resting reading the impact is compared against.
         if self.homing_active and any(es in self.endstops.values() for es in hmove.get_mcu_endstops()):
-            self.toolhead.dwell(self.baseline_time)
+            self._prepare_reference()
+
+    def _prepare_reference(self):
+        """Finish queued enable/backoff/retract, then acquire before trsync/motion.
+
+        Stock homing captures the move's print time only after this event.
+        A queued dwell alone does not establish that the physical enable time
+        has passed or that delivered sensor data was sampled afterwards.
+        """
+        self.preparing = True
+        session_axes = self.session_axes
+        try:
+            self.toolhead.flush_step_generation()
+            self.toolhead.wait_moves()
+            if not self.homing_active or self.session_axes is not session_axes:
+                raise self.printer.command_error("accel_homing: homing preparation cancelled")
+            started = self.reactor.monotonic()
+            cutoff = self.main_mcu.estimated_print_time(started)
+            axis = next(iter(self.session_axes))
+            count_g = self.session_scale["scale"] / 1000.0
+            reference = QuietReference(axis, cutoff, self.baseline_time,
+                                       BASELINE_NOISE_RATIO * self.threshold_g[axis] / count_g)
+            with self.lock:
+                self.recent.clear()
+                self.tail = None
+                self.preparation = reference
+                if self.backend is not None:
+                    self.backend.prepare_reference()
+            while True:
+                now = self.reactor.monotonic()
+                self.last_activity = now
+                if not self.homing_active or self.session_axes is not session_axes:
+                    raise self.printer.command_error("accel_homing: homing preparation cancelled")
+                if self.sensor_fault is not None:
+                    raise self.printer.command_error("accel_homing: %s" % FAILURES[self.sensor_fault])
+                with self.lock:
+                    ready = reference.baseline() is not None
+                    last = reference.last
+                sensor_now = self.main_mcu.estimated_print_time(now)
+                if ready and last is not None and -0.005 <= sensor_now - last <= self._reference_max_age():
+                    return
+                if now - started > self.baseline_time + STREAM_START_TIMEOUT:
+                    raise self.printer.command_error("accel_homing: %s" % FAILURES["no_baseline"])
+                self.reactor.pause(now + 0.005)
+        except Exception:
+            self._end_session()
+            raise
+        finally:
+            self.preparing = False
+
+    def _reference_max_age(self):
+        return self.stream_timeout if self.backend is None else self.backend.max_age
+
+    def _collect_reference(self, params, data, count, now):
+        """Validate sensor time and every axis while no homing move is armed."""
+        interval = params["delta_clock"] / (count - 1.0) / self.beacon_freq
+        start = self.clock_to_time(params["start_clock"])
+        if not math.isfinite(interval) or interval <= 0.0 or not math.isfinite(start):
+            return "invalid_data"
+        sensor_now = self.main_mcu.estimated_print_time(now)
+        raw = [axis_values(sample_slice(data, count), index) for index in range(3)]
+        with self.lock:
+            reference = self.preparation
+            if reference is None:
+                return None
+            if (self.backend is None and self.helper._stream_en
+                    and self.helper._scale.get("id") != self.session_scale.get("id")):
+                return "scale"
+            for number in range(count):
+                when = start + number * interval
+                if when <= reference.cutoff:
+                    continue
+                if not -0.005 <= sensor_now - when <= self._reference_max_age():
+                    return "stale_data"
+                if reference.last is not None:
+                    if when <= reference.last:
+                        return "invalid_data"
+                    if when - reference.last > 5.0 * interval + 0.000003:
+                        return "sample_gap"
+                values = tuple(axis[number] for axis in raw)
+                if (not all(math.isfinite(value) for value in values)
+                        or (self.backend is None and CLIPPED in values)
+                        or (self.full_scale_g is not None
+                            and any(abs(value) * self.session_scale["scale"] / 1000.0
+                                    >= self.full_scale_g for value in values))):
+                    return "invalid_data"
+                reference.add(when, values)
+        return None
 
     def _handle_move_end(self, hmove):
         attempt, self.pending_move = self.pending_move, None
@@ -740,12 +877,26 @@ class BeaconAccelHoming:
         direction = self.impact_sign[axis]
         if self.sensor_fault is not None:
             raise self.printer.command_error("accel_homing: %s" % FAILURES[self.sensor_fault])
+        now = self.main_mcu.estimated_print_time(self.reactor.monotonic())
+        with self.lock:
+            reference = self.preparation
+            bases = reference.baseline() if reference is not None and reference.axis == axis else None
+            if (bases is None or reference.last is None
+                    or not -0.005 <= now - reference.last <= self._reference_max_age()):
+                bases = None
+            self.preparation = None
+        if bases is None:
+            self._end_session()
+            raise self.printer.command_error("accel_homing: %s" % FAILURES["no_baseline"])
         beacon_mcu = self.sensor_clock
         attempt = Attempt(endstop, self.passes, print_time,
                           beacon_mcu.print_time_to_clock(print_time) & 0xFFFFFFFF,
                           deadline, beacon_mcu.print_time_to_clock(deadline) & 0xFFFFFFFF,
                           index, map_sign, direction, threshold / count_g, count_g)
         attempt.steppers = endstop.get_steppers()
+        attempt.bases = bases
+        attempt.baseline = bases[index]
+        attempt.last_samples = list(bases)
         attempt.effective_speed, attempt.effective_accel = speed, accel
         if hasattr(self.toolhead, "get_position"):
             attempt.start_position = self.toolhead.get_position()[AXES[axis]]
@@ -975,6 +1126,10 @@ class BeaconAccelHoming:
             if self.tail is not None:
                 self._track_impact(self.tail, params, data, count)
             if self.homing_active:
+                if self.preparation is not None:
+                    reason = self._collect_reference(params, data, count, now)
+                    if reason is not None:
+                        self._sensor_fault(reason)
                 self.recent.append(data)
             return
         attempt.last_data = now
@@ -987,12 +1142,25 @@ class BeaconAccelHoming:
             self._fire(attempt, "scale", mcu.MCU_trsync.REASON_HOST_REQUEST)
             return
         start_clock = params["start_clock"]
-        if not clock_after(start_clock, attempt.arm_clock):
-            self.recent.append(data)
-            return
         interval = params["delta_clock"] / (count - 1.0)
-        if attempt.baseline is None:
-            attempt.bases = self._baseline()
+        if not clock_after(start_clock, attempt.arm_clock):
+            # A delivered batch can contain both a pre-enable transient and
+            # the first real impact. Preserve every sample at/after arm,
+            # including a single remaining sample, instead of dropping it.
+            skip = int(math.ceil(((attempt.arm_clock - start_clock) & 0xFFFFFFFF) / interval))
+            if skip >= count:
+                return
+            width = 3 if isinstance(data, tuple) else 6
+            data = data[skip * width:]
+            count -= skip
+            start_clock = (start_clock + int(round(skip * interval))) & 0xFFFFFFFF
+            params = dict(params, data=data, start_clock=start_clock,
+                          delta_clock=int(round((count - 1) * interval)))
+        if attempt.first_clock is None:
+            if attempt.bases is None:
+                # Standalone detector replay uses no homing lifecycle. The
+                # production prepare() path always supplies a validated one.
+                attempt.bases = self._baseline()
             attempt.first_clock = start_clock
             attempt.sample_dt = interval / self.beacon_freq
             if attempt.bases is None:

@@ -228,6 +228,13 @@ class ConfiguredAccelBackend:
         self.fault = reason
         self.owner._sensor_fault(reason)
 
+    def prepare_reference(self):
+        # Start a new timestamp sequence after completed queued motion. Old
+        # buffered rows are filtered by the owner's sensor-time cutoff.
+        self.pending = []
+        self.last_sample_time = None
+        self.last_xyz = self.unchanged_since = None
+
     def _receive(self, message):
         rows = message.get("data", ())
         if not rows:
@@ -241,12 +248,24 @@ class ConfiguredAccelBackend:
             return self._fail("data_error")
         self.error_counts = current
         values = []
+        reference = self.owner.preparation
+        # home_rails_begin can attach to an already streaming helper before
+        # move_begin establishes its stricter post-settle cutoff. Drain old
+        # valid backlog here rather than poisoning the upcoming preparation.
+        warmup_cutoff = None
+        if reference is None and self.owner.attempt is None:
+            warmup_cutoff = self.owner.main_mcu.estimated_print_time(
+                self.owner.reactor.monotonic()) - self.max_age
         for row in rows:
             if len(row) != 4:
                 return self._fail("invalid_data")
             sample = tuple(float(value) for value in row)
             if not all(math.isfinite(value) for value in sample):
                 return self._fail("invalid_data")
+            if reference is not None and sample[0] <= reference.cutoff:
+                continue
+            if warmup_cutoff is not None and sample[0] < warmup_cutoff:
+                continue
             if self.last_sample_time is not None:
                 dt = sample[0] - self.last_sample_time
                 if dt <= 0.0:
@@ -258,6 +277,10 @@ class ConfiguredAccelBackend:
             if xyz != self.last_xyz:
                 self.last_xyz, self.unchanged_since = xyz, sample[0]
             values.append(sample)
+        values = self.pending + values
+        self.pending = []
+        if not values:
+            return
         now = self.owner.reactor.monotonic()
         print_time = self.owner.main_mcu.estimated_print_time(now)
         self.last_age = print_time - values[-1][0]
@@ -269,7 +292,6 @@ class ConfiguredAccelBackend:
                 and values[-1][0] - max(self.unchanged_since, attempt.arm_time) > 0.025
                 and self.owner._commanded_speed(attempt, values[-1][0] - 0.015) >= 40.0):
             return self._fail("frozen")
-        values = self.pending + values
         if len(values) < 2:
             self.pending = values
             return

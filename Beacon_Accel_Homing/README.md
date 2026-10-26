@@ -85,6 +85,12 @@ After physical validation, use **`G28 X`** or **`G28 Y`** in the printer console
 The configured axis uses its accelerometer endstop. Calibration, tests and
 charts are optional workflows that run only when you request them.
 
+Energizing a motor can jolt the sensor and resemble contact. Before every
+homing pass, the plugin waits for setup to finish and checks fresh, quiet
+accelerometer data. Newly enabled motors get an additional 0.25 s settling
+delay by default (`enable_settle_time`). If the data does not settle, that
+homing pass aborts before it starts. This check still needs physical validation.
+
 All commands below go in the **printer console**:
 
 | Command | What it does |
@@ -105,8 +111,9 @@ All commands below go in the **printer console**:
    advance or assign coordinates to mark them homed.
 2. Run `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`. `CENTERED=1` states that you
    have already centered XY and authorizes movement; the sensor cannot detect
-   that position. **X moves immediately.** The first home tests the actual
-   candidate threshold, starting at **2 g by default**, from that manual center.
+   that position. **There is no further confirmation: X starts after the
+   stationary preparation check.** The first home tests the actual candidate
+   threshold, starting at **2 g by default**, from that manual center.
 3. After one qualifying home, the plugin performs **ten additional consecutive
    accepted homes** at the same threshold. Between accepted trials, it returns
    only the tested axis to center.
@@ -236,6 +243,30 @@ Qualification requires over 10 mm of commanded travel and agreement within
 Missing/late data, invalid captures, MCU errors and excessive travel abort
 instead of increasing the threshold. Stock Klipper homing fault cleanup still
 applies and may release all motors.
+
+### Stationary preparation before each pass
+
+The same check protects ordinary homing and supervised workflows, including
+already enabled motors and second touches. It enables the motors needed for
+the axis (both drives for CoreXY), waits for queued setup/backoff/retract and
+any settling delay after enabling motors, then collects a new sensor reference.
+`enable_settle_time` defaults to 0.25 s and accepts finite values from 0 to 2 s;
+setting it to zero keeps the quiet-data check.
+
+The reference needs at least 50 fresh contiguous samples spanning
+`baseline_time` (0.1 s by default), with peak-to-peak variation on every sensor
+axis at most 20% of that pass's impact threshold. Acquisition is limited to
+`baseline_time + 0.5 s` after setup completes. Earlier buffered data cannot
+qualify. Data faults abort; persistent noise or no data produces `no_baseline`
+before the pass starts. The validated reference is frozen before arming;
+there is no interval or minimum travel that ignores an early real impact.
+See [the preparation contract](docs/COMPATIBILITY.md#pre-motion-stationary-preparation).
+
+This is a software noise check, not proof of contact or a guarantee against
+every false home. A driver's hold-to-run current change at the first step can
+still cause movement after this check. See Klipper's
+[`hold_current` guidance](https://www.klipper3d.org/TMC_Drivers.html#prefer-to-not-specify-a-hold_current).
+The preparation check does not change driver settings.
 
 ### Generic timing and speed limits
 
