@@ -27,8 +27,9 @@ still needs physical validation; software checks do not prove a correct home.
 - A firmly mounted sensor that moves with each tested axis, with the correct
   `axes_map`. A toolhead sensor cannot measure moving-bed Y impacts.
 - For calibration, test and charts: Cartesian/CoreXY with independent Z and
-  stock `G28`. Custom homing wrappers require changes before these workflows
-  can run; see the [optional compatibility notes](#for-the-curious).
+  stock `G28`, directly or beneath the recognized built-in `[safe_z_home]`.
+  Other custom homing paths require changes before these workflows can run;
+  see the [optional compatibility notes](#for-the-curious).
 
 ## 1. Install on the Linux printer host
 
@@ -104,6 +105,9 @@ All commands below go in the **printer console**:
 | `SET_ACCEL_HOMING AXIS=X THRESHOLD=4.0` | Optional temporary X threshold change until restart; use `AXIS=Y` for Y. |
 
 ## Calibrate X, then Y
+
+Before CALIBRATE, TEST or CHARTS, ensure the nozzle has clearance above the bed
+for XY travel. These workflows do not perform `safe_z_home`'s Z hop.
 
 1. **Before the command, physically center the toolhead by hand in both X and
    Y.** Use the XY motor controls appropriate for your machine so Z stays
@@ -230,8 +234,14 @@ unhomed and physically center XY by hand again.
 
 Workflows require idle, unpaused Klipper, Cartesian/CoreXY, independent Z,
 controllable XY enables and single-touch X/Y settings (`homing_retract_dist: 0`,
-`min_home_dist: 0`). They reject dual carriages, shared XY/Z enables,
-`homing_override`, `safe_z_home` and G28 macros that could introduce Z movement.
+`min_home_dist: 0`). Standard Klipper/Kalico `[safe_z_home]` is supported when
+its active handler and underlying stock `G28` are verified. Workflow homes
+recheck this path before each trial and call that stock handler for X or Y
+only, bypassing `safe_z_home`'s `z_hop`.
+Normal `G28`, Z homing and Cartographer probe configuration retain their
+existing behavior. Dual carriages, shared XY/Z enables, `homing_override`,
+G28 macros and unknown wrapper chains remain rejected. See
+[the source contract and limits](docs/COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
 Calibration defaults: start at 2 g, increase by 0.5 g for early triggers, stop
 at 12 g or 80% of sensor range, allow at most 40 homing attempts and wait up to

@@ -344,12 +344,13 @@ def make_plan(source, selected, args):
         if not (source / module).is_file():
             raise InstallError("Incomplete package: missing %s in %s" % (module, source))
     graph = ConfigGraph(selected["config"])
-    overrides = [name for name in graph.sections if re.match(r"^(homing_override|safe_z_home|gcode_macro\s+g28)$", name, re.I)]
+    safe_z_home = graph.one("safe_z_home", False)
+    overrides = [name for name in graph.sections if re.match(r"^(homing_override|gcode_macro\s+g28)$", name, re.I)]
     if overrides and not args.acknowledge_homing_override:
         raise InstallError("Custom homing path: %s. No files changed. Review/adapt its G28, current "
                            "changes and moves; only then use --acknowledge-homing-override. The "
                            "installer cannot validate macro behavior, and calibration/test/chart "
-                           "workflows require stock G28 even after this acknowledgement." % ", ".join(overrides))
+                           "workflows require a verified stock G28 path even after this acknowledgement." % ", ".join(overrides))
     plugins = [graph.one(name, False) for name in ("accel_homing", "beacon_accel_homing")]
     plugins = [section for section in plugins if section]
     if len(plugins) > 1:
@@ -363,6 +364,9 @@ def make_plan(source, selected, args):
         raise InstallError("Configured [%s] has no installed driver in klippy/extras or klippy/plugins. "
                            "Install its normal driver first." % sensor)
     changes, messages = {}, []
+    if safe_z_home is not None:
+        messages.append("Preserved [safe_z_home]. Supervised X/Y workflows verify its stock G28 "
+                        "predecessor and omit the wrapper's z_hop; ordinary G28 remains unchanged.")
     prefix = "beacon_accel" if existing and existing.name.lower() == "beacon_accel_homing" else "accel_homing"
     if existing:
         existing.replace("accel_chip", sensor)

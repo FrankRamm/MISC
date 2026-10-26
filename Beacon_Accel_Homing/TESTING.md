@@ -9,15 +9,21 @@ Run from the repository root with Python 3:
 
 ```bash
 python -m unittest discover -s Beacon_Accel_Homing/tests -v
+```
+
+For shell-entry-point changes, also run:
+
+```bash
 bash -n Beacon_Accel_Homing/install.sh
 bash -n Beacon_Accel_Homing/bootstrap.sh
 bash -n Beacon_Accel_Homing/uninstall.sh
 ```
 
-Focused installer/bootstrap/uninstall check:
+Focused installer/bootstrap/uninstall and homing-path checks:
 
 ```bash
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_installer.py -v
+python -m unittest discover -s Beacon_Accel_Homing/tests -p test_workflows.py -v
 ```
 
 Focused motor-enable and fresh-reference fixtures, run from
@@ -27,18 +33,18 @@ Focused motor-enable and fresh-reference fixtures, run from
 python -m unittest test_session.EnablePreparationTest test_backends.GenericPreparationTest -v
 ```
 
-The recorded combined run includes **73 installer/bootstrap/uninstall tests:
-72 passed and one real POSIX symlink test was skipped** because the Windows
+The recorded combined run includes **77 installer/bootstrap/uninstall tests:
+76 passed and one real POSIX symlink test was skipped** because the Windows
 host does not permit symlink creation. Temporary regular-file fixtures cover
 installation, config idempotence, backup/rollback, full-history restore,
 failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
-claiming a host integration test. All three shell entry points (`install.sh`,
-`bootstrap.sh` and `uninstall.sh`) passed Git Bash `bash -n`. No native Linux
-systemd/Unix-socket integration run was performed here.
+claiming a host integration test. Shell entry points are unchanged by this
+safe Z compatibility fix, so their syntax checks were not repeated. No native
+Linux systemd/Unix-socket integration run was performed here.
 
-The combined offline verification run discovered **273 tests: 272 passed,
+The combined offline verification run discovered **288 tests: 287 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -48,8 +54,9 @@ Installer fixtures cover main/include discovery, stopped/running/multiple
 instances, process command and service parsing, configured sensor selection,
 mixed-case names, generic speed limits, legacy Beacon settings, wildcard include
 deduplication, unchanged saved blocks/macros, required-file conflicts, custom
-G28/safe_z_home refusal, read-only dry run, wrong-socket identity, printing
-refusal, immutable-ref downloads, pinned Git blob integrity, valid-Python-prefix
+G28/homing_override refusal, standard safe_z_home preservation, read-only dry
+run, wrong-socket identity, printing refusal, immutable-ref downloads, pinned
+Git blob integrity, valid-Python-prefix
 truncation, shell invocation truncation, cache integrity, and aborted downloads.
 Publication fixtures also execute both bootstrap entry points with mocked
 downloads to verify their FrankRamm testing-fork defaults, immutable revision
@@ -73,9 +80,17 @@ and exercise verified offline-cache dispatch and download/refusal paths.
 
 Core/backend and workflow suites separately cover trigger/session behavior,
 mapped generic data and units, timing/rate/error guards, staged/independent
-models, explicit manual-centering confirmation, stock G28 requirements,
+models, explicit manual-centering confirmation, verified stock G28 requirements,
 suspect travel without automatic returns, and measured chart export. Synthetic
 chart fixtures are explicitly marked as simulated.
+
+Safe Z compatibility fixtures verify the recognized built-in handler over
+stock `G28`, including a nonzero configured `z_hop`. CALIBRATE, TEST and CHARTS
+use only the verified stock X/Y handler, with no safe Z hop or change to the
+public `G28` registration. Handler validation repeats before each trial.
+Unknown/custom wrappers, nested handler chains, mismatched registrations,
+`homing_override` and G28 macros remain refused. These synthetic checks do not
+validate nozzle clearance, Cartographer probing or physical homing behavior.
 
 Centered-calibration fixtures check `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`
 as the start/resume command, with both XY axes unhomed before it can move or
@@ -120,6 +135,7 @@ plans above the fixed 3 mm nominal command budget before enabling/backoff.
 Those checks establish software behavior only; no physical stop travel or
 end-to-end host/MCU latency was measured.
 
-All plugin Python source and test files passed Python 3.8 grammar parsing on
-the current Python 3.13 host. No Python 3.8 runtime was executed; syntax
-parsing alone does not establish complete runtime compatibility.
+The four changed Python files (`accel_homing_workflows.py`, `installer.py`,
+`tests/test_workflows.py` and `tests/test_installer.py`) passed Python 3.8
+grammar parsing on the current Python 3.13 host. No Python 3.8 runtime was
+executed; syntax parsing alone does not establish complete runtime compatibility.
