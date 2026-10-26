@@ -4,13 +4,150 @@ import unittest
 from unittest import mock
 
 from harness import (CommandError, ConfigError, FakeConfig, FakeEndstop, FakePrinter,
-                     FakeToolhead, batch, counts, make_beacon, make_homing, plugin)
+                     FakeToolhead, batch, counts, make_beacon, make_homing, plugin,
+                     stationary_stream)
 from accel_homing_backends import select_sensor
 from test_session import FakeRail, info, with_endstops
 
 G = 9806.65
 HIT = plugin.mcu.MCU_trsync.REASON_ENDSTOP_HIT
 HOST = plugin.mcu.MCU_trsync.REASON_HOST_REQUEST
+
+
+class GenericPreparationTest(unittest.TestCase):
+    """Real rails/move callbacks with decoded sensor delivery and fake clocks."""
+
+    def session(self, legacy=False, backlog=False):
+        obj = generic(legacy=legacy, connect=False)
+        obj.fake_printer.send_event("klippy:connect")
+        obj.threshold_g["x"] = 2.0
+        endstop = with_endstops(obj)["x"]
+        obj.reactor.now = 10.0
+        stationary_stream(obj)
+        plain = obj.reactor.on_pause
+        called = [False]
+        if backlog:
+            def flow():
+                if not called[0]:
+                    called[0] = True
+                    obj.backend.helper.emit({"data": samples(9.9, x=-15)})
+                else:
+                    plain()
+            obj.reactor.on_pause = flow
+        obj._handle_rails_begin(None, [FakeRail(endstop, info(speed=50, retract=0))])
+        return obj, endstop
+
+    def begin(self, obj, endstop):
+        obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [endstop]))
+
+    def test_existing_helper_backlog_is_drained_before_gate_without_poisoning(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, endstop = self.session(legacy=legacy, backlog=True)
+                self.begin(obj, endstop)
+                self.assertIsNone(obj.sensor_fault)
+                self.assertIsNotNone(obj.preparation.baseline())
+                self.assertGreater(obj.preparation.first, obj.preparation.cutoff)
+                self.assertEqual(endstop._dispatch.started, [])
+
+    def test_late_pre_cutoff_peak_and_pending_are_excluded_from_reference(self):
+        obj, endstop = self.session()
+        obj.backend.pending = samples(9.9, size=1, x=-15)
+        plain = obj.reactor.on_pause
+        def flow():
+            if obj.preparation is not None:
+                obj.backend.helper.emit({"data": samples(9.9, x=-15)})
+            plain()
+        obj.reactor.on_pause = flow
+        self.begin(obj, endstop)
+        self.assertAlmostEqual(obj.preparation.baseline()[0], 0.0)
+        self.assertIsNone(obj.sensor_fault)
+        self.assertEqual(endstop._dispatch.started, [])
+
+    def test_fault_or_noisy_generic_preparation_aborts_before_any_dispatch(self):
+        for mode in ("noise", "no_data", "stale", "future", "duplicate", "gap",
+                     "saturated", "nonfinite", "errors", "overflows"):
+            with self.subTest(mode=mode):
+                obj, endstop = self.session()
+                sequence = [0]
+                last = []
+                def flow():
+                    sequence[0] += 1
+                    if mode == "no_data":
+                        return
+                    start = obj.reactor.now - 0.001 - 15 / 3200.0
+                    x = (3 if sequence[0] % 2 else -3) if mode == "noise" else 0
+                    fields = {}
+                    if mode == "stale":
+                        obj.reactor.now += 0.1
+                    elif mode == "future":
+                        start += 0.020
+                    elif mode == "duplicate" and last:
+                        start = last[0]
+                    elif mode == "gap" and last:
+                        start += 0.020
+                        obj.reactor.now += 0.020
+                    elif mode == "saturated":
+                        x = 16.0
+                    elif mode == "nonfinite":
+                        x = float("nan")
+                    elif mode in ("errors", "overflows"):
+                        fields[mode] = 1
+                    last.append(start)
+                    obj.backend.helper.emit({"data": samples(start, x=x), **fields})
+                obj.reactor.on_pause = flow
+                with self.assertRaises(CommandError):
+                    self.begin(obj, endstop)
+                self.assertEqual(endstop._dispatch.started, [])
+                self.assertEqual(endstop.get_mcu().log, [])
+                self.assertEqual(obj.toolhead.moves, [])
+                self.assertFalse(obj.homing_active)
+                self.assertFalse(obj.backend.active)
+                self.assertEqual(obj.backend.helper.batch_interval, 0.1)
+
+    def test_first_single_post_arm_contact_survives_generic_batch_boundary(self):
+        obj, endstop = self.session()
+        self.begin(obj, endstop)
+        when = obj.backend.last_sample_time + 16 / 3200.0
+        endstop.home_start(when, 0, 0, 0)
+        rows = samples(when - 15 / 3200.0, x=-15)
+        rows[-1] = (when, -3 * G, 0, G)
+        feed(obj, rows)
+        self.assertIsNone(obj.attempt.reason)
+        feed(obj, samples(when + 1 / 3200.0, size=1))
+        self.assertEqual(obj.attempt.reason, "impact")
+        self.assertAlmostEqual(obj.onset_time(obj.attempt), when, places=6)
+        self.assertEqual(endstop.get_mcu().log, [("mcu", [7, HIT])])
+
+    def test_pending_sample_age_is_rechecked_before_contact(self):
+        obj, endstop = self.session()
+        self.begin(obj, endstop)
+        when = obj.backend.last_sample_time + 1 / 3200.0
+        endstop.home_start(when, 0, 0, 0)
+        feed(obj, samples(when, size=1, x=-3))
+        self.assertIsNone(obj.attempt.reason)
+        feed(obj, samples(when + 1 / 3200.0, size=2), age=0.0197)
+        self.assertEqual(obj.attempt.reason, "stale_data")
+        self.assertEqual(endstop.get_mcu().log, [("mcu", [7, HOST])])
+
+    def test_other_clients_survive_success_and_gate_failure(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                obj, endstop = self.session()
+                seen = []
+                other = lambda message: seen.append(message) or True
+                obj.backend.helper.add_client(other)
+                if failure:
+                    obj.reactor.on_pause = lambda: obj.backend.helper.emit({"data": []})
+                    with self.assertRaises(CommandError):
+                        self.begin(obj, endstop)
+                else:
+                    self.begin(obj, endstop)
+                    obj._end_session()
+                obj.backend.helper.emit({"data": samples(obj.reactor.now)})
+                self.assertIn(other, obj.backend.helper.client_cbs)
+                self.assertTrue(seen)
+                self.assertEqual(obj.backend.helper.batch_interval, 0.1)
 
 
 class BatchHelper:

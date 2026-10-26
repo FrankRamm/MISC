@@ -3,7 +3,8 @@ import collections
 import types
 import unittest
 
-from harness import CommandError, ConfigError, batch, counts, make_homing, plugin
+from harness import (CommandError, ConfigError, acquire_reference, batch, counts,
+                     make_homing, plugin, stationary_stream)
 
 HIT = plugin.mcu.MCU_trsync.REASON_ENDSTOP_HIT
 HOST = plugin.mcu.MCU_trsync.REASON_HOST_REQUEST
@@ -68,9 +69,7 @@ def with_endstops(obj, axes=("x",), mcu_obj=None):
 
 def stream_flows(obj):
     """Make the stream answer as soon as the session waits for it."""
-    reactor = obj.fake_printer.reactor
-    reactor.on_pause = lambda: obj._inspect(batch(0, [(0, 0, counts(1.0))] * 8,
-                                                  receive_time=reactor.now))
+    stationary_stream(obj)
 
 
 def start_session(obj, rail):
@@ -169,13 +168,14 @@ class SessionTest(unittest.TestCase):
         with self.assertRaises(CommandError):
             obj._handle_rails_begin(None, [FakeRail(endstops["x"]), FakeRail(endstops["y"], name="stepper_y")])
 
-    def test_baseline_dwell_before_every_pass_of_our_axis_only(self):
+    def test_fresh_baseline_before_every_pass_of_our_axis_only(self):
         obj = make_homing()
         endstop = with_endstops(obj)["x"]
         start_session(obj, FakeRail(endstop))
         obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [endstop]))
         obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [object()]))
-        self.assertEqual(obj.toolhead.dwells, [0.1])
+        self.assertEqual(len(obj.toolhead.waits), 1)
+        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first, 0.1)
 
     def test_home_start_outside_g28_fails_before_the_trsync_starts(self):
         obj = make_homing()
@@ -189,9 +189,11 @@ class SessionTest(unittest.TestCase):
         obj = make_homing(accel=20000.0, options={"homing_accel": 1000})
         endstop = with_endstops(obj)["x"]
         start_session(obj, FakeRail(endstop))
+        obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [endstop]))
         attempt = obj.prepare(endstop, 100.0)
         # 330 mm at 150 mm/s, plus 0.15 s ramp at 1000 mm/s^2, plus the margin
         self.assertAlmostEqual(attempt.deadline - 100.0, 330.0 / 150.0 + 0.15 + 0.15, places=6)
+        obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [endstop]))
         second = obj.prepare(endstop, 200.0)
         self.assertAlmostEqual(second.deadline - 200.0, 13.0 / 150.0 + 0.15 + 0.15, places=6)
         self.assertEqual(second.pass_no, 2)
@@ -201,6 +203,7 @@ class SessionTest(unittest.TestCase):
         endstop = with_endstops(obj)["x"]
         start_session(obj, FakeRail(endstop))
         obj.toolhead.get_max_velocity = lambda: (50.0, 1000.0)
+        obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [endstop]))
         attempt = obj.prepare(endstop, 100.0)
         self.assertAlmostEqual(attempt.deadline - 100.0, 330.0 / 50.0 + 0.05 + 0.15, places=6)
 
@@ -208,13 +211,14 @@ class SessionTest(unittest.TestCase):
         obj = make_homing()
         endstop = with_endstops(obj)["x"]
         start_session(obj, FakeRail(endstop))
-        for i in range(12):
-            obj._inspect(batch(i * 8, [(0, 0, counts(1.0))] * 8))
+        obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [endstop]))
         board = endstop.get_mcu()
-        endstop.home_start(0.2, 0, 0, 0)
-        obj._inspect(batch(200, [(counts(-12.0), 0, counts(1.0))] + [(0, 0, counts(1.0))] * 7))
+        arm_time = obj.reactor.now + 0.010
+        endstop.home_start(arm_time, 0, 0, 0)
+        obj._inspect(batch(round(arm_time * 1000.0), [(counts(-12.0), 0, counts(1.0))]
+                           + [(0, 0, counts(1.0))] * 7))
         self.assertEqual(board.log, [("mcu", [7, HIT])])
-        self.assertAlmostEqual(endstop.home_wait(1.0), 0.2)
+        self.assertAlmostEqual(endstop.home_wait(arm_time + 1.0), arm_time, places=3)
         self.assertEqual(obj.last["x"]["result"], "impact")
         self.assertIsNone(obj.attempt)
 
@@ -448,3 +452,266 @@ class BackOffTest(unittest.TestCase):
         x_info = Info(150.0, 300.0, 150.0, 0.0, True, 150.0)
         toolhead = self._home_y(300.3, x_info=x_info)
         self.assertEqual(toolhead.moves, [([295.0, None, None], 150.0)])
+
+
+class EnablePreparationTest(unittest.TestCase):
+    """Exercise the full pre-enable -> queued completion -> gate -> dispatch path."""
+
+    def session(self, options=None, enabled=(False, False, False)):
+        obj = make_homing(options=options)
+        # This is the actual first calibration candidate, not a preparatory home.
+        obj.threshold_g["x"] = 2.0
+        endstop = with_endstops(obj)["x"]
+        log = []
+        lines = {name: EnableLine(log, name, state) for name, state in
+                 zip(("stepper_x", "stepper_y", "stepper_z"), enabled)}
+        steppers = [types.SimpleNamespace(get_name=lambda name=name: name,
+                                         is_active_axis=lambda axis, name=name:
+                                         axis in ("x", "y") and name != "stepper_z")
+                    for name in lines]
+        obj.toolhead.kin = types.SimpleNamespace(get_steppers=lambda: steppers,
+                                                 get_status=lambda t: {"homed_axes": ""})
+        obj.toolhead.get_position = lambda: [150.0, 150.0, 40.0, 0.0]
+        obj.fake_printer.objects["stepper_enable"] = types.SimpleNamespace(
+            lookup_enable=lines.__getitem__)
+        start_session(obj, FakeRail(endstop, info(speed=100, retract=0)))
+        return obj, endstop, log, lines
+
+    def begin(self, obj, endstop):
+        obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [endstop]))
+
+    def assert_unarmed_cleanup(self, obj, endstop):
+        self.assertEqual(endstop._dispatch.started, [])
+        self.assertEqual(endstop.get_mcu().log, [])
+        self.assertEqual(obj.toolhead.moves, [])
+        self.assertFalse(obj.homing_active)
+        self.assertFalse(obj.stream_on)
+        self.assertFalse(obj.preparing)
+        self.assertIsNone(obj.preparation)
+        self.assertEqual(obj.toolhead.accel, 20000.0)
+
+    def test_corexy_enable_settle_really_completes_before_fresh_2g_trial(self):
+        obj, endstop, log, lines = self.session()
+        self.assertEqual(log, [("stepper_x", 10.0), ("stepper_y", 10.0)])
+        self.assertFalse(lines["stepper_z"].enabled)
+        self.assertLess(obj.reactor.now, 10.25)  # Dwell was only queued.
+        self.begin(obj, endstop)
+        self.assertEqual(obj.toolhead.waits, [10.25])
+        self.assertGreater(obj.preparation.first, 10.25)
+        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first, 0.1)
+        self.assertEqual(endstop._dispatch.started, [])
+        when = round(obj.reactor.now * 1000.0) / 1000.0 + 0.005
+        endstop.home_start(when, 0, 0, 0)
+        self.assertEqual(len(endstop._dispatch.started), 1)
+        self.assertEqual(obj.attempt.limit_raw * obj.attempt.count_g, 2.0)
+        # The only post-arm sample is a real 3 g contact. The pre-arm 15 g
+        # enable peak must neither trigger nor hide that first sample.
+        obj._inspect(batch(round(when * 1000) - 7,
+                           [(counts(-15), 0, counts(1))] * 7
+                           + [(counts(-3), 0, counts(1))]))
+        self.assertEqual(obj.attempt.reason, "impact")
+        self.assertAlmostEqual(obj.onset_time(obj.attempt), when)
+
+    def test_already_enabled_corexy_and_partly_enabled_keep_quiet_gate(self):
+        for enabled, expected in (((True, True, True), []),
+                                  ((True, False, True), [("stepper_y", 10.0)])):
+            with self.subTest(enabled=enabled):
+                obj, endstop, log, lines = self.session(enabled=enabled)
+                self.begin(obj, endstop)
+                self.assertEqual(log, expected)
+                self.assertTrue(lines["stepper_z"].enabled)
+                self.assertIsNotNone(obj.preparation.baseline())
+                self.assertEqual(len(obj.toolhead.waits), 1)
+
+    def test_old_delivered_peak_is_excluded_then_ringdown_must_be_quiet(self):
+        obj, endstop, _log, _lines = self.session()
+        plain = obj.reactor.on_pause
+        old = batch(10000, [(counts(-15), 0, counts(1))] * 8)
+        delivered = []
+        def flow():
+            if obj.preparation is None:
+                plain()
+                return
+            old["#receive_time"] = obj.reactor.now
+            obj._inspect(old)
+            elapsed = obj.reactor.now - obj.preparation.cutoff
+            x = (3.0 if len(delivered) % 2 else -3.0) if elapsed <= 0.030 else 0.0
+            delivered.append(elapsed)
+            obj._inspect(batch(round(obj.reactor.now * 1000) - 4,
+                               [(counts(x), 0, counts(1))] * 5,
+                               delta_clock=4, receive_time=obj.reactor.now))
+        obj.reactor.on_pause = flow
+        self.begin(obj, endstop)
+        self.assertGreater(obj.preparation.first, obj.preparation.cutoff + 0.025)
+        self.assertAlmostEqual(obj.preparation.baseline()[0], 0.0)
+        self.assertEqual(endstop._dispatch.started, [])
+
+    def test_all_axes_noise_and_absent_data_abort_before_dispatch(self):
+        for mode in ("x_noise", "z_noise", "no_data", "old_only"):
+            with self.subTest(mode=mode):
+                obj, endstop, _log, _lines = self.session()
+                plain = obj.reactor.on_pause
+                n = [0]
+                def flow():
+                    if obj.preparation is None:
+                        plain()
+                    elif mode == "old_only":
+                        obj._inspect(batch(10000, [(0, 0, counts(1))] * 8,
+                                           receive_time=obj.reactor.now))
+                    elif mode != "no_data":
+                        n[0] += 1
+                        values = [0, 0, counts(1)]
+                        values[0 if mode == "x_noise" else 2] += counts(3 if n[0] % 2 else -3)
+                        obj._inspect(batch(round(obj.reactor.now * 1000) - 4,
+                                           [values] * 5, delta_clock=4,
+                                           receive_time=obj.reactor.now))
+                obj.reactor.on_pause = flow
+                with self.assertRaisesRegex(CommandError, "fresh quiet"):
+                    self.begin(obj, endstop)
+                self.assert_unarmed_cleanup(obj, endstop)
+                self.assertLessEqual(obj.reactor.now, 10.25 + obj.baseline_time + 0.506)
+
+    def test_invalid_reference_streams_abort_before_dispatch(self):
+        for mode in ("stale", "future", "duplicate", "out_of_order", "gap", "clip", "scale"):
+            with self.subTest(mode=mode):
+                obj, endstop, _log, _lines = self.session()
+                plain = obj.reactor.on_pause
+                seen = []
+                def flow():
+                    if obj.preparation is None:
+                        plain()
+                        return
+                    start = round(obj.reactor.now * 1000) - 4
+                    if mode == "stale":
+                        obj.reactor.now += 0.1
+                    elif mode == "future":
+                        start += 20
+                    elif mode in ("duplicate", "out_of_order") and seen:
+                        start = seen[0] - (1 if mode == "out_of_order" else 0)
+                    elif mode == "gap" and seen:
+                        start += 20
+                        obj.reactor.now += 0.020
+                    elif mode == "scale":
+                        obj.helper._stream_en = 1
+                        obj.helper._scale = dict(obj.helper._scale, id=99)
+                    values = (0, plugin.CLIPPED if mode == "clip" else 0, counts(1))
+                    seen.append(start)
+                    obj._batch_hook(batch(start, [values] * 5, delta_clock=4,
+                                           receive_time=obj.reactor.now))
+                obj.reactor.on_pause = flow
+                with self.assertRaises(CommandError):
+                    self.begin(obj, endstop)
+                self.assert_unarmed_cleanup(obj, endstop)
+                self.assertIn(obj.sensor_fault, ("stale_data", "invalid_data", "sample_gap", "scale"))
+
+    def test_reference_cannot_be_reused_or_become_stale_before_trsync(self):
+        for mode in ("missing", "stale", "new_noise", "reused"):
+            with self.subTest(mode=mode):
+                obj, endstop, _log, _lines = self.session()
+                if mode != "missing":
+                    self.begin(obj, endstop)
+                if mode == "stale":
+                    obj.reactor.now += 0.1
+                elif mode == "new_noise":
+                    obj.reactor.pause(obj.reactor.now + 0.005)
+                    obj._inspect(batch(round(obj.reactor.now * 1000) + 1,
+                                       [(counts(3), 0, counts(1))] * 5,
+                                       delta_clock=4, receive_time=obj.reactor.now + 0.005))
+                elif mode == "reused":
+                    obj.prepare(endstop, obj.reactor.now + 0.010)
+                with self.assertRaisesRegex(CommandError, "fresh quiet"):
+                    endstop.home_start(obj.reactor.now + 0.010, 0, 0, 0)
+                self.assert_unarmed_cleanup(obj, endstop)
+
+    def test_second_touch_gets_new_reference_after_retract_finishes(self):
+        obj, endstop, _log, _lines = self.session()
+        self.begin(obj, endstop)
+        first = obj.preparation
+        obj.prepare(endstop, obj.reactor.now + 0.010)
+        obj.toolhead.dwell(0.050)  # queued retract/settle completion in the fake
+        self.begin(obj, endstop)
+        second = obj.preparation
+        self.assertIsNot(second, first)
+        self.assertGreater(second.cutoff, first.last)
+        attempt = obj.prepare(endstop, obj.reactor.now + 0.010)
+        self.assertEqual(attempt.pass_no, 2)
+        self.assertEqual(endstop._dispatch.started, [])
+
+    def test_long_baseline_does_not_depend_on_recent_batch_capacity(self):
+        obj, endstop, _log, _lines = self.session({"baseline_time": 1.0, "baseline_batches": 10})
+        self.begin(obj, endstop)
+        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first, 1.0)
+        self.assertGreaterEqual(obj.preparation.count, 1000)
+        self.assertEqual(len(obj.recent), 10)
+
+    def test_long_queued_settle_does_not_trigger_idle_cleanup(self):
+        obj, endstop, _log, _lines = self.session()
+        obj.toolhead.print_time += 5.0
+        plain = obj.reactor.on_pause
+        def flow():
+            self.assertNotEqual(obj._idle_check(obj.reactor.now), obj.reactor.NEVER)
+            plain()
+        obj.reactor.on_pause = flow
+        self.begin(obj, endstop)
+        self.assertTrue(obj.homing_active)
+        self.assertGreater(obj.preparation.cutoff, 15.0)
+
+    def test_stream_start_timeout_begins_after_enable_backoff_has_yielded(self):
+        obj = make_homing(options={"enable_settle_time": 2.0, "baseline_time": 1.0})
+        endstop = with_endstops(obj)["x"]
+        # Real dwell/check_pause can yield on a long buffered enable/backoff.
+        obj._enable_motors = lambda axis: obj.reactor.pause(obj.reactor.now + 0.75)
+        start_session(obj, FakeRail(endstop))
+        self.assertGreaterEqual(obj.reactor.now, 10.75)
+        self.assertTrue(obj.homing_active)
+        self.begin(obj, endstop)
+        self.assertIsNotNone(obj.preparation.baseline())
+
+    def test_motor_off_or_shutdown_during_wait_or_acquisition_cancels(self):
+        for event in ("stepper_enable:motor_off", "klippy:shutdown"):
+            for phase in ("wait", "collect"):
+                with self.subTest(event=event, phase=phase):
+                    obj, endstop, _log, _lines = self.session()
+                    plain = obj.reactor.on_pause
+                    def flow():
+                        if phase == "wait" or obj.preparation is not None:
+                            obj.fake_printer.send_event(event)
+                        else:
+                            plain()
+                    obj.reactor.on_pause = flow
+                    with self.assertRaisesRegex(CommandError, "cancelled"):
+                        self.begin(obj, endstop)
+                    self.assert_unarmed_cleanup(obj, endstop)
+
+    def test_beacon_reference_uses_sensor_clock_conversion_and_wrap_epoch(self):
+        for mode in ("separate_mcu", "wrap"):
+            with self.subTest(mode=mode):
+                obj = make_homing()
+                endstop = with_endstops(obj)["x"]
+                if mode == "separate_mcu":
+                    obj.sensor_clock.print_time_to_clock = lambda t: round((t + 17.0) * 1000)
+                    obj.clock_to_time = lambda clock: clock / 1000.0 - 17.0
+                    obj.reactor.now = 10.0
+                else:
+                    obj.reactor.now = (2 ** 32 - 80) / 1000.0
+                    def convert(clock):
+                        now_clock = round(obj.reactor.now * 1000)
+                        delta = ((clock - now_clock + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+                        return (now_clock + delta) / 1000.0
+                    obj.clock_to_time = convert
+                stationary_stream(obj)
+                obj.homing_active = False
+                obj._handle_rails_begin(None, [FakeRail(endstop)])
+                self.begin(obj, endstop)
+                self.assertGreater(obj.preparation.first, obj.preparation.cutoff)
+                self.assertIsNotNone(obj.preparation.baseline())
+
+    def test_enable_settle_setting_is_finite_bounded_and_optional(self):
+        for value in (float("nan"), float("inf"), -0.01, 2.01):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                make_homing(options={"enable_settle_time": value})
+        for value in (0.0, 0.75, 2.0):
+            obj, endstop, _log, _lines = self.session({"enable_settle_time": value})
+            self.begin(obj, endstop)
+            self.assertIn(value, obj.toolhead.dwells)
+            self.assertGreaterEqual(obj.preparation.cutoff, 10.0 + value)

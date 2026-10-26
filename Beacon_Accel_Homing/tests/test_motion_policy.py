@@ -1,7 +1,7 @@
 """Synthetic motion/step histories for reviewer P1/P2; no printer access."""
 import unittest
 
-from harness import CommandError, FakeEndstop, batch, counts, make_homing, plugin
+from harness import CommandError, FakeEndstop, acquire_reference, batch, counts, make_homing, plugin
 from test_backends import baseline, feed, generic
 from test_session import FakeRail, info
 from test_single_touch import RampStepper
@@ -30,6 +30,7 @@ def prepared_generic(speed=50.0, velocity=500.0, accel=5000.0, direction=1,
     stepper = SignedRamp(start, accel, min(speed, velocity), direction)
     endstop.get_steppers = lambda: [stepper]
     obj.session_axes["x"] = FakeRail(endstop, info(speed=speed, retract=0, second=speed))
+    acquire_reference(obj, endstop, start)
     attempt = obj.prepare(endstop, start)
     obj.arm(attempt)
     return obj, attempt, endstop.trigger_log
@@ -72,6 +73,7 @@ class GenericNoMotionPolicyTests(unittest.TestCase):
                 obj._start_stream()
                 baseline(obj, 11.0)
                 attempt.endstop.get_steppers = lambda: [SignedRamp(11.060, 5000.0, 50.0, 1)]
+                acquire_reference(obj, attempt.endstop, 11.060)
                 attempt = obj.prepare(attempt.endstop, 11.060)
                 obj.arm(attempt)
                 trigger.messages.clear()
@@ -158,6 +160,7 @@ class BeaconSlowMotionProofTests(unittest.TestCase):
                 endstop = FakeEndstop("x")
                 endstop.get_steppers = lambda: [SignedRamp(0.2, 5000.0, speed, direction)]
                 obj.session_axes["x"] = FakeRail(endstop, info(speed=speed, retract=0, second=speed))
+                acquire_reference(obj, endstop, 0.2)
                 attempt = obj.prepare(endstop, 0.2)
                 obj.arm(attempt)
                 for start in range(200, 296, 8):

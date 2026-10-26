@@ -167,12 +167,27 @@ class BareToolhead:
         self.dwells = []
         self.moves = []
         self.kin = kin
+        self.reactor = None
+        self.print_time = 0.0
+        self.waits = []
 
     def get_max_velocity(self):
         return 500.0, self.accel
 
     def dwell(self, delay):
         self.dwells.append(delay)
+        self.print_time = self.get_last_move_time() + delay
+
+    def flush_step_generation(self):
+        pass
+
+    def get_last_move_time(self):
+        return max(self.print_time, self.reactor.monotonic() if self.reactor is not None else 0.0)
+
+    def wait_moves(self):
+        self.waits.append(self.get_last_move_time())
+        if self.reactor is not None and self.reactor.monotonic() < self.get_last_move_time():
+            self.reactor.pause(self.get_last_move_time())
 
     def get_kinematics(self):
         return self.kin
@@ -229,6 +244,7 @@ class FakePrinter:
 
     def __init__(self, toolhead, beacon):
         self.reactor = FakeReactor()
+        toolhead.reactor = self.reactor
         self.handlers = collections.defaultdict(list)
         self.commands = {}
         self.chips = {}
@@ -329,3 +345,34 @@ def batch(start_clock, samples, receive_time=0.0, delta_clock=7):
     data = b"".join(struct.pack("<hhh", *sample) for sample in samples)
     return {"start_clock": start_clock & 0xFFFFFFFF, "delta_clock": delta_clock, "data": data,
             "#receive_time": receive_time}
+
+
+def stationary_stream(obj, values=(0.0, 0.0, 1.0)):
+    """Timestamp synthetic stationary data at each fake reactor pause."""
+    def emit():
+        now = obj.main_mcu.estimated_print_time(obj.reactor.monotonic())
+        if obj.backend is not None:
+            rate = obj.backend.rate or 3200.0
+            size = round(rate * 0.005)
+            start = now - 0.001 - (size - 1) / rate
+            rows = [(start + number / rate,) + tuple(value * 9806.65 for value in values)
+                    for number in range(size)]
+            obj.backend.helper.emit({"data": rows})
+        else:
+            start = obj.sensor_clock.print_time_to_clock(now - 0.004)
+            obj._inspect(batch(start, [tuple(counts(value) for value in values)] * 5,
+                               receive_time=obj.reactor.monotonic(), delta_clock=4))
+    obj.reactor.on_pause = emit
+
+
+def acquire_reference(obj, endstop, arm_time=None):
+    """Use real pre-motion preparation with a fresh synthetic sensor stream."""
+    if arm_time is not None:
+        obj.reactor.now = arm_time - obj.baseline_time - 0.020
+    stationary_stream(obj)
+    obj._prepare_reference()
+    # Real streaming continues between the callback and the scheduled move.
+    # Retain that history instead of introducing an artificial sample gap.
+    if arm_time is not None:
+        while obj.reactor.monotonic() + 0.005 <= arm_time + 0.000000001:
+            obj.reactor.pause(obj.reactor.monotonic() + 0.005)
