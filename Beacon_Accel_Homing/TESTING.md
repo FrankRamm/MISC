@@ -11,25 +11,28 @@ Run from the repository root with Python 3:
 python -m unittest discover -s Beacon_Accel_Homing/tests -v
 bash -n Beacon_Accel_Homing/install.sh
 bash -n Beacon_Accel_Homing/bootstrap.sh
+bash -n Beacon_Accel_Homing/uninstall.sh
 ```
 
-Focused installer/bootstrap check:
+Focused installer/bootstrap/uninstall check:
 
 ```bash
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_installer.py -v
 ```
 
-The recorded focused installer/bootstrap run discovered 43 tests: 42 passed
-and one real POSIX symlink test was skipped because the Windows host does not permit symlink
-creation. Actual temporary regular-file installation, config idempotence,
-backup/rollback, failed-write recovery, concurrent-edit rejection and later-edit
-protection passed. The symlink operation must still be exercised on a Linux
-host before claiming a host integration test. The earlier Git Bash `bash -n`
-checks passed for both unchanged entry points; they were not repeated for the
-centered-calibration change. No native Linux systemd/Unix-socket integration
-run was performed here.
+The recorded combined run includes **73 installer/bootstrap/uninstall tests:
+72 passed and one real POSIX symlink test was skipped** because the Windows
+host does not permit symlink creation. Temporary regular-file fixtures cover
+installation, config idempotence, backup/rollback, full-history restore,
+failed-write recovery, concurrent-edit rejection and later-edit protection.
+Full restore/link-history checks run with isolated link-state emulation.
+Actual symlink creation must still be exercised on a Linux host before
+claiming a host integration test. The new `uninstall.sh` passed Git Bash
+`bash -n`; the earlier passing checks for unchanged `install.sh` and
+`bootstrap.sh` were not repeated. No native Linux systemd/Unix-socket
+integration run was performed here.
 
-The combined offline verification run discovered **223 tests: 222 passed,
+The combined offline verification run discovered **254 tests: 253 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -50,6 +53,18 @@ Low-acceleration fixtures verify automatic speed reduction using the exact
 runtime startup budget, explicit invalid-speed refusal before writes, plugin
 acceleration limits including the zero override, and toolhead velocity limits.
 
+Full-uninstall fixtures cover multiple upgrades back to the original
+activation/config state, restored original links and sensorless settings,
+unrelated later edits and saved Beacon/bed-mesh data, removal of introduced
+plugin models, restoration of original plugin models, and strict undo of
+the uninstall transaction. They also cover repeated uninstall, CRLF files,
+SAVE_CONFIG-commented original model options, incomplete history, missing
+original sources, malformed/conflicting records and unowned plugin references.
+Shared-checkout fixtures reject module-link changes when another discovered
+config uses the checkout, including an unreadable peer config or a new
+consumer found after planning. Hosted shell fixtures use mocked downloads
+and exercise verified offline-cache dispatch and download/refusal paths.
+
 Core/backend and workflow suites separately cover trigger/session behavior,
 mapped generic data and units, timing/rate/error guards, staged/independent
 models, explicit manual-centering confirmation, stock G28 requirements,
@@ -58,14 +73,20 @@ chart fixtures are explicitly marked as simulated.
 
 Centered-calibration fixtures check `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`
 as the start/resume command, with both XY axes unhomed before it can move or
-change workflow state. The first home tests the candidate from the operator's
-manual center; a clean run has one qualifying discovery and ten validation
-homes. Early triggers increase the candidate, release/invalidate XY and wait
-for manual recentering followed by the same calibration command, preserving
-the pending candidate and attempt count. Automatic recentering follows only
+change workflow state. The first home tests the 2 g default candidate from
+the operator's manual center; a clean run has one qualifying discovery and ten
+validation homes. Early triggers increase the default candidate to 2.5 g,
+release/invalidate XY and wait for manual recentering followed by the same
+calibration command, preserving the pending candidate and attempt count.
+Automatic recentering follows only
 accepted homes. TEST/CHARTS retain their argument-free prompt starts and
 `ACCEL_HOMING_CONFIRM CENTERED=1` response; that response cannot continue
 calibration. These checks do not detect or prove physical centering.
+
+Save-and-reload fixtures run the real named-model loader for both X and Y,
+including a clean 2 g calibration and a 2.5 g calibration after an early trigger.
+They check that the saved threshold and ten successes survive restart loading,
+with the same sensor/geometry checks and no extra homing request.
 
 `test_motion_policy.py` adds offline coverage for relative motion proof at low
 speeds, preservation of legacy Beacon pressed-start behavior, generic
@@ -73,3 +94,8 @@ speeds, preservation of legacy Beacon pressed-start behavior, generic
 plans above the fixed 3 mm nominal command budget before enabling/backoff.
 Those checks establish software behavior only; no physical stop travel or
 end-to-end host/MCU latency was measured.
+
+Changed `installer.py`, `uninstaller.py`, `bootstrap.py` and
+`tests/test_installer.py` passed Python 3.8 grammar parsing on the current
+Python 3.13 host. No Python 3.8 runtime was executed; syntax parsing alone
+does not establish complete runtime compatibility.

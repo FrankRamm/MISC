@@ -37,6 +37,21 @@ def load_motion_policy():
     return policy
 
 
+def load_uninstaller():
+    path = Path(__file__).resolve().with_name("uninstaller.py")
+    spec = importlib.util.spec_from_file_location("accel_homing_uninstaller", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def uninstall_api():
+    # Pass the current module's helpers explicitly, including in offline tests
+    # which load installer.py under an isolated import name.
+    import types
+    return types.SimpleNamespace(**globals())
+
+
 class InstallError(Exception):
     pass
 
@@ -232,9 +247,9 @@ class Section:
 
 
 class ConfigDocument:
-    def __init__(self, path):
+    def __init__(self, path, original=None):
         self.path = canonical(path)
-        self.original = self.path.read_bytes()
+        self.original = self.path.read_bytes() if original is None else original
         self.text = self.original.decode("utf-8")
         self.newline = "\r\n" if "\r\n" in self.text else "\n"
         self.lines = self.text.splitlines(keepends=True)
@@ -568,7 +583,7 @@ def save_manifest(directory, manifest):
     write_state(directory / "manifest.json", {"kind": "file", "mode": 0o600, "data": base64.b64encode(data).decode("ascii")})
 
 
-def apply_plan(changes, config, writer=write_state):
+def apply_plan(changes, config, writer=write_state, selected=None):
     if not changes:
         return None
     entries = []
@@ -582,13 +597,31 @@ def apply_plan(changes, config, writer=write_state):
         if after["kind"] == "file":
             after["data"], after["mode"] = base64.b64encode(after["data"]).decode("ascii"), before.get("mode", 0o600)
         entries.append(dict(path=str(path), before=before, after=after))
+    uninstaller = load_uninstaller()
+    _, active, receipt = uninstaller.history(config, uninstall_api())
+    context = {str(path): snapshot(path) for path in ConfigGraph(config).documents}
+    metadata = dict(operation="install", repo=str(selected["repo"]) if selected else None,
+                    parent=active[-1]["ref"] if active else None,
+                    previous_uninstall=receipt["ref"] if receipt else None, context=context)
+    return execute_transaction(entries, config, metadata, writer)
+
+
+def execute_transaction(entries, config, metadata, writer=write_state):
+    for entry in entries:
+        path = Path(entry["path"])
+        if not state_matches(path, entry["before"]):
+            raise InstallError("%s changed after planning. No files changed; retry after editor/SAVE_CONFIG finishes." % path)
+        if not os.access(path.parent, os.W_OK):
+            raise InstallError("No write access to %s. Run as Klipper service user; no sudo is used." % path.parent)
     parent = config.parent / ".accel_homing_backups"
+    if parent.is_symlink():
+        raise InstallError("Refusing symlink backup directory: %s" % parent)
     parent.mkdir(mode=0o700, exist_ok=True)
     os.chmod(parent, 0o700)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     backup = parent / (stamp + "-" + uuid.uuid4().hex[:8])
     backup.mkdir(mode=0o700)
-    manifest = dict(version=1, config=str(config), status="prepared", created_utc=stamp, changes=entries)
+    manifest = dict(version=2, config=str(config), status="prepared", created_utc=stamp, changes=entries, **metadata)
     save_manifest(backup, manifest)
     applied = []
     try:
@@ -596,14 +629,16 @@ def apply_plan(changes, config, writer=write_state):
             path = Path(entry["path"])
             if not state_matches(path, entry["before"]):
                 raise InstallError("%s changed during installation. Retry after editor/SAVE_CONFIG finishes." % path)
-            writer(path, entry["after"])
             applied.append(entry)
+            writer(path, entry["after"])
         manifest["status"] = "installed"
         save_manifest(backup, manifest)
     except Exception as exc:
         errors = []
         for entry in reversed(applied):
             try:
+                if state_matches(Path(entry["path"]), entry["before"]):
+                    continue
                 if not state_matches(Path(entry["path"]), entry["after"]):
                     raise InstallError("changed concurrently; preserving current contents")
                 write_state(Path(entry["path"]), entry["before"])
@@ -611,9 +646,69 @@ def apply_plan(changes, config, writer=write_state):
                 errors.append("%s: %s" % (entry["path"], undo))
         manifest.update(status="rollback_incomplete" if errors else "rolled_back_after_failure", failure=str(exc), rollback_errors=errors)
         save_manifest(backup, manifest)
-        raise InstallError("Installation failed; %s. Backup %s. Cause: %s%s" %
-                           ("rollback needs repair" if errors else "applied changes restored", backup, exc, "; ".join(errors)))
+        raise InstallError("%s failed; %s. Backup %s. Cause: %s%s" %
+                           ("Uninstall" if metadata.get("operation") == "uninstall" else "Installation",
+                            "rollback needs repair" if errors else "applied changes restored", backup, exc, "; ".join(errors)))
     return backup
+
+
+def make_uninstall_plan(selected):
+    try:
+        plan = load_uninstaller().make_plan(selected, uninstall_api())
+        assert_uninstall_consumers(selected, plan)
+        return plan
+    except InstallError as error:
+        raise InstallError("%s History/backups: %s" % (error, selected["config"].parent / ".accel_homing_backups"))
+
+
+def assert_uninstall_consumers(selected, plan, processes=None, services=None):
+    """A checkout's global extras links may serve more than one config."""
+    extras = selected["repo"] / "klippy/extras"
+    if not any(Path(entry["path"]).parent == extras for entry in plan["entries"]):
+        return
+    processes = proc_instances() if processes is None else processes
+    services = service_instances(Path.home()) if services is None else services
+    peers = {}
+    for peer in processes + services:
+        if peer["repo"] != selected["repo"]:
+            continue
+        same_instance = (peer["config"] == selected["config"]
+                         and (not peer.get("service") or not selected.get("service") or peer["service"] == selected["service"])
+                         and (not peer.get("pid") or not selected.get("pid") or peer["pid"] == selected["pid"]))
+        if not same_instance:
+            peers[(peer["config"], peer.get("service"))] = peer
+    conflicts = []
+    for peer in peers.values():
+        try:
+            graph = ConfigGraph(peer["config"])
+            uses_plugin = any(name in ("accel_homing", "beacon_accel_homing")
+                              or name.startswith("accel_homing_model ") for name in graph.sections)
+            uses_plugin |= any(re.search(r"(?mi)^#\*#\s+\[accel_homing_model\s+", doc.text)
+                               or re.search(r"(?mi)^\s*endstop_pin\s*[:=]\s*(?:accel_homing|beacon_accel):", doc.text)
+                               for doc in graph.documents.values())
+            if uses_plugin or peer["config"] == selected["config"]:
+                conflicts.append(str(peer["config"]) + " (" + (peer.get("service") or peer["origin"]) + ")")
+        except (InstallError, OSError, ValueError):
+            conflicts.append(str(peer["config"]) + " (cannot resolve this shared checkout consumer)")
+    if conflicts:
+        raise InstallError("Uninstall would change shared checkout module links used by another instance: %s. "
+                           "Give that instance a separate checkout or reconcile its plugin dependency first. No files changed." % "; ".join(conflicts))
+
+
+def apply_uninstall_plan(plan, selected, writer=write_state):
+    if plan["config"] != selected["config"] or plan["repo"] != selected["repo"]:
+        raise InstallError("Uninstall plan belongs to a different instance. No files changed.")
+    records, _, _ = load_uninstaller().history(selected["config"], uninstall_api())
+    if [item["ref"] for item in records] != plan["records"]:
+        raise InstallError("Installation history changed after uninstall planning. No files changed; retry.")
+    for path, expected in plan.get("expected", {}).items():
+        if not state_matches(Path(path), expected):
+            raise InstallError("%s changed after planning. No files changed; retry after editor/SAVE_CONFIG finishes." % path)
+    if not plan["entries"]:
+        return None
+    assert_uninstall_consumers(selected, plan)
+    return execute_transaction(plan["entries"], selected["config"],
+                               dict(operation="uninstall", repo=str(selected["repo"]), history=plan["history"]), writer)
 
 
 def rollback(backup, dry_run=False, selected=None):
@@ -621,10 +716,12 @@ def rollback(backup, dry_run=False, selected=None):
     if backup.is_file():
         backup = backup.parent
     manifest = json.loads((backup / "manifest.json").read_text())
-    if manifest.get("version") != 1 or manifest.get("status") != "installed":
+    if manifest.get("version") not in (1, 2) or manifest.get("status") != "installed":
         raise InstallError("Not an installed transaction: %s" % backup)
     if selected and canonical(manifest["config"]) != selected["config"]:
         raise InstallError("Backup belongs to a different config: %s" % manifest["config"])
+    if selected and manifest.get("repo") and canonical(manifest["repo"]) != selected["repo"]:
+        raise InstallError("Backup belongs to a different checkout: %s" % manifest["repo"])
     for entry in manifest["changes"]:
         if not state_matches(Path(entry["path"]), entry["after"]):
             raise InstallError("%s changed after installation. Refusing to overwrite later edits; restore selected "
@@ -669,7 +766,7 @@ def arguments(argv=None):
     parser.add_argument("--replace-existing-links", action="store_true", help="back up/replace plugin links from another source")
     parser.add_argument("--dry-run", action="store_true", help="validate/print plan, no writes")
     parser.add_argument("--rollback", metavar="BACKUP_DIRECTORY", help="restore one unchanged installation transaction")
-    parser.add_argument("-u", "--uninstall", action="store_true", help="restore latest installer transaction")
+    parser.add_argument("-u", "--uninstall", action="store_true", help="restore the state before the first active managed installation, including upgrades")
     args = parser.parse_args(argv)
     args.axes = [axis.strip().lower() for axis in args.axes.split(",")]
     if not args.axes or len(set(args.axes)) != len(args.axes) or any(axis not in ("x", "y") for axis in args.axes):
@@ -687,14 +784,25 @@ def main(argv=None):
     print("Checkout: %s\nMain config: %s\nDetection: %s\nService: %s\nExecutable: %s" %
           (selected["repo"], selected["config"], selected["origin"], selected["service"] or "none", selected["executable"] or "stopped host"))
     if args.uninstall:
-        candidates = []
-        for file in (selected["config"].parent / ".accel_homing_backups").glob("*/manifest.json"):
-            saved = json.loads(file.read_text())
-            if saved.get("status") == "installed" and canonical(saved["config"]) == selected["config"]:
-                candidates.append(file.parent)
-        if not candidates:
-            raise InstallError("No installed backup found. Use --rollback BACKUP_DIRECTORY or restore your original config manually.")
-        args.rollback = str(sorted(candidates)[-1])
+        plan = make_uninstall_plan(selected)
+        for entry in plan["entries"]:
+            print("Restore %s (%s -> %s)" % (entry["path"], entry["before"]["kind"], entry["after"]["kind"]))
+        if args.dry_run:
+            print("Uninstall dry run: %d installation transaction(s); no writes, restart, or movement." % len(plan["history"]))
+            return 0
+        if not plan["entries"]:
+            print("Already uninstalled; no changes, restart, or movement.")
+            return 0
+        print(assert_idle(selected))
+        backup = apply_uninstall_plan(plan, selected)
+        print("Uninstalled. Current-state backup: %s" % backup)
+        print("Restored the pre-install activation/config state across %d installation transaction(s). "
+              "Source caches, charts and original backups were retained." % len(plan["history"]))
+        print("Review the restored config. When idle, run RESTART yourself. No restart, homing, "
+              "firmware flashing, or calibration was performed.")
+        print("Undo this uninstall (only while its restored files remain unchanged): bash %s --config %s --klipper-path %s --rollback %s" %
+              tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "install.sh", selected["config"], selected["repo"], backup)))
+        return 0
     if args.rollback:
         rollback(args.rollback, True, selected)
         if not args.dry_run:
@@ -715,12 +823,14 @@ def main(argv=None):
         print("Already installed; no changes, restart, or movement.")
         return 0
     print(assert_idle(selected))
-    backup = apply_plan(changes, selected["config"])
+    backup = apply_plan(changes, selected["config"], selected=selected)
     print("Installed. Backup: %s" % backup)
     print("Review the config and sensor mounting/orientation. When idle, run RESTART yourself. "
           "No restart, homing, firmware flashing, or calibration was performed.")
     print("Restore: bash %s --config %s --klipper-path %s --rollback %s" %
           tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "install.sh", selected["config"], selected["repo"], backup)))
+    print("Full uninstall (including upgrades): bash %s --config %s --klipper-path %s" %
+          tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "uninstall.sh", selected["config"], selected["repo"])))
     return 0
 
 

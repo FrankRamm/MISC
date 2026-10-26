@@ -106,7 +106,7 @@ All commands below go in the **printer console**:
 2. Run `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`. `CENTERED=1` states that you
    have already centered XY and authorizes movement; the sensor cannot detect
    that position. **X moves immediately.** The first home tests the actual
-   candidate threshold, starting at **3 g by default**, from that manual center.
+   candidate threshold, starting at **2 g by default**, from that manual center.
 3. After one qualifying home, the plugin performs **ten additional consecutive
    accepted homes** at the same threshold. Between accepted trials, it returns
    only the tested axis to center.
@@ -150,6 +150,26 @@ Paths appear in the console and `ACCEL_HOMING_STATUS`. The default output is
 `accel_homing_charts/` beside the main `printer.cfg`; `charts_directory` changes
 it. See the [configuration example](examples/accel_homing.cfg) for all settings.
 
+## Uninstall and restore the previous configuration
+
+Run this single line in the Linux host's **shell**, as the same Klipper user:
+
+```bash
+bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/uninstall.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing'
+```
+
+It restores the original X/Y endstops, sensorless settings and plugin links
+from before the first recorded installation, including installations followed
+by upgrades. It removes configuration and calibration models introduced by
+this extension, preserving unrelated later edits and other saved models.
+
+If a changed setting conflicts with restoration or a backup is incomplete,
+it stops before changing configuration or plugin links and identifies the
+file and backup to review. Source downloads, charts and backups are retained.
+See [uninstall and recovery details](docs/INSTALLATION.md#uninstall-and-restore-the-pre-installation-configuration).
+Review the result, then issue **`RESTART` yourself while idle**. Uninstallation
+does not restart Klipper or move the printer.
+
 ## For the curious
 
 <details>
@@ -186,6 +206,10 @@ default. Leave the shared setting absent to use calibrated values. Generic
 4 g default, so **do not use the 8 g example for MPU9250**. Unknown compatible
 objects need their actual configured `sensor_range`.
 
+Manual threshold settings and temporary SET commands retain their 3–15 g
+range. Calibration and its saved model accept values starting at 2 g; the
+calibration ceiling and sensor-range limits still apply.
+
 The named model defaults to `[accel_homing_model default]`. It stores thresholds,
 ten-success counts and sensor/configuration metadata. Calibration with
 `SAVE_CONFIG=0` stages results until you issue `SAVE_CONFIG` yourself; that
@@ -202,10 +226,10 @@ controllable XY enables and single-touch X/Y settings (`homing_retract_dist: 0`,
 `min_home_dist: 0`). They reject dual carriages, shared XY/Z enables,
 `homing_override`, `safe_z_home` and G28 macros that could introduce Z movement.
 
-Calibration defaults: start at 3 g, increase by 0.5 g for early triggers, stop
+Calibration defaults: start at 2 g, increase by 0.5 g for early triggers, stop
 at 12 g or 80% of sensor range, allow at most 40 homing attempts and wait up to
 300 seconds for manual recentering. `calibration_start_threshold` is configurable
-with a minimum of 3 g. Starting or resuming calibration requires both XY axes
+with a minimum of 2 g. Starting or resuming calibration requires both XY axes
 to be unhomed; it never marks manually centered coordinates as homed.
 Qualification requires over 10 mm of commanded travel and agreement within
 20% of expected center-to-stop travel.

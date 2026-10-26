@@ -13,7 +13,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 
-FILES = ("install.sh", "installer.py", "accel_homing.py", "beacon_accel_homing.py",
+FILES = ("install.sh", "uninstall.sh", "bootstrap.py", "bootstrap.sh", "installer.py", "uninstaller.py", "accel_homing.py", "beacon_accel_homing.py",
          "accel_homing_backends.py", "accel_homing_workflows.py", "accel_homing_model.py",
          "accel_homing_charts.py", "LICENSE", "NOTICE", "README.md", "TESTING.md", "docs/INSTALLATION.md", "docs/COMPATIBILITY.md",
          "examples/accel_homing.cfg", "examples/beacon_accel_homing.cfg",
@@ -110,6 +110,9 @@ def main(argv=None):
     parser.add_argument("--ref", default="codex/universal-accel-homing", help="branch/tag or preferably a full immutable commit SHA")
     parser.add_argument("--install-dir", default=str(Path.home() / ".local/share/accel-homing"), help="persistent versioned source directory")
     args, installer_args = parser.parse_known_args(argv)
+    if ("--uninstall" in installer_args or "-u" in installer_args) and any(
+            option == "--rollback" or option.startswith("--rollback=") for option in installer_args):
+        parser.error("choose --uninstall or --rollback")
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         raise ValueError("Run as the Klipper service user, not root")
     release = prepare_release(args.repo, args.ref, args.install_dir)
