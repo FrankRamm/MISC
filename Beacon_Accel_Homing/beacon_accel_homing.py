@@ -164,7 +164,7 @@ def describe_reference(status):
         return "/".join("%.3f" % values[axis] for axis in ("x", "y", "z"))
     def age(value):
         return "unknown" if value is None else "%.2f" % value
-    return ("baseline %s: %s (%s); best quiet %d/%d samples, %.2f/%.2f ms,"
+    result = ("baseline %s: %s (%s); best quiet %d/%d samples, %.2f/%.2f ms,"
             " p-p XYZ %s g (limit %.3f g); observed p-p XYZ %s g;"
             " accepted %d, pre-cutoff %d, resets %d; sample age %s ms"
             " (max %.2f ms), batch oldest/newest %s/%s ms"
@@ -176,6 +176,9 @@ def describe_reference(status):
                status["pre_cutoff_samples"], status["quiet_resets"],
                age(status["sample_age_ms"]), status["max_sample_age_ms"],
                age(status["oldest_batch_age_ms"]), age(status["newest_batch_age_ms"])))
+    if status["motion_proof_noise_bound_g"] is not None:
+        result += "; motion-proof noise bound XYZ %s g" % xyz(status["motion_proof_noise_bound_g"])
+    return result
 
 
 def homing_warnings(name, info):
@@ -224,6 +227,8 @@ class Attempt:
         self.pending_noise = (0.0, 0.0, 0.0)
         self.bases = None           # resting reading of all three sensor axes
         self.sums = [0.0, 0.0, 0.0]  # integrated readings since the pass started
+        self.proof_noise = None    # raw-axis uncertainty, only expanded configured references
+        self.proof_state = None    # atomic (sums, sample count, dt, end clock) for that proof
         self.sample_dt = 0.0
         self.first_clock = self.last_end_clock = None
         self.auto_direction = 0     # impact direction found from the travel
@@ -327,6 +332,8 @@ class BeaconAccelHoming:
         self.back_off_dist = config.getfloat("back_off_dist", 5.0, minval=0.0, maxval=20.0)
         self.baseline_batches = config.getint("baseline_batches", 25, minval=10, maxval=200)
         self.baseline_time = config.getfloat("baseline_time", 0.1, minval=0.05, maxval=1.0)
+        self.baseline_noise_floor = config.getfloat("baseline_noise_floor", 0.2,
+                                                    minval=0.0, maxval=0.2)
         self.enable_settle_time = config.getfloat("enable_settle_time", ENABLE_SETTLE,
                                                   minval=0.0, maxval=2.0)
         self.stream_timeout = config.getfloat("stream_timeout", 0.05, minval=0.01, maxval=0.5)
@@ -334,6 +341,7 @@ class BeaconAccelHoming:
         self.watchdog_margin = config.getfloat("watchdog_margin", 0.15, minval=0.0, maxval=2.0)
         scalar_options = {"threshold": threshold, "homing_accel": self.homing_accel,
                           "back_off_dist": self.back_off_dist, "baseline_time": self.baseline_time,
+                          "baseline_noise_floor": self.baseline_noise_floor,
                           "enable_settle_time": self.enable_settle_time,
                           "stream_timeout": self.stream_timeout, "travel_margin": self.travel_margin,
                           "watchdog_margin": self.watchdog_margin}
@@ -784,7 +792,7 @@ class BeaconAccelHoming:
             axis = next(iter(self.session_axes))
             count_g = self.session_scale["scale"] / 1000.0
             reference = QuietReference(axis, cutoff, self.baseline_time,
-                                       BASELINE_NOISE_RATIO * self.threshold_g[axis] / count_g)
+                                       self._reference_noise_limit(axis) / count_g)
             with self.lock:
                 self.recent.clear()
                 self.tail = None
@@ -832,8 +840,11 @@ class BeaconAccelHoming:
                     else reference.last - reference.first)
             observed = ((0.0, 0.0, 0.0) if reference is None or reference.observed_low is None
                         else tuple(b - a for a, b in zip(reference.observed_low, reference.observed_high)))
+            bases = None if reference is None else reference.baseline()
+            proof_noise = self._reference_motion_noise(reference, bases, axis)
             self.baseline_status = {
                 "axis": axis, "phase": phase, "result": result,
+                "motion_proof_noise_bound_g": None if proof_noise is None else mapped(proof_noise),
                 "quiet_samples": 0 if reference is None else reference.count,
                 "quiet_span_ms": round(span * 1000.0, 3),
                 "required_samples": BASELINE_MIN_SAMPLES,
@@ -843,7 +854,7 @@ class BeaconAccelHoming:
                 "best_quiet_peak_to_peak_g": mapped((0.0, 0.0, 0.0) if reference is None
                                                     else reference.best_peak_to_peak),
                 "observed_peak_to_peak_g": mapped(observed),
-                "quiet_limit_g": (BASELINE_NOISE_RATIO * self.threshold_g[axis] if reference is None
+                "quiet_limit_g": (self._reference_noise_limit(axis) if reference is None
                                   else reference.limit * count_g),
                 "accepted_samples": 0 if reference is None else reference.accepted,
                 "pre_cutoff_samples": 0 if reference is None else reference.pre_cutoff,
@@ -864,6 +875,22 @@ class BeaconAccelHoming:
         return self.printer.command_error("accel_homing: %s; %s. Inspect stationary"
                                           " sensor readings and delivery timing; see ACCEL_HOMING_STATUS"
                                           % (FAILURES["no_baseline"], detail))
+
+    def _reference_noise_limit(self, axis):
+        original = BASELINE_NOISE_RATIO * self.threshold_g[axis]
+        # Native Beacon's pressed-start path retains its original admission.
+        return original if self.backend is None else max(original, self.baseline_noise_floor)
+
+    def _reference_motion_noise(self, reference, bases, axis):
+        """Observed envelope for references the configured floor newly admits."""
+        if self.backend is None or reference is None or bases is None:
+            return None
+        original = BASELINE_NOISE_RATIO * self.threshold_g[axis] / (self.session_scale["scale"] / 1000.0)
+        if not any(high - low > original for low, high in zip(reference.low, reference.high)):
+            return None
+        # The mean need not lie at the midpoint, so half the range is unsafe.
+        return tuple(max(abs(low - base), abs(high - base))
+                     for low, high, base in zip(reference.low, reference.high, bases))
 
     def _reference_max_age(self):
         return self.stream_timeout if self.backend is None else self.backend.max_age
@@ -1004,6 +1031,7 @@ class BeaconAccelHoming:
                       or not -0.005 <= now - reference.last <= self._reference_max_age() else "ready")
             if result != "ready":
                 bases = None
+            proof_noise = self._reference_motion_noise(reference, bases, axis)
             self.preparation = None
         if bases is None:
             error = self._baseline_error(reference, now, "before_arm", result, axis)
@@ -1017,6 +1045,7 @@ class BeaconAccelHoming:
                           index, map_sign, direction, threshold / count_g, count_g)
         attempt.steppers = endstop.get_steppers()
         attempt.bases = bases
+        attempt.proof_noise = proof_noise
         attempt.baseline = bases[index]
         attempt.last_samples = list(bases)
         attempt.effective_speed, attempt.effective_accel = speed, accel
@@ -1099,9 +1128,22 @@ class BeaconAccelHoming:
             # Missing samples leave the integrated speed too low, so a moving
             # toolhead could look pressed. Only an impact can end such a move.
             return None
-        measured_at = self.clock_to_time(attempt.last_end_clock)
+        proof_state = attempt.proof_state
+        if attempt.proof_noise is not None:
+            if proof_state is None:
+                return None
+            sums, integrated_count, dt, end_clock = proof_state
+            measured_at = self.clock_to_time(end_clock)
+            scale = attempt.count_g * MM_PER_S2_PER_G * dt
+            # A lower bound can only make configured motion proof stricter.
+            # It assumes subsequent stationary disturbance stays within the
+            # observed pre-arm envelope, not a guaranteed physical bound.
+            measured = sum((max(0.0, abs(value) - bound * integrated_count) * scale) ** 2
+                           for value, bound in zip(sums, attempt.proof_noise)) ** 0.5
+        else:
+            measured_at = self.clock_to_time(attempt.last_end_clock)
+            measured = self._measured_speed(attempt)
         commanded = self._commanded_speed(attempt, measured_at - MOTION_LAG)
-        measured = self._measured_speed(attempt)
         # Workflow proof must also work when the configured rail or toolhead
         # velocity limit is below the legacy pressed-start cutoff.  A slightly
         # wider step-history window avoids single-step quantization at very low
@@ -1329,7 +1371,14 @@ class BeaconAccelHoming:
             sums = attempt.sums = [sums[0] + sum(raw[0::3]) - bases[0] * count,
                                    sums[1] + sum(raw[1::3]) - bases[1] * count,
                                    sums[2] + sum(raw[2::3]) - bases[2] * count]
-            attempt.last_end_clock = start_clock + params["delta_clock"]
+            end_clock = start_clock + params["delta_clock"]
+            if attempt.proof_noise is not None:
+                previous = attempt.proof_state
+                integrated_count = count + (0 if previous is None else previous[1])
+                # Serial-reader and watchdog threads see one coherent sample
+                # count and sums. N*dt includes the first integrated sample.
+                attempt.proof_state = (tuple(sums), integrated_count, attempt.sample_dt, end_clock)
+            attempt.last_end_clock = end_clock
             attempt.last_samples = [raw[-3], raw[-2], raw[-1]]
             if not direction:
                 # The stop decelerates the toolhead, so once it travels the
@@ -1337,7 +1386,14 @@ class BeaconAccelHoming:
                 # jolt in the travel direction is then ignored.
                 speed = (sums[attempt.index] * attempt.map_sign * attempt.count_g
                          * MM_PER_S2_PER_G * attempt.sample_dt)
-                if abs(speed) >= AUTO_DIRECTION_SPEED:
+                if attempt.proof_noise is not None:
+                    uncertainty = (attempt.proof_noise[attempt.index] * integrated_count
+                                   * attempt.count_g * MM_PER_S2_PER_G * attempt.sample_dt)
+                    if speed - uncertainty >= AUTO_DIRECTION_SPEED:
+                        attempt.auto_direction = -1
+                    elif speed + uncertainty <= -AUTO_DIRECTION_SPEED:
+                        attempt.auto_direction = 1
+                elif abs(speed) >= AUTO_DIRECTION_SPEED:
                     attempt.auto_direction = -1 if speed > 0 else 1
             return
         self._onset(attempt, params, values, count)

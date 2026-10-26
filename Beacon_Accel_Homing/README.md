@@ -120,9 +120,12 @@ All commands below go in the **printer console**:
 not obtain or retain the required stationary reference before arming.
 After the error, run **`ACCEL_HOMING_STATUS`**. It retains the baseline result
 and phase, quiet-window sample count and duration, X/Y/Z peak-to-peak variation
-and quiet limit, plus sample/batch ages and the allowed sample age. Review
-them together; the error alone does not prove excessive sensor noise. Include
-that status output and the matching Klipper log when reporting the failure.
+and quiet limit, plus sample/batch ages and the allowed sample age. Fresh
+samples can still repeatedly reset the quiet window before it spans
+`baseline_time`. Review the window duration, reset count, measured variation
+and sample ages together; the error alone does not prove excessive sensor
+noise. Include that status output and the matching Klipper log when reporting
+the failure.
 
 ## Calibrate X, then Y
 
@@ -323,10 +326,19 @@ any settling delay after enabling motors, then collects a new sensor reference.
 setting it to zero keeps the quiet-data check.
 
 The reference needs at least 50 fresh contiguous samples spanning
-`baseline_time` (0.1 s by default), with peak-to-peak variation on every sensor
-axis at most 20% of that pass's impact threshold. Acquisition is limited to
-`baseline_time + 0.5 s` after setup completes. Earlier buffered data cannot
-qualify. Data faults abort; persistent noise or no data produces `no_baseline`
+`baseline_time` (0.1 s by default). Native Beacon keeps its existing limit:
+peak-to-peak variation on every sensor axis at most 20% of that pass's impact
+threshold. Configured generic accelerometers, including Cartographer's
+separate ADXL/LIS sensor, use `max(0.20 * threshold, baseline_noise_floor)`.
+`baseline_noise_floor` defaults to **0.2 g** and accepts finite values from
+**0 to 0.2 g**; zero restores the previous 20% rule. With a 0.5 g calibration
+candidate, the default quiet limit is 0.2 g while the impact threshold remains
+0.5 g. This setting does not affect native Beacon's quietness, already-pressed
+or motion behavior.
+
+Acquisition is limited to `baseline_time + 0.5 s` after setup completes.
+Earlier buffered data cannot qualify. Data faults abort; persistent noise or
+no data produces `no_baseline`
 before the pass starts. The validated reference is frozen before arming;
 there is no interval or minimum travel that ignores an early real impact.
 See [the preparation contract](docs/COMPATIBILITY.md#pre-motion-stationary-preparation).
@@ -363,7 +375,22 @@ its Z hop before a later X/Y policy refusal. No Z settings are changed.
 A generic home with no impact must establish motion before a calculated
 deadline or fail with `no_motion`; this does not establish an origin. Ordinary
 `G28` can finish on a fresh impact before motion proof; workflows also check
-motion and travel. Plans exceeding a **3 mm nominal commanded-travel budget**
+motion and travel.
+
+When an accepted generic reference exceeds the original 20% quiet limit,
+movement proof subtracts an allowance for its observed noise. Each sensor
+axis uses the larger deviation from the accepted mean to either observed
+extreme; status reports the applied `motion-proof noise bound XYZ` in g.
+This assumes later stationary noise stays within those observed bounds.
+Automatic impact direction uses the same bounds; uncertain drift leaves
+detection bidirectional. Raw impact acceleration and threshold, manual direction
+overrides, first-impact eligibility and the startup deadline stay unchanged.
+Very noisy or slow cases can fail with
+`no_motion`; that failure does not raise speed or thresholds automatically.
+This adjustment has synthetic validation only and still needs supervised
+physical testing.
+
+Plans exceeding a **3 mm nominal commanded-travel budget**
 before the host stop request are rejected. This excludes host stalls,
 transport and MCU stop delay, so it is **not a physical stopping guarantee**.
 For example, the default timing settings at 50 mm/s require 2.65 mm with

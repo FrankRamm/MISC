@@ -41,7 +41,7 @@ failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. Shell entry points are unchanged by this
-calibration/activation change, so their syntax checks were not repeated. No native
+baseline-policy change, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -57,7 +57,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The combined offline verification run discovered **351 tests: 350 passed,
+The combined offline verification run discovered **364 tests: 363 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -178,26 +178,63 @@ queue waits and acquisition, Beacon clock conversion/wrap, pending-sample
 freshness, preservation of an immediate real impact in a batch crossing
 arming, and other accelerometer clients surviving success/failure cleanup.
 
-The new baseline fixtures preserve the existing quiet/freshness gates. ADXL-style
-3200 Hz timestamps rounded to microseconds acquire a 100 ms reference with a
-10-batch retained deque and a separate print-clock epoch. Synthetic failures
-exercise repeated sub-100 ms quiet candidates, absent data, only pre-cutoff
-data, and a ready reference that expires before arming. Retained error/status
-summaries distinguish acquisition timeout from before-arm expiry, invalidation
-or a missing reference. They include current and best quiet candidate counts
-and spans, all-axis peak-to-peak values in g, reset/pre-cutoff/accepted counts,
-and sample/batch ages in ms. Those ages are snapshots at the reported gate,
-not a live sensor reading after cleanup. Native Beacon fixtures also verify
-machine-axis mapping, status-copy isolation, and rejection of a batch with a
-stale oldest sample even when its actual newest sample is fresh. Statistics
-use constant-size summaries; these diagnostics retain no raw sample stream.
-The supplied failure log contains no such baseline statistics and does not
-establish a physical noise, sensor-latency or current-transition cause.
+The diagnostic fixtures exercise ADXL-style 3200 Hz timestamps rounded to
+microseconds, a 100 ms reference with a 10-batch retained deque, and a separate
+print-clock epoch. They distinguish acquisition timeout from expiry,
+invalidation or a missing reference before arming. Retained summaries include
+current and best quiet candidate counts/spans, X/Y/Z peak-to-peak variation in
+g, reset/pre-cutoff/accepted counts, and sample/batch ages in ms. Ages are
+snapshots at the reported gate, not live readings after cleanup. Native Beacon
+fixtures verify machine-axis mapping, status-copy isolation and rejection of
+stale oldest data even when the actual newest batch sample is fresh.
+
+Configured baseline-floor checks add **13 tests** in
+`test_backends.BaselineFloorTest`, with parameterized subcases. The finite
+`baseline_noise_floor` accepts 0–0.2 g and defaults to 0.2 g for configured
+batch backends. Their effective quiet limit is the larger of that floor and
+20% of the active impact threshold. A zero floor restores the prior rule;
+thresholds at least 1 g retain their prior limit. Native Beacon keeps its
+original 20% gate and raw moving/pressed-start decisions, including the 0.1 g
+quiet limit at a 0.5 g candidate. The configured floor does not raise the
+impact threshold or reduce the required sample count, duration or freshness.
+
+For a configured reference whose actual accepted variation exceeds the old
+20% gate, movement proof uses a conservative lower bound. Each axis freezes
+`b = max(abs(low - mean), abs(high - mean))`; it subtracts `N*b` from the
+absolute sum of baseline-relative readings, clamps at zero, then uses the
+existing physical velocity conversion and vector norm. One atomic snapshot
+contains sums, sample count, sample interval and final sample clock; `N`
+includes the first accumulated sample. Automatic impact direction requires
+the corresponding signed velocity interval to clear +30 or -30 mm/s;
+otherwise raw impacts remain bidirectional. No raw post-arm sample or
+integral is filtered, and raw first-impact detection and startup deadlines
+remain unchanged. References admitted by the old gate retain their old path.
+The status summary exposes `baseline.motion_proof_noise_bound_g` when this
+correction applies. Statistics use constant-size summaries.
+
+A floor-only experiment reproduced false movement proof with a parked,
+changing-mean signal. The final fixtures reject balanced, slow-block and
+asymmetric-reference bias on one or three axes, using the maximum deviation
+from the mean rather than half the peak-to-peak range. Actual synthetic host
+stop requests meet the unchanged startup timeout plus one 3 ms watchdog
+interval and the nominal 3 mm commanded-travel budget. True 50 mm/s ramps at
+4000 mm/s² prove movement in both directions and across pseudo-clock wrap;
+that ideal acceleration stays below the unchanged 0.5 g impact threshold.
+Separate first-sample ±0.51 g contacts still trigger, including after uncertain
+raw integrated speed exceeds 30 mm/s. A real 1 mm/s synthetic ramp with too
+little evidence under the expanded noise envelope fails with `no_motion`;
+no speed or acceleration is automatically changed. Repeated 0.21 g excursions
+and stale, future or pre-cutoff-only data still abort before arming. Modeled
+0.164 g ranges are constructed signals, not a replay of a user's raw data.
+
+The noise envelope is an observation from preparation, not a guaranteed bound
+on future disturbances. These fixtures establish software behavior only and
+do not certify hardware noise, physical contact or stopping distance.
 
 These fixtures advance fake host/print/sensor clocks and check ordering before
-trigger dispatch is armed. They do not measure mechanical settling, validate
-the 20% quiet limit on hardware, or prevent a driver's first-step hold-to-run
-current transient. No physical homing or motor-current measurement was made.
+trigger dispatch is armed. They do not measure mechanical settling, qualify
+the configured floor or native 20% rule on hardware, or prevent a driver's
+first-step hold-to-run current transient. No physical homing or motor-current measurement was made.
 The 0.5 g starting value does not establish a physical fix for skipped steps
 or inconsistent homing. Commanded/firmware step travel is not an encoder
 measurement. The default 20% center-to-stop geometry check and new fixed
