@@ -57,7 +57,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The combined offline verification run discovered **308 tests: 307 passed,
+The combined offline verification run discovered **309 tests: 308 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -107,9 +107,9 @@ validate nozzle clearance, Cartographer probing or physical homing behavior.
 
 Centered-calibration fixtures check `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`
 as the start/resume command, with both XY axes unhomed before it can move or
-change workflow state. The first home tests the 1 g default candidate from
+change workflow state. The first home tests the 0.5 g default candidate from
 the operator's manual center; a clean run has one qualifying discovery and ten
-validation homes. Early triggers increase the default candidate to 1.5 g,
+validation homes. Early triggers increase the default candidate to 1.0 g,
 release/invalidate XY and wait for manual recentering followed by the same
 calibration command, preserving the pending candidate and attempt count.
 Automatic recentering follows only accepted homes. TEST/CHARTS start directly
@@ -126,18 +126,23 @@ or failure. Early calibration hits retain console instructions, the same
 calibration resume command, candidate/attempt state and pending timeout.
 
 Save-and-reload fixtures run the real named-model loader for both X and Y,
-including a clean 1 g calibration and a 1.5 g calibration after an early trigger.
+including a clean 0.5 g calibration and a 1.0 g calibration after an early trigger.
 They check that the saved threshold and ten successes survive restart loading,
 with the same sensor/geometry checks and no extra homing request. Both axes
-reject thresholds below 1 g and nonfinite values; previous models at 2 g or
-above remain accepted. Manual threshold and temporary SET limits remain 3–15 g.
+reject thresholds below 0.5 g and nonfinite values; previous models at 1 g and
+2 g remain accepted. Manual threshold and temporary SET limits remain 3–15 g.
+The `SAVE_CONFIG=1` default retains automatic write/restart dispatch.
+`SAVE_CONFIG=0` fixtures check model staging without write/restart dispatch
+and restoration of the original active thresholds; saving and reloading are
+still required to activate that model. All save/restart operations in these
+fixtures are simulated.
 
-Motor-enable and fresh-reference checks add **19 tests** in
-`test_session.EnablePreparationTest` (13) and
+Motor-enable and fresh-reference checks add **20 tests** in
+`test_session.EnablePreparationTest` (14) and
 `test_backends.GenericPreparationTest` (6), with parameterized subcases. They
 cover disabled, partly enabled and already enabled CoreXY motors; actual
 completion of queued settling/backoff/retract before the cutoff; a fresh
-reference for the 1 g candidate and every pass; exclusion of old/buffered
+reference for the 0.5 g candidate and every pass; exclusion of old/buffered
 impacts; ringdown and noise on all sensor axes; and rejection of invalid,
 stale, future, nonmonotonic, gapped, clipped or scale-changed references.
 They also exercise bounded failure with persistent noise or no data,
@@ -150,6 +155,10 @@ These fixtures advance fake host/print/sensor clocks and check ordering before
 trigger dispatch is armed. They do not measure mechanical settling, validate
 the 20% quiet limit on hardware, or prevent a driver's first-step hold-to-run
 current transient. No physical homing or motor-current measurement was made.
+The 0.5 g starting value does not establish a physical fix for skipped steps
+or inconsistent homing. Commanded/firmware step travel is not an encoder
+measurement, and the default 20% center-to-stop geometry check does not bound
+the spread between accepted trials or prove precise physical repeatability.
 
 `test_motion_policy.py` adds offline coverage for relative motion proof at low
 speeds, preservation of legacy Beacon pressed-start behavior, generic

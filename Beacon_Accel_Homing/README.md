@@ -124,12 +124,12 @@ for XY travel. These workflows do not perform `safe_z_home`'s Z hop.
    have already centered XY and authorizes movement; the sensor cannot detect
    that position. **There is no further confirmation: X starts after the
    stationary preparation check.** The first home tests the actual candidate
-   threshold, starting at **1 g by default**, from that manual center.
+   threshold, starting at **0.5 g by default**, from that manual center.
 3. After one qualifying home, the plugin performs **ten additional consecutive
    accepted homes** at the same threshold. Between accepted trials, it returns
    only the tested axis to center.
 4. If it triggers too early, the plugin raises the candidate threshold by
-   0.5 g by default (the first retry is **1.5 g**), resets
+   0.5 g by default (the first retry is **1.0 g**), resets
    the validation count and releases XY, leaving both axes unhomed. Center XY
    manually again, then repeat **`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`** to
    resume the pending candidate and attempt count. It does not return
@@ -139,6 +139,12 @@ for XY travel. These workflows do not perform `safe_z_home`'s Z hop.
    the **DO NOT EDIT** block of `printer.cfg` and restarts Klipper. Do not edit
    that generated block. Once ready, repeat the manual preparation and run
    **`ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1`**. X and Y are saved independently.
+
+To defer writing and restarting, start with
+`ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 SAVE_CONFIG=0`. This stages the model
+only. You must later issue `SAVE_CONFIG` to write it to `printer.cfg` and
+restart Klipper; the calibrated threshold becomes available after that reload.
+A plain `RESTART` discards an unsaved staged model.
 
 Keep the same calibration command, `AXIS` and optional `SAVE_CONFIG` value
 when resuming after manual recentering. The console reports when recentering
@@ -231,13 +237,18 @@ default. Leave the shared setting absent to use calibrated values. Generic
 objects need their actual configured `sensor_range`.
 
 Manual threshold settings and temporary SET commands retain their 3–15 g
-range. Calibration and its saved model accept values starting at 1 g; the
+range. Calibration and its saved model accept values starting at 0.5 g; the
 calibration ceiling and sensor-range limits still apply.
 
 The named model defaults to `[accel_homing_model default]`. It stores thresholds,
-ten-success counts and sensor/configuration metadata. Calibration with
-`SAVE_CONFIG=0` stages results until you issue `SAVE_CONFIG` yourself; that
-command writes the file and restarts Klipper. A clean calibration has one
+ten-success counts and sensor/configuration metadata. Calibration defaults to
+`SAVE_CONFIG=1`, which writes the file and restarts Klipper automatically.
+`SAVE_CONFIG=0` stages results in memory until you issue `SAVE_CONFIG` yourself;
+it neither writes the file nor activates the new threshold for ordinary
+homing. The workflow restores the previous active thresholds when it ends.
+The staged model supplies its threshold after saving and reloading, unless a
+manual override takes priority. An ordinary `RESTART` discards unsaved staged
+values. A clean calibration has one
 qualifying discovery home and ten validation homes: eleven homes in total.
 With `SAVE_CONFIG=0`, the completed axis remains homed. Before calibrating the
 other axis, use your machine's appropriate controls to leave both XY axes
@@ -256,17 +267,19 @@ existing behavior. Dual carriages, shared XY/Z enables, `homing_override`,
 G28 macros and unknown wrapper chains remain rejected. See
 [the source contract and limits](docs/COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
-Calibration defaults: start at 1 g, increase by 0.5 g for early triggers, stop
+Calibration defaults: start at 0.5 g, increase by 0.5 g for early triggers, stop
 at 12 g or 80% of sensor range, allow at most 40 homing attempts and wait up to
 300 seconds for manual recentering. `calibration_start_threshold` is configurable
-with a minimum of 1 g. Existing models at 2 g or above remain valid. Starting
-at 1 g applies when `calibration_start_threshold` is absent or set to 1;
+with a minimum of 0.5 g. Existing models at 1 g and 2 g remain valid. Starting
+at 0.5 g applies when `calibration_start_threshold` is absent or set to 0.5;
 an explicit existing value is preserved. Updating does not replace a saved
 model's threshold; recalibrate to produce a new model. Starting or resuming
 calibration requires both XY axes to be unhomed; it never marks manually
 centered coordinates as homed.
 Qualification requires over 10 mm of commanded travel and agreement within
-20% of expected center-to-stop travel.
+20% of expected center-to-stop travel by default. This broad geometry check
+does not constrain the spread between accepted trials or establish precise
+physical repeatability.
 Missing/late data, invalid captures, MCU errors and excessive travel abort
 instead of increasing the threshold. Stock Klipper homing fault cleanup still
 applies and may release all motors.
@@ -311,9 +324,11 @@ before the host stop request are rejected. This excludes host stalls,
 transport and MCU stop delay, so it is **not a physical stopping guarantee**.
 See [the exact calculation](docs/COMPATIBILITY.md#generic-startup-motion-policy).
 
-Ten repeats and firmware step distances cannot prove contact with the correct
-stop or absence of skipped steps. A softer impact at lower speed may also be
-undetectable. Mounting and actual physical behavior need operator validation.
+Commanded/firmware step distances are not encoder measurements. Ten repeats
+cannot prove contact with the correct stop or absence of skipped steps.
+Starting calibration at 0.5 g does not establish that either problem is fixed.
+A softer impact at lower speed may also be undetectable. Mounting and actual
+physical behavior need operator validation.
 
 ### Legacy names and provenance
 

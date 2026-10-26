@@ -55,8 +55,8 @@ class AccelHomingWorkflows:
             for axis, threshold in self.model.thresholds.items():
                 if axis not in self.manual_axes:
                     owner.threshold_g[axis] = threshold
-        self.start_threshold = config.getfloat("calibration_start_threshold", 1.0,
-                                               minval=1.0, maxval=15.0)
+        self.start_threshold = config.getfloat("calibration_start_threshold", 0.5,
+                                               minval=0.5, maxval=15.0)
         self.threshold_step = config.getfloat("calibration_step", 0.5,
                                               minval=0.1, maxval=3.0)
         self.max_threshold = config.getfloat("calibration_max_threshold", 12.0,
