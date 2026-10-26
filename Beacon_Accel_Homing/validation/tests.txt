@@ -8,6 +8,10 @@ test_first_single_post_arm_contact_survives_generic_batch_boundary (test_backend
 test_late_pre_cutoff_peak_and_pending_are_excluded_from_reference (test_backends.GenericPreparationTest.test_late_pre_cutoff_peak_and_pending_are_excluded_from_reference) ... ok
 test_other_clients_survive_success_and_gate_failure (test_backends.GenericPreparationTest.test_other_clients_survive_success_and_gate_failure) ... ok
 test_pending_sample_age_is_rechecked_before_contact (test_backends.GenericPreparationTest.test_pending_sample_age_is_rechecked_before_contact) ... ok
+test_ready_reference_expiry_before_arm_is_reported_separately (test_backends.GenericPreparationTest.test_ready_reference_expiry_before_arm_is_reported_separately) ... ok
+test_rounded_3200hz_reference_spans_small_deque_and_print_clock_offset (test_backends.GenericPreparationTest.test_rounded_3200hz_reference_spans_small_deque_and_print_clock_offset) ... ok
+test_timeout_differentiates_absent_from_pre_cutoff_only_data (test_backends.GenericPreparationTest.test_timeout_differentiates_absent_from_pre_cutoff_only_data) ... ok
+test_timeout_retains_best_quiet_candidate_and_observed_noise (test_backends.GenericPreparationTest.test_timeout_retains_best_quiet_candidate_and_observed_noise) ... ok
 test_already_mapped_driver_data_is_not_mapped_twice (test_backends.GenericTriggerTest.test_already_mapped_driver_data_is_not_mapped_twice) ... ok
 test_batch_straddling_arm_keeps_only_post_arm_trigger (test_backends.GenericTriggerTest.test_batch_straddling_arm_keeps_only_post_arm_trigger) ... ok
 test_biased_stationary_baseline_is_subtracted (test_backends.GenericTriggerTest.test_biased_stationary_baseline_is_subtracted) ... ok
@@ -200,6 +204,8 @@ test_invalid_reference_streams_abort_before_dispatch (test_session.EnablePrepara
 test_long_baseline_does_not_depend_on_recent_batch_capacity (test_session.EnablePreparationTest.test_long_baseline_does_not_depend_on_recent_batch_capacity) ... ok
 test_long_queued_settle_does_not_trigger_idle_cleanup (test_session.EnablePreparationTest.test_long_queued_settle_does_not_trigger_idle_cleanup) ... ok
 test_motor_off_or_shutdown_during_wait_or_acquisition_cancels (test_session.EnablePreparationTest.test_motor_off_or_shutdown_during_wait_or_acquisition_cancels) ... ok
+test_native_reference_diagnostics_use_machine_axes_and_survive_cleanup (test_session.EnablePreparationTest.test_native_reference_diagnostics_use_machine_axes_and_survive_cleanup) ... ok
+test_native_stale_oldest_retains_actual_fresh_newest_batch_age (test_session.EnablePreparationTest.test_native_stale_oldest_retains_actual_fresh_newest_batch_age) ... ok
 test_old_delivered_peak_is_excluded_then_ringdown_must_be_quiet (test_session.EnablePreparationTest.test_old_delivered_peak_is_excluded_then_ringdown_must_be_quiet) ... ok
 test_reference_cannot_be_reused_or_become_stale_before_trsync (test_session.EnablePreparationTest.test_reference_cannot_be_reused_or_become_stale_before_trsync) ... ok
 test_second_touch_gets_new_reference_after_retract_finishes (test_session.EnablePreparationTest.test_second_touch_gets_new_reference_after_retract_finishes) ... ok
@@ -345,6 +351,6 @@ test_separate_confirmation_command_and_method_are_removed (test_workflows.TestAn
 test_suspect_xy_results_finalize_rejection_without_more_homes_or_model_saving (test_workflows.TestAndChartWorkflowTests.test_suspect_xy_results_finalize_rejection_without_more_homes_or_model_saving) ... ok
 
 ----------------------------------------------------------------------
-Ran 345 tests in 4.707s
+Ran 351 tests in 4.959s
 
 OK (skipped=1)

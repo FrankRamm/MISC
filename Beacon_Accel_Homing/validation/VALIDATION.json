@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for strict repeatability, live preflight and configured-speed preservation",
-  "timestamp_utc": "2026-10-26T14:40:09.635114+00:00",
-  "source_base_commit": "8b7b3d6d21709490b06c2fa7e83454a1573ba8bb",
+  "stage": "completed offline validation for retained quiet-baseline diagnostics and contributor credit",
+  "timestamp_utc": "2026-10-26T15:17:10.237719+00:00",
+  "source_base_commit": "469ece45a81be9588f499e325e1604c322a9405d",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 345,
-  "passed": 344,
+  "tests_run": 351,
+  "passed": 350,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,22 +14,22 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 4.707,
+  "elapsed_seconds": 5.191,
   "test_returncode": 0,
   "installer_tests": 100,
   "workflow_tests": 75,
   "module_tests": {
-    "test_backends": 48,
+    "test_backends": 52,
     "test_installer": 100,
     "test_motion_policy": 24,
-    "test_session": 53,
+    "test_session": 55,
     "test_single_touch": 16,
     "test_trigger": 29,
     "test_workflows": 75
   },
   "preparation_fixture_tests": {
-    "test_backends.GenericPreparationTest": 6,
-    "test_session.EnablePreparationTest": 14
+    "test_backends.GenericPreparationTest": 10,
+    "test_session.EnablePreparationTest": 16
   },
   "printer_connections": false,
   "hardware_testing": false,
@@ -95,18 +95,18 @@
   },
   "validated_python_sha256": {
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
-    "accel_homing_backends.py": "0976ecde53fcb8da1a8d966da5cf568688f171b9cc3ee96f57294e491aff8cc4",
+    "accel_homing_backends.py": "03048914a73c8d7b846e826f28a72cd506e0e9d110d99a8278d0633d81e53ba6",
     "accel_homing_charts.py": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_workflows.py": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3",
-    "beacon_accel_homing.py": "c525c0dbabe190c78a5cbccff0be7d0e8756466c5d2fa76b71e497e974e7a920",
+    "beacon_accel_homing.py": "198bbfd61b4a53778a8668e663cac1dd6614908b5ccb36099dbcb5bb92ae7069",
     "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
     "installer.py": "ec4d1f131659099a20bcc16f94e753f84c7e233c7c6d47b15b906d1f99484937",
     "tests/harness.py": "7a418b30ef79060a8f74251ec9b69721e6afbefcbc3404f7d05d06a271534e18",
-    "tests/test_backends.py": "2719a148fe1da5f283409b6a3ba26976e5d5352a7b296d79b771576c2cc94e30",
+    "tests/test_backends.py": "b450c617088be7530d464871d947749bfe79dc0483a291516f8aecd22fa755b1",
     "tests/test_installer.py": "4bc3794c4f6b3a90107d46cb77c2c654e84f78237d56137b13728172761f816b",
     "tests/test_motion_policy.py": "b5a9362830d0b2c3b002390c7e3f4ed1c6f2233c89c1b4aa104d1abcd2896ec7",
-    "tests/test_session.py": "eb4173a267895bf2eba87993a8190d690de978ffe0067c6d16dd0989bf1a36fd",
+    "tests/test_session.py": "c92257be8586d0e654b72e1d259bb6892a1bc7add796d5fdeca4c98df87187b7",
     "tests/test_single_touch.py": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
     "tests/test_trigger.py": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
     "tests/test_workflows.py": "ffc0f23e5b5496e8cfb0d41b6fdb458c73d726e76df08027cce1f5152ed4e1cf",
@@ -135,17 +135,18 @@
     "Temporary live acceleration reductions can invalidate a previously configured plan; this patch does not automatically restore limits or raise acceleration.",
     "Admitted 75 mm/s moving/no-motion traces use constructed sensor delivery and fake clocks; no real sensor/MCU/host timing or higher-speed hardware behavior was qualified.",
     "The independent fixed 50 mm/s cap is removed, but default reporting settings still give 50 mm/s and all reporting/startup/watchdog guards remain enforced.",
-    "Default installation preserves the currently configured speed; it does not restore a historical value from old backups or auto-tune timing/acceleration."
+    "Default installation preserves the currently configured speed; it does not restore a historical value from old backups or auto-tune timing/acceleration.",
+    "The supplied baseline-failure log has no quiet-window raw samples or statistics; synthetic diagnostics do not establish or fix a physical noise, sensor latency, current-transition or mechanical cause."
   ],
-  "git_diff_check_base": "8b7b3d6d21709490b06c2fa7e83454a1573ba8bb",
+  "git_diff_check_base": "469ece45a81be9588f499e325e1604c322a9405d",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
-  "previous_validation_timestamp_utc": "2026-10-26T14:22:40.594740+00:00",
-  "validation_reason": "Final combined run after reviewer clearance for strict max-minus-min <1.5 mm across ten geometry-qualified validation homes excluding discovery; guarded model saving; read-only workflow preflight against live startup-motion limits; actionable diagnostics; configured homing-speed preservation; shared reporting ceiling without an independent fixed 50 mm/s cap; and admitted 75 mm/s moving/no-motion synthetic fixtures. Existing early-hit retries, saved-model loading compatibility, 0.5 g start/step and SAVE_CONFIG policy are retained.",
+  "previous_validation_timestamp_utc": "2026-10-26T14:40:09.635114+00:00",
+  "validation_reason": "One final combined offline run after independent review. Diagnostics distinguish quiet-reference acquisition timeout from expiry, invalidation or absence before arming; preserve the best quiet candidate, accepted and pre-cutoff counts, reset count, machine-axis peak-to-peak values in g and sample/batch ages in ms through cleanup. Synthetic ADXL-style 3200 Hz rounded timestamps and print-clock offsets acquire a reference with a small retained deque. Rejection gates, 0.5 g calibration start, strict ten-home <1.5 mm repeatability and configured-speed preservation are unchanged. Contributor credit and documentation are included. The supplied log does not establish the physical cause of the reported baseline failure.",
   "host_service_restart_tested": false,
   "live_python_module_reload_tested": false,
   "automatic_restart_fixture_tests": 15,
@@ -157,8 +158,8 @@
     3.0,
     15.0
   ],
-  "test_log_sha256": "da3e6b1e8b9f1e5268671b252b246b3ac8b3ba5063be4ec3c303e533c11783be",
-  "suite_completed_utc": "2026-10-26T14:40:08.997298+00:00",
+  "test_log_sha256": "dc78549abb1b18ea64640b94bd2ecf49da3726163b11f81fe6a11686bd4f839d",
+  "suite_completed_utc": "2026-10-26T15:17:09.874338+00:00",
   "additional_unchanged_file_content_checks": [
     {
       "file": "uninstaller.py",
@@ -188,8 +189,8 @@
   },
   "public_g28_safe_z_hop_intercepted": false,
   "test_log_line_endings": "Raw captured bytes preserved; CRLF normalized only in parser input",
-  "test_log_crlf_count": 350,
-  "suite_started_utc": "2026-10-26T14:40:04.057684+00:00",
+  "test_log_crlf_count": 356,
+  "suite_started_utc": "2026-10-26T15:17:04.683404+00:00",
   "source_bytes_unchanged_during_suite": true,
   "final_validation": true,
   "validated_python_hash_scope": "Actual on-disk bytes; existing source line endings preserved",
@@ -199,5 +200,26 @@
   "installer_explicit_homing_speed_is_only_speed_edit": true,
   "installer_auto_tunes_timing_or_acceleration": false,
   "installer_restores_historical_speed_automatically": false,
-  "higher_speed_support": "Conditional on explicitly configured reporting and startup budgets; synthetic fixtures do not qualify hardware timing"
+  "higher_speed_support": "Conditional on explicitly configured reporting and startup budgets; synthetic fixtures do not qualify hardware timing",
+  "quiet_baseline_diagnostics": {
+    "retained_after_cleanup": true,
+    "gate_changed": false,
+    "results": [
+      "acquisition_timeout",
+      "expired_before_arm",
+      "quiet_window_invalidated_before_arm",
+      "missing_before_arm"
+    ],
+    "sensor_fault_results": true,
+    "sample_statistics_constant_size": true,
+    "raw_samples_retained_for_diagnostics": false,
+    "human_units": [
+      "g",
+      "ms"
+    ],
+    "supplied_log_physical_cause_established": false,
+    "native_stale_oldest_fresh_newest_rejected_before_dispatch": true,
+    "ages_are_gate_snapshots_not_live_after_cleanup": true
+  },
+  "quiet_reference_peak_to_peak_limit_scope": "20% of the active axis threshold on all three machine components; 0.1 g applies to the default 0.5 g calibration candidate, not to every configured homing threshold."
 }
