@@ -57,7 +57,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The combined offline verification run discovered **345 tests: 344 passed,
+The combined offline verification run discovered **351 tests: 350 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -164,9 +164,9 @@ and restoration of the original active thresholds; saving and reloading are
 still required to activate that model. All save/restart operations in these
 fixtures are simulated.
 
-Motor-enable and fresh-reference checks add **20 tests** in
-`test_session.EnablePreparationTest` (14) and
-`test_backends.GenericPreparationTest` (6), with parameterized subcases. They
+Motor-enable and fresh-reference checks include **26 tests** in
+`test_session.EnablePreparationTest` (16) and
+`test_backends.GenericPreparationTest` (10), with parameterized subcases. They
 cover disabled, partly enabled and already enabled CoreXY motors; actual
 completion of queued settling/backoff/retract before the cutoff; a fresh
 reference for the 0.5 g candidate and every pass; exclusion of old/buffered
@@ -177,6 +177,22 @@ long references independent of retained-batch capacity, cancellation during
 queue waits and acquisition, Beacon clock conversion/wrap, pending-sample
 freshness, preservation of an immediate real impact in a batch crossing
 arming, and other accelerometer clients surviving success/failure cleanup.
+
+The new baseline fixtures preserve the existing quiet/freshness gates. ADXL-style
+3200 Hz timestamps rounded to microseconds acquire a 100 ms reference with a
+10-batch retained deque and a separate print-clock epoch. Synthetic failures
+exercise repeated sub-100 ms quiet candidates, absent data, only pre-cutoff
+data, and a ready reference that expires before arming. Retained error/status
+summaries distinguish acquisition timeout from before-arm expiry, invalidation
+or a missing reference. They include current and best quiet candidate counts
+and spans, all-axis peak-to-peak values in g, reset/pre-cutoff/accepted counts,
+and sample/batch ages in ms. Those ages are snapshots at the reported gate,
+not a live sensor reading after cleanup. Native Beacon fixtures also verify
+machine-axis mapping, status-copy isolation, and rejection of a batch with a
+stale oldest sample even when its actual newest sample is fresh. Statistics
+use constant-size summaries; these diagnostics retain no raw sample stream.
+The supplied failure log contains no such baseline statistics and does not
+establish a physical noise, sensor-latency or current-transition cause.
 
 These fixtures advance fake host/print/sensor clocks and check ordering before
 trigger dispatch is armed. They do not measure mechanical settling, validate

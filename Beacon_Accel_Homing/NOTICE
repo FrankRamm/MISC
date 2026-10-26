@@ -18,6 +18,8 @@ Historical printer testing of the original Beacon version was credited to
 FrankRamm and Ingstronmentalist. Those results are not physical validation of
 this extension, its generic accelerometer backends, or its new workflows.
 
+mc-red is acknowledged for extensive testing of this experimental extension.
+
 Experimental extension maintained in the FrankRamm testing fork:
 https://github.com/FrankRamm/MISC/tree/codex/universal-accel-homing
 

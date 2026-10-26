@@ -13,6 +13,8 @@ for supervised testing and future upstream contribution after physical
 validation. Full credits and provenance: [NOTICE](NOTICE). License:
 [GPLv3](LICENSE).
 
+Thanks to **mc-red** for extensive testing of this experimental extension.
+
 Impact homing deliberately contacts a mechanical stop. Supervise the first
 homes and all calibration with an accessible emergency stop. This extension
 still needs physical validation; software checks do not prove a correct home.
@@ -111,6 +113,16 @@ All commands below go in the **printer console**:
 | `ACCEL_HOMING_STATUS` | Shows thresholds, recent results, calibration progress, model and chart paths. |
 | `ACCEL_HOMING_CANCEL` | Cancels a pending calibration/manual-recentering wait and restores temporary settings. |
 | `SET_ACCEL_HOMING AXIS=X THRESHOLD=4.0` | Optional temporary X threshold change until restart; use `AXIS=Y` for Y. |
+
+## If stationary preparation aborts
+
+`no fresh quiet accelerometer baseline before the move` means the pass could
+not obtain or retain the required stationary reference before arming.
+After the error, run **`ACCEL_HOMING_STATUS`**. It retains the baseline result
+and phase, quiet-window sample count and duration, X/Y/Z peak-to-peak variation
+and quiet limit, plus sample/batch ages and the allowed sample age. Review
+them together; the error alone does not prove excessive sensor noise. Include
+that status output and the matching Klipper log when reporting the failure.
 
 ## Calibrate X, then Y
 

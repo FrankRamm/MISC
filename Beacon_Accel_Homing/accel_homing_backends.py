@@ -272,6 +272,7 @@ class ConfiguredAccelBackend:
             if not all(math.isfinite(value) for value in sample):
                 return self._fail("invalid_data")
             if reference is not None and sample[0] <= reference.cutoff:
+                reference.pre_cutoff += 1
                 continue
             if warmup_cutoff is not None and sample[0] < warmup_cutoff:
                 continue
@@ -293,6 +294,9 @@ class ConfiguredAccelBackend:
         now = self.owner.reactor.monotonic()
         print_time = self.owner.main_mcu.estimated_print_time(now)
         self.last_age = print_time - values[-1][0]
+        if reference is not None:
+            reference.oldest_batch_age = print_time - values[0][0]
+            reference.newest_batch_age = self.last_age
         attempt = self.owner.attempt
         relevant = [row for row in values if attempt is None or row[0] >= attempt.arm_time]
         if self.last_age < -0.005 or (relevant and print_time - relevant[0][0] > self.max_age):

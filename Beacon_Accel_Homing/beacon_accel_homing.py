@@ -75,13 +75,25 @@ class QuietReference:
         self.count = 0
         self.totals = [0.0, 0.0, 0.0]
         self.low = self.high = None
+        # Diagnostic summaries only; none of these fields admit a baseline.
+        self.accepted = self.pre_cutoff = self.resets = 0
+        self.observed_low = self.observed_high = None
+        self.best_count, self.best_span = 0, 0.0
+        self.best_peak_to_peak = (0.0, 0.0, 0.0)
+        self.oldest_batch_age = self.newest_batch_age = None
 
     def add(self, when, values):
+        self.accepted += 1
+        self.observed_low = (list(values) if self.observed_low is None else
+                             [min(a, b) for a, b in zip(self.observed_low, values)])
+        self.observed_high = (list(values) if self.observed_high is None else
+                              [max(a, b) for a, b in zip(self.observed_high, values)])
         low = list(values) if self.low is None else [min(a, b) for a, b in zip(self.low, values)]
         high = list(values) if self.high is None else [max(a, b) for a, b in zip(self.high, values)]
         if any(b - a > self.limit for a, b in zip(low, high)):
             # A transient or a change between otherwise flat batches starts a
             # new candidate; the entire new quiet interval must follow it.
+            self.resets += 1
             self.first, self.count = None, 0
             self.totals = [0.0, 0.0, 0.0]
             low = high = list(values)
@@ -91,6 +103,10 @@ class QuietReference:
         self.count += 1
         self.totals = [a + b for a, b in zip(self.totals, values)]
         self.low, self.high = low, high
+        span = self.last - self.first
+        if (span, self.count) > (self.best_span, self.best_count):
+            self.best_count, self.best_span = self.count, span
+            self.best_peak_to_peak = tuple(b - a for a, b in zip(low, high))
 
     def baseline(self):
         if (self.count < BASELINE_MIN_SAMPLES or self.first is None
@@ -140,6 +156,26 @@ def describe(r):
             % (r["axis"].upper(), r["pass"], r["result"], r["onset_g"], r["impact_peak_g"],
                r["noise_pos_g"], r["noise_neg_g"], r.get("travel_mm"),
                ", origin kept" if r.get("kept_origin") else ""))
+
+
+def describe_reference(status):
+    """Bounded, machine-axis diagnostic; raw sensor samples are never retained."""
+    def xyz(values):
+        return "/".join("%.3f" % values[axis] for axis in ("x", "y", "z"))
+    def age(value):
+        return "unknown" if value is None else "%.2f" % value
+    return ("baseline %s: %s (%s); best quiet %d/%d samples, %.2f/%.2f ms,"
+            " p-p XYZ %s g (limit %.3f g); observed p-p XYZ %s g;"
+            " accepted %d, pre-cutoff %d, resets %d; sample age %s ms"
+            " (max %.2f ms), batch oldest/newest %s/%s ms"
+            % (status["axis"].upper(), status["result"].replace("_", " "), status["phase"].replace("_", " "),
+               status["best_quiet_samples"], status["required_samples"],
+               status["best_quiet_span_ms"], status["required_span_ms"],
+               xyz(status["best_quiet_peak_to_peak_g"]), status["quiet_limit_g"],
+               xyz(status["observed_peak_to_peak_g"]), status["accepted_samples"],
+               status["pre_cutoff_samples"], status["quiet_resets"],
+               age(status["sample_age_ms"]), status["max_sample_age_ms"],
+               age(status["oldest_batch_age_ms"]), age(status["newest_batch_age_ms"])))
 
 
 def homing_warnings(name, info):
@@ -337,6 +373,7 @@ class BeaconAccelHoming:
         self.homing_active = self.stream_on = False
         self.preparing = False
         self.preparation = None
+        self.baseline_status = None
         self.session_axes = {}
         self.rails_by_axis = {}
         self.passes = 0
@@ -760,21 +797,73 @@ class BeaconAccelHoming:
                 if not self.homing_active or self.session_axes is not session_axes:
                     raise self.printer.command_error("accel_homing: homing preparation cancelled")
                 if self.sensor_fault is not None:
-                    raise self.printer.command_error("accel_homing: %s" % FAILURES[self.sensor_fault])
+                    sensor_now = self.main_mcu.estimated_print_time(now)
+                    self._remember_reference(reference, sensor_now, "acquisition", self.sensor_fault)
+                    raise self.printer.command_error("accel_homing: %s; %s"
+                                                     % (FAILURES[self.sensor_fault],
+                                                        describe_reference(self.baseline_status)))
                 with self.lock:
                     ready = reference.baseline() is not None
                     last = reference.last
                 sensor_now = self.main_mcu.estimated_print_time(now)
                 if ready and last is not None and -0.005 <= sensor_now - last <= self._reference_max_age():
+                    self._remember_reference(reference, sensor_now, "acquisition", "ready")
                     return
                 if now - started > self.baseline_time + STREAM_START_TIMEOUT:
-                    raise self.printer.command_error("accel_homing: %s" % FAILURES["no_baseline"])
+                    raise self._baseline_error(reference, sensor_now, "acquisition", "acquisition_timeout")
                 self.reactor.pause(now + 0.005)
         except Exception:
             self._end_session()
             raise
         finally:
             self.preparing = False
+
+    def _remember_reference(self, reference, sensor_now, phase, result, axis=None):
+        """Keep one constant-size summary through workflow/session cleanup."""
+        axis = reference.axis if reference is not None else axis
+        count_g = self.session_scale["scale"] / 1000.0
+        mapping = ([(0, 1), (1, 1), (2, 1)] if self.backend is not None
+                   else self.helper.config.axes_map)
+        def mapped(values):
+            return {name: round(values[index] * count_g, 6)
+                    for name, (index, sign) in zip(("x", "y", "z"), mapping)}
+        with self.lock:
+            span = (0.0 if reference is None or reference.first is None
+                    else reference.last - reference.first)
+            observed = ((0.0, 0.0, 0.0) if reference is None or reference.observed_low is None
+                        else tuple(b - a for a, b in zip(reference.observed_low, reference.observed_high)))
+            self.baseline_status = {
+                "axis": axis, "phase": phase, "result": result,
+                "quiet_samples": 0 if reference is None else reference.count,
+                "quiet_span_ms": round(span * 1000.0, 3),
+                "required_samples": BASELINE_MIN_SAMPLES,
+                "required_span_ms": self.baseline_time * 1000.0,
+                "best_quiet_samples": 0 if reference is None else reference.best_count,
+                "best_quiet_span_ms": 0.0 if reference is None else round(reference.best_span * 1000.0, 3),
+                "best_quiet_peak_to_peak_g": mapped((0.0, 0.0, 0.0) if reference is None
+                                                    else reference.best_peak_to_peak),
+                "observed_peak_to_peak_g": mapped(observed),
+                "quiet_limit_g": (BASELINE_NOISE_RATIO * self.threshold_g[axis] if reference is None
+                                  else reference.limit * count_g),
+                "accepted_samples": 0 if reference is None else reference.accepted,
+                "pre_cutoff_samples": 0 if reference is None else reference.pre_cutoff,
+                "quiet_resets": 0 if reference is None else reference.resets,
+                "sample_age_ms": (None if reference is None or reference.last is None
+                                  else round((sensor_now - reference.last) * 1000.0, 3)),
+                "max_sample_age_ms": self._reference_max_age() * 1000.0,
+                "oldest_batch_age_ms": (None if reference is None or reference.oldest_batch_age is None
+                                        else round(reference.oldest_batch_age * 1000.0, 3)),
+                "newest_batch_age_ms": (None if reference is None or reference.newest_batch_age is None
+                                        else round(reference.newest_batch_age * 1000.0, 3)),
+            }
+
+    def _baseline_error(self, reference, sensor_now, phase, result, axis=None):
+        self._remember_reference(reference, sensor_now, phase, result, axis)
+        detail = describe_reference(self.baseline_status)
+        logging.info("accel_homing: %s", detail)
+        return self.printer.command_error("accel_homing: %s; %s. Inspect stationary"
+                                          " sensor readings and delivery timing; see ACCEL_HOMING_STATUS"
+                                          % (FAILURES["no_baseline"], detail))
 
     def _reference_max_age(self):
         return self.stream_timeout if self.backend is None else self.backend.max_age
@@ -794,10 +883,17 @@ class BeaconAccelHoming:
             if (self.backend is None and self.helper._stream_en
                     and self.helper._scale.get("id") != self.session_scale.get("id")):
                 return "scale"
+            first_eligible = True
             for number in range(count):
                 when = start + number * interval
                 if when <= reference.cutoff:
+                    reference.pre_cutoff += 1
                     continue
+                if self.backend is None:
+                    if first_eligible:
+                        reference.oldest_batch_age = sensor_now - when
+                        reference.newest_batch_age = sensor_now - (start + (count - 1) * interval)
+                        first_eligible = False
                 if not -0.005 <= sensor_now - when <= self._reference_max_age():
                     return "stale_data"
                 if reference.last is not None:
@@ -902,13 +998,18 @@ class BeaconAccelHoming:
         with self.lock:
             reference = self.preparation
             bases = reference.baseline() if reference is not None and reference.axis == axis else None
-            if (bases is None or reference.last is None
-                    or not -0.005 <= now - reference.last <= self._reference_max_age()):
+            result = ("missing_before_arm" if reference is None else
+                      "quiet_window_invalidated_before_arm" if bases is None else
+                      "expired_before_arm" if reference.last is None
+                      or not -0.005 <= now - reference.last <= self._reference_max_age() else "ready")
+            if result != "ready":
                 bases = None
             self.preparation = None
         if bases is None:
+            error = self._baseline_error(reference, now, "before_arm", result, axis)
             self._end_session()
-            raise self.printer.command_error("accel_homing: %s" % FAILURES["no_baseline"])
+            raise error
+        self._remember_reference(reference, now, "before_arm", "ready", axis)
         beacon_mcu = self.sensor_clock
         attempt = Attempt(endstop, self.passes, print_time,
                           beacon_mcu.print_time_to_clock(print_time) & 0xFFFFFFFF,
@@ -1402,6 +1503,9 @@ class BeaconAccelHoming:
             "homing_accel": self.homing_accel,
             "back_off_dist": self.back_off_dist,
             "homing": self.homing_active,
+            "baseline": (None if self.baseline_status is None else
+                         {key: dict(value) if isinstance(value, dict) else value
+                          for key, value in self.baseline_status.items()}),
             "last": {axis: dict(r) for axis, r in self.last.items()},
             "sensor": self.sensor_name,
             "backend": {"type": "beacon_raw", "sensor": self.sensor_name,
@@ -1419,6 +1523,8 @@ class BeaconAccelHoming:
                               " total stop latency is not guaranteed"
                               % (self.backend.interval, self.backend.max_age,
                                  self.backend.observed_rate, self.backend.max_speed))
+        if self.baseline_status is not None:
+            gcmd.respond_info("accel_homing: " + describe_reference(self.baseline_status))
         if not self.history:
             gcmd.respond_info("beacon_accel_homing: no homes recorded since restart")
             return
