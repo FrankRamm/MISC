@@ -8,6 +8,7 @@ from harness import (CommandError, ConfigError, FakeConfig, FakeEndstop, FakePri
                      stationary_stream)
 from accel_homing_backends import select_sensor
 from test_session import FakeRail, info, with_endstops
+from test_single_touch import RampStepper
 
 G = 9806.65
 HIT = plugin.mcu.MCU_trsync.REASON_ENDSTOP_HIT
@@ -134,7 +135,7 @@ class GenericPreparationTest(unittest.TestCase):
         self.assertEqual(endstop._dispatch.started, [])
 
     def test_timeout_retains_best_quiet_candidate_and_observed_noise(self):
-        obj, endstop = self.session()
+        obj, endstop = self.session(options={"baseline_noise_floor": 0.0})
         obj.threshold_g["x"] = 0.5
         def flow():
             now = obj.reactor.now
@@ -236,6 +237,268 @@ class GenericPreparationTest(unittest.TestCase):
                 self.assertIn(other, obj.backend.helper.client_cbs)
                 self.assertTrue(seen)
                 self.assertEqual(obj.backend.helper.batch_interval, 0.1)
+
+
+class BaselineFloorTest(unittest.TestCase):
+    """Constructed preparation and step histories, never a device recording."""
+
+    def machine(self, profile="balanced", axes=(0,), options=None, epoch=10.0):
+        obj = generic(options=options)
+        obj.threshold_g["x"] = 0.5
+        obj.toolhead.get_max_velocity = lambda: (500.0, 5000.0)
+        obj.reactor.now = epoch
+        endstop = FakeEndstop("x")
+        obj.session_axes["x"] = FakeRail(endstop, info(speed=50, retract=0, second=50))
+        number = [0]
+        def flow():
+            now = obj.reactor.now
+            start = now - 0.001 - 15 / 3200.0
+            if profile == "pre_cutoff":
+                start = obj.preparation.cutoff - 0.020
+            elif profile == "stale":
+                start -= 0.030
+            elif profile == "future":
+                start += 0.020
+            rows = []
+            for offset in range(16):
+                sample = number[0] + offset
+                sign = (1 if sample % 4 else -1) if profile == "asymmetric" else (
+                    1 if (sample // 64 if profile == "slow" else sample) % 2 else -1)
+                amplitude = 0.105 if profile == "excess" else 0.08 if profile == "slow" else 0.082
+                values = [0.0, 0.0, 1.0]
+                for axis in axes:
+                    values[axis] += sign * amplitude
+                rows.append((start + offset / 3200.0,) + tuple(value * G for value in values))
+            number[0] += 16
+            obj.backend.helper.emit({"data": rows})
+        obj.reactor.on_pause = flow
+        return obj, endstop
+
+    def prepare_arm(self, obj, endstop, speed=50.0, accel=5000.0, direction=1):
+        obj.toolhead.get_max_velocity = lambda: (500.0, accel)
+        obj.session_axes["x"].info = info(speed=speed, retract=0, second=speed)
+        obj._prepare_reference()
+        self.assertGreaterEqual(obj.preparation.count, 321)
+        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first, 0.1)
+        self.assertAlmostEqual(obj.baseline_status["quiet_limit_g"], 0.2)
+        when = obj.backend.last_sample_time + 16 / 3200.0
+        stepper = RampStepper(when, accel, speed)
+        signed = types.SimpleNamespace(get_step_dist=stepper.get_step_dist,
+                                       get_past_mcu_position=lambda stamp:
+                                       direction * stepper.get_past_mcu_position(stamp))
+        endstop.get_steppers = lambda: [signed]
+        attempt = obj.prepare(endstop, when)
+        obj.arm(attempt)
+        self.assertAlmostEqual(attempt.limit_raw * attempt.count_g, 0.5)
+        return attempt
+
+    def parked(self, obj, attempt, bias=0.0, axes=(0,), max_samples=400):
+        number = 0
+        while number < max_samples and not attempt.done:
+            first = obj.backend.last_sample_time + 1 / 3200.0
+            rows = []
+            for offset in range(16):
+                values = [0.0, 0.0, 1.0]
+                for axis in axes:
+                    values[axis] += bias + (0.0002 if (number + offset) % 2 else -0.0002)
+                rows.append((first + offset / 3200.0,) + tuple(value * G for value in values))
+            feed(obj, rows)
+            obj._watchdog(obj.reactor.now)
+            number += 16
+
+    def assert_startup_request_budget(self, obj, attempt):
+        speed, accel = attempt.effective_speed, attempt.effective_accel
+        timeout = obj.backend.motion_startup_timeout(speed, accel)
+        elapsed = obj.reactor.now - attempt.arm_time
+        # Delivery/polls remain 5 ms in this fixture; its actual request time
+        # must still fit the existing deadline plus one 3 ms watchdog interval.
+        self.assertLessEqual(elapsed, timeout + plugin.EARLY_INTERVAL + 0.000000001)
+        travel = (0.5 * accel * elapsed ** 2 if elapsed < speed / accel
+                  else speed * elapsed - 0.5 * speed ** 2 / accel)
+        self.assertLessEqual(travel, 3.0)
+
+    def test_floor_is_finite_bounded_optional_and_leaves_one_g_plus_unchanged(self):
+        for value in (-0.001, 0.2001, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                generic(options={"baseline_noise_floor": value})
+        native = make_homing(options={"baseline_noise_floor": 0.2})
+        native.threshold_g["x"] = 0.5
+        self.assertAlmostEqual(native._reference_noise_limit("x"), 0.1)
+        for value in (0.0, 0.1, 0.2):
+            obj = generic(options={"baseline_noise_floor": value})
+            obj.threshold_g["x"] = 0.5
+            self.assertAlmostEqual(obj._reference_noise_limit("x"), max(0.1, value))
+            obj.threshold_g["x"] = 1.0
+            self.assertAlmostEqual(obj._reference_noise_limit("x"), 0.2)
+            obj.threshold_g["x"] = 8.0
+            self.assertAlmostEqual(obj._reference_noise_limit("x"), 1.6)
+
+    def test_balanced_0_164g_reference_completes_then_parked_trace_fails_motion(self):
+        obj, endstop = self.machine(axes=(0, 1, 2))
+        attempt = self.prepare_arm(obj, endstop)
+        self.assertAlmostEqual(obj.baseline_status["observed_peak_to_peak_g"]["x"], 0.164)
+        self.parked(obj, attempt, axes=(0, 1, 2))
+        self.assertFalse(attempt.motion_seen)
+        self.assertEqual(attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_noisy_reference_retains_first_raw_sample_contact_above_half_g(self):
+        obj, endstop = self.machine(axes=(0, 1, 2))
+        attempt = self.prepare_arm(obj, endstop)
+        first = obj.backend.last_sample_time + 1 / 3200.0
+        rows = samples(first, size=32)
+        contact = next(index for index, row in enumerate(rows) if row[0] >= attempt.arm_time)
+        rows[contact] = (rows[contact][0], -0.51 * G, 0.0, G)
+        feed(obj, rows)
+        obj._watchdog(obj.reactor.now)
+        self.assertEqual(attempt.reason, "impact")
+        self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+        self.assertAlmostEqual(obj.onset_time(attempt), rows[contact][0], places=6)
+
+    def test_repeated_0_21g_excursions_still_reject_before_arm(self):
+        obj, endstop = self.machine(profile="excess")
+        with self.assertRaisesRegex(CommandError, "acquisition timeout"):
+            obj._prepare_reference()
+        self.assertFalse(obj.homing_active)
+        self.assertEqual(endstop.trigger_log.messages, [])
+        self.assertGreater(obj.baseline_status["quiet_resets"], 0)
+        self.assertAlmostEqual(obj.baseline_status["quiet_limit_g"], 0.2)
+
+    def test_half_g_floor_keeps_pre_cutoff_and_timestamp_rejections(self):
+        for profile in ("pre_cutoff", "stale", "future"):
+            with self.subTest(profile=profile):
+                obj, endstop = self.machine(profile=profile)
+                with self.assertRaises(CommandError):
+                    obj._prepare_reference()
+                self.assertFalse(obj.homing_active)
+                self.assertEqual(endstop.trigger_log.messages, [])
+                self.assertEqual(obj.baseline_status["accepted_samples"], 0)
+                if profile == "pre_cutoff":
+                    self.assertGreater(obj.baseline_status["pre_cutoff_samples"], 0)
+                else:
+                    self.assertEqual(obj.sensor_fault, "stale_data")
+
+    def test_balanced_reference_then_changed_parked_bias_cannot_prove_motion(self):
+        for axes in ((0,), (0, 1, 2)):
+            with self.subTest(axes=axes):
+                obj, endstop = self.machine(axes=axes)
+                attempt = self.prepare_arm(obj, endstop)
+                self.parked(obj, attempt, bias=0.08, axes=axes)
+                self.assertFalse(attempt.motion_seen)
+                self.assertEqual(attempt.reason, "no_motion")
+                self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+                self.assert_startup_request_budget(obj, attempt)
+
+    def test_asymmetric_reference_uses_max_deviation_not_half_range(self):
+        for axes in ((0,), (0, 1, 2)):
+            with self.subTest(axes=axes):
+                obj, endstop = self.machine(profile="asymmetric", axes=axes)
+                attempt = self.prepare_arm(obj, endstop)
+                self.assertGreater(attempt.proof_noise[0] * attempt.count_g, 0.12)
+                self.assertGreater(obj.baseline_status["motion_proof_noise_bound_g"]["x"], 0.12)
+                self.parked(obj, attempt, bias=-0.08, axes=axes)
+                self.assertFalse(attempt.motion_seen)
+                self.assertEqual(attempt.reason, "no_motion")
+
+    def ramp(self, obj, attempt, direction=1, max_samples=400):
+        number = 0
+        while number < max_samples and not attempt.done:
+            first = obj.backend.last_sample_time + 1 / 3200.0
+            rows = []
+            for offset in range(16):
+                when = first + offset / 3200.0
+                ramping = 0.0 <= when - attempt.arm_time < attempt.effective_speed / attempt.effective_accel
+                acceleration = direction * attempt.effective_accel if ramping else 0.0
+                noise = 0.0002 * G * (1 if (number + offset) % 2 else -1)
+                rows.append((when, acceleration + noise, noise, G + noise))
+            feed(obj, rows)
+            obj._watchdog(obj.reactor.now)
+            number += 16
+
+    def test_real_50mm_s_ramps_prove_motion_in_both_directions_and_clock_epochs(self):
+        # 4000 mm/s^2 is below .5 g in this ideal trace. A 5000 mm/s^2
+        # ideal acceleration would itself exceed the unchanged .5 g detector.
+        for direction in (-1, 1):
+            for epoch in (10.0, 5000.0):
+                with self.subTest(direction=direction, epoch=epoch):
+                    obj, endstop = self.machine(axes=(0, 1, 2), epoch=epoch)
+                    attempt = self.prepare_arm(obj, endstop, accel=4000.0, direction=direction)
+                    self.ramp(obj, attempt, direction=direction)
+                    self.assertTrue(attempt.motion_seen)
+                    self.assertIsNone(attempt.reason)
+                    self.assertEqual(endstop.trigger_log.messages, [])
+                    self.assertEqual(attempt.auto_direction, -direction)
+
+    def test_real_low_speed_with_insufficient_motion_evidence_fails_closed(self):
+        for direction in (-1, 1):
+            with self.subTest(direction=direction):
+                obj, endstop = self.machine(axes=(0, 1, 2))
+                attempt = self.prepare_arm(obj, endstop, speed=1.0, accel=1000.0, direction=direction)
+                self.ramp(obj, attempt, direction=direction)
+                self.assertFalse(attempt.motion_seen)
+                self.assertEqual(attempt.reason, "no_motion")
+                self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+                self.assertLess(obj.reactor.now - attempt.arm_time, 0.1)
+
+    def test_coherent_integration_snapshot_counts_first_and_odd_samples(self):
+        obj, endstop = self.machine()
+        attempt = self.prepare_arm(obj, endstop)
+        rows = [(attempt.arm_time + (number - 15) / 3200.0, 0.0, 0.0, G)
+                for number in range(32)]
+        post_arm = sum(row[0] >= attempt.arm_time for row in rows)
+        self.assertEqual(post_arm, 17)
+        feed(obj, rows)
+        previous = attempt.proof_state
+        self.assertEqual(previous[1], post_arm)
+        self.assertEqual(previous[0], tuple(attempt.sums))
+        feed(obj, samples(obj.backend.last_sample_time + 1 / 3200.0, size=3))
+        self.assertEqual(attempt.proof_state[1], post_arm + 3)
+        self.assertEqual(previous[1], post_arm)
+        self.assertIsNot(previous, attempt.proof_state)
+
+    def test_uncertain_biased_speed_cannot_mask_either_first_contact_direction(self):
+        for direction in (-1, 1):
+            with self.subTest(direction=direction):
+                obj, endstop = self.machine(profile="slow")
+                attempt = self.prepare_arm(obj, endstop)
+                self.parked(obj, attempt, bias=0.08, max_samples=160)
+                self.assertGreater(obj._velocity(attempt), 30.0)
+                self.assertFalse(attempt.motion_seen)
+                self.assertEqual(attempt.auto_direction, 0)
+                self.assertIsNone(attempt.reason)
+                self.assertLess(obj.reactor.now - attempt.arm_time, 0.055)
+                rows = samples(obj.backend.last_sample_time + 1 / 3200.0)
+                rows[0] = (rows[0][0], (attempt.baseline * attempt.count_g + direction * 0.51) * G, 0.0, G)
+                feed(obj, rows)
+                self.assertEqual(attempt.reason, "impact")
+                self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+                self.assertAlmostEqual(obj.onset_time(attempt), rows[0][0], places=6)
+
+    def test_unexpanded_configured_references_keep_original_raw_motion_path(self):
+        obj, endstop = self.machine()
+        obj.threshold_g["x"] = 1.0
+        obj._prepare_reference()
+        when = obj.backend.last_sample_time + 16 / 3200.0
+        endstop.get_steppers = lambda: [RampStepper(when, 5000.0, 50.0)]
+        attempt = obj.prepare(endstop, when)
+        self.assertIsNone(attempt.proof_noise)
+        self.assertIsNone(attempt.proof_state)
+        self.assertIsNone(obj.baseline_status["motion_proof_noise_bound_g"])
+
+    def test_slow_reference_then_parked_bias_must_not_prove_motion(self):
+        # This experiment intentionally checks the risk of admitting a wider
+        # stationary range: preparation and parked samples contain no motion.
+        for axes in ((0,), (0, 1, 2)):
+            with self.subTest(axes=axes):
+                obj, endstop = self.machine(profile="slow", axes=axes)
+                attempt = self.prepare_arm(obj, endstop)
+                self.parked(obj, attempt, bias=0.08, axes=axes)
+                self.assertFalse(attempt.motion_seen,
+                                 "parked signal falsely proved motion: measured %.2f mm/s, baseline %r"
+                                 % (obj._measured_speed(attempt), attempt.bases))
+                self.assertEqual(attempt.reason, "no_motion")
+                self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+                self.assert_startup_request_budget(obj, attempt)
 
 
 class BatchHelper:
