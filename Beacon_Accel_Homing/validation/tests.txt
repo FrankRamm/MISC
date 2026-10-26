@@ -1,3 +1,16 @@
+test_asymmetric_reference_uses_max_deviation_not_half_range (test_backends.BaselineFloorTest.test_asymmetric_reference_uses_max_deviation_not_half_range) ... ok
+test_balanced_0_164g_reference_completes_then_parked_trace_fails_motion (test_backends.BaselineFloorTest.test_balanced_0_164g_reference_completes_then_parked_trace_fails_motion) ... ok
+test_balanced_reference_then_changed_parked_bias_cannot_prove_motion (test_backends.BaselineFloorTest.test_balanced_reference_then_changed_parked_bias_cannot_prove_motion) ... ok
+test_coherent_integration_snapshot_counts_first_and_odd_samples (test_backends.BaselineFloorTest.test_coherent_integration_snapshot_counts_first_and_odd_samples) ... ok
+test_floor_is_finite_bounded_optional_and_leaves_one_g_plus_unchanged (test_backends.BaselineFloorTest.test_floor_is_finite_bounded_optional_and_leaves_one_g_plus_unchanged) ... ok
+test_half_g_floor_keeps_pre_cutoff_and_timestamp_rejections (test_backends.BaselineFloorTest.test_half_g_floor_keeps_pre_cutoff_and_timestamp_rejections) ... ok
+test_noisy_reference_retains_first_raw_sample_contact_above_half_g (test_backends.BaselineFloorTest.test_noisy_reference_retains_first_raw_sample_contact_above_half_g) ... ok
+test_real_50mm_s_ramps_prove_motion_in_both_directions_and_clock_epochs (test_backends.BaselineFloorTest.test_real_50mm_s_ramps_prove_motion_in_both_directions_and_clock_epochs) ... ok
+test_real_low_speed_with_insufficient_motion_evidence_fails_closed (test_backends.BaselineFloorTest.test_real_low_speed_with_insufficient_motion_evidence_fails_closed) ... ok
+test_repeated_0_21g_excursions_still_reject_before_arm (test_backends.BaselineFloorTest.test_repeated_0_21g_excursions_still_reject_before_arm) ... ok
+test_slow_reference_then_parked_bias_must_not_prove_motion (test_backends.BaselineFloorTest.test_slow_reference_then_parked_bias_must_not_prove_motion) ... ok
+test_uncertain_biased_speed_cannot_mask_either_first_contact_direction (test_backends.BaselineFloorTest.test_uncertain_biased_speed_cannot_mask_either_first_contact_direction) ... ok
+test_unexpanded_configured_references_keep_original_raw_motion_path (test_backends.BaselineFloorTest.test_unexpanded_configured_references_keep_original_raw_motion_path) ... ok
 test_beacon_capture_uses_mapping_and_retains_baseline (test_backends.CaptureTest.test_beacon_capture_uses_mapping_and_retains_baseline) ... ok
 test_capture_failure_cannot_delay_or_prevent_trigger (test_backends.CaptureTest.test_capture_failure_cannot_delay_or_prevent_trigger) ... ok
 test_capture_is_bounded_and_reports_lost_samples (test_backends.CaptureTest.test_capture_is_bounded_and_reports_lost_samples) ... ok
@@ -351,6 +364,6 @@ test_separate_confirmation_command_and_method_are_removed (test_workflows.TestAn
 test_suspect_xy_results_finalize_rejection_without_more_homes_or_model_saving (test_workflows.TestAndChartWorkflowTests.test_suspect_xy_results_finalize_rejection_without_more_homes_or_model_saving) ... ok
 
 ----------------------------------------------------------------------
-Ran 351 tests in 4.959s
+Ran 364 tests in 4.780s
 
 OK (skipped=1)

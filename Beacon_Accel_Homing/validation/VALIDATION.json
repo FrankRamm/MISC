@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for retained quiet-baseline diagnostics and contributor credit",
-  "timestamp_utc": "2026-10-26T15:17:10.237719+00:00",
-  "source_base_commit": "469ece45a81be9588f499e325e1604c322a9405d",
+  "stage": "completed offline validation for configured-sensor baseline floor and conservative motion/direction evidence",
+  "timestamp_utc": "2026-10-26T16:01:05.649781+00:00",
+  "source_base_commit": "39f5693c17f6f815df92c9976c38afcd3c9dd2d0",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 351,
-  "passed": 350,
+  "tests_run": 364,
+  "passed": 363,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,12 +14,12 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 5.191,
+  "elapsed_seconds": 5.01,
   "test_returncode": 0,
   "installer_tests": 100,
   "workflow_tests": 75,
   "module_tests": {
-    "test_backends": 52,
+    "test_backends": 65,
     "test_installer": 100,
     "test_motion_policy": 24,
     "test_session": 55,
@@ -29,7 +29,8 @@
   },
   "preparation_fixture_tests": {
     "test_backends.GenericPreparationTest": 10,
-    "test_session.EnablePreparationTest": 16
+    "test_session.EnablePreparationTest": 16,
+    "test_backends.BaselineFloorTest": 13
   },
   "printer_connections": false,
   "hardware_testing": false,
@@ -99,11 +100,11 @@
     "accel_homing_charts.py": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_workflows.py": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3",
-    "beacon_accel_homing.py": "198bbfd61b4a53778a8668e663cac1dd6614908b5ccb36099dbcb5bb92ae7069",
+    "beacon_accel_homing.py": "f9bd17f7ce5a30593afa84c90f1ec128a425298ef74859ee7fb1b6e70d4ab276",
     "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
     "installer.py": "ec4d1f131659099a20bcc16f94e753f84c7e233c7c6d47b15b906d1f99484937",
     "tests/harness.py": "7a418b30ef79060a8f74251ec9b69721e6afbefcbc3404f7d05d06a271534e18",
-    "tests/test_backends.py": "b450c617088be7530d464871d947749bfe79dc0483a291516f8aecd22fa755b1",
+    "tests/test_backends.py": "1694cdede413e434f70868c54fcd07a57a0baf947303c2cc0a5eb3bedb584d85",
     "tests/test_installer.py": "4bc3794c4f6b3a90107d46cb77c2c654e84f78237d56137b13728172761f816b",
     "tests/test_motion_policy.py": "b5a9362830d0b2c3b002390c7e3f4ed1c6f2233c89c1b4aa104d1abcd2896ec7",
     "tests/test_session.py": "c92257be8586d0e654b72e1d259bb6892a1bc7add796d5fdeca4c98df87187b7",
@@ -136,17 +137,20 @@
     "Admitted 75 mm/s moving/no-motion traces use constructed sensor delivery and fake clocks; no real sensor/MCU/host timing or higher-speed hardware behavior was qualified.",
     "The independent fixed 50 mm/s cap is removed, but default reporting settings still give 50 mm/s and all reporting/startup/watchdog guards remain enforced.",
     "Default installation preserves the currently configured speed; it does not restore a historical value from old backups or auto-tune timing/acceleration.",
-    "The supplied baseline-failure log has no quiet-window raw samples or statistics; synthetic diagnostics do not establish or fix a physical noise, sensor latency, current-transition or mechanical cause."
+    "The configured 0.2 g quiet floor and native 20% rule have not been qualified on hardware; modeled ranges are synthetic and do not establish a physical sensor-noise cause or fix.",
+    "The conservative motion/direction correction assumes future stationary disturbance stays within the observed accepted-reference envelope; arbitrary later bias or disturbances are not bounded by these fixtures.",
+    "Expanded references can leave too little evidence to prove real low-speed motion; the unchanged no_motion deadline then fails closed without automatically changing speed or acceleration.",
+    "The ideal true-motion fixture uses 4000 mm/s^2 because an ideal 5000 mm/s^2 sample is already above the unchanged 0.5 g impact threshold; this is a synthetic design choice, not a requested printer retune."
   ],
-  "git_diff_check_base": "469ece45a81be9588f499e325e1604c322a9405d",
+  "git_diff_check_base": "39f5693c17f6f815df92c9976c38afcd3c9dd2d0",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
-  "previous_validation_timestamp_utc": "2026-10-26T14:40:09.635114+00:00",
-  "validation_reason": "One final combined offline run after independent review. Diagnostics distinguish quiet-reference acquisition timeout from expiry, invalidation or absence before arming; preserve the best quiet candidate, accepted and pre-cutoff counts, reset count, machine-axis peak-to-peak values in g and sample/batch ages in ms through cleanup. Synthetic ADXL-style 3200 Hz rounded timestamps and print-clock offsets acquire a reference with a small retained deque. Rejection gates, 0.5 g calibration start, strict ten-home <1.5 mm repeatability and configured-speed preservation are unchanged. Contributor credit and documentation are included. The supplied log does not establish the physical cause of the reported baseline failure.",
+  "previous_validation_timestamp_utc": "2026-10-26T15:17:10.237719+00:00",
+  "validation_reason": "One final combined offline run after independent review. Configured batch backends use finite baseline_noise_floor in [0, 0.2] g (default 0.2); native Beacon keeps the original 20% quiet gate and raw motion/pressed decisions. Only accepted configured references exceeding the old 20% gate receive conservative uncertainty bounds for movement proof and automatic direction. A floor-only experiment reproduced false parked motion proof; the final correction rejects modeled balanced/slow/asymmetric parked bias without changing raw impact, thresholds or startup deadlines. Fixtures include true 50 mm/s ramps at 4000 mm/s^2 in both directions and clock epochs, first +/-0.51 g contacts after uncertain raw speed exceeds 30 mm/s, first/odd sample integration counts, safe low-speed no_motion, 0.21 g rejection and original timestamp/enable guards. All traces are synthetic, not a recording of a user device. Existing 0.5 g calibration start, strict ten-home <1.5 mm repeatability and configured-speed preservation remain unchanged.",
   "host_service_restart_tested": false,
   "live_python_module_reload_tested": false,
   "automatic_restart_fixture_tests": 15,
@@ -158,8 +162,8 @@
     3.0,
     15.0
   ],
-  "test_log_sha256": "dc78549abb1b18ea64640b94bd2ecf49da3726163b11f81fe6a11686bd4f839d",
-  "suite_completed_utc": "2026-10-26T15:17:09.874338+00:00",
+  "test_log_sha256": "56608074a5a40c928463ab1488b96aba467d2565734eca9a4e42a390c55febec",
+  "suite_completed_utc": "2026-10-26T16:01:05.290059+00:00",
   "additional_unchanged_file_content_checks": [
     {
       "file": "uninstaller.py",
@@ -169,7 +173,7 @@
       "source_base_sha256": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23"
     }
   ],
-  "quiet_reference_peak_to_peak_limit_default_g": 0.1,
+  "quiet_reference_peak_to_peak_limit_default_g": 0.2,
   "repeatability_fixture_tests": 12,
   "calibration_validation_homes": 10,
   "calibration_discovery_in_validation_range": false,
@@ -189,8 +193,8 @@
   },
   "public_g28_safe_z_hop_intercepted": false,
   "test_log_line_endings": "Raw captured bytes preserved; CRLF normalized only in parser input",
-  "test_log_crlf_count": 356,
-  "suite_started_utc": "2026-10-26T15:17:04.683404+00:00",
+  "test_log_crlf_count": 369,
+  "suite_started_utc": "2026-10-26T16:01:00.279656+00:00",
   "source_bytes_unchanged_during_suite": true,
   "final_validation": true,
   "validated_python_hash_scope": "Actual on-disk bytes; existing source line endings preserved",
@@ -203,7 +207,7 @@
   "higher_speed_support": "Conditional on explicitly configured reporting and startup budgets; synthetic fixtures do not qualify hardware timing",
   "quiet_baseline_diagnostics": {
     "retained_after_cleanup": true,
-    "gate_changed": false,
+    "gate_changed": true,
     "results": [
       "acquisition_timeout",
       "expired_before_arm",
@@ -219,7 +223,37 @@
     ],
     "supplied_log_physical_cause_established": false,
     "native_stale_oldest_fresh_newest_rejected_before_dispatch": true,
-    "ages_are_gate_snapshots_not_live_after_cleanup": true
+    "ages_are_gate_snapshots_not_live_after_cleanup": true,
+    "gate_change_scope": "Configured batch sensors below 1 g only; native Beacon gate unchanged.",
+    "effective_limit_and_proof_noise_bound_reported_g": true
   },
-  "quiet_reference_peak_to_peak_limit_scope": "20% of the active axis threshold on all three machine components; 0.1 g applies to the default 0.5 g calibration candidate, not to every configured homing threshold."
+  "quiet_reference_peak_to_peak_limit_scope": "Configured sensors at the default 0.5 g calibration candidate use max(20% of the active threshold, baseline_noise_floor); native Beacon retains 0.1 g at 0.5 g. Thresholds at least 1 g retain the previous quiet limit.",
+  "baseline_noise_floor_default_g": 0.2,
+  "baseline_noise_floor_range_g": [
+    0.0,
+    0.2
+  ],
+  "baseline_noise_floor_scope": "Configured batch accelerometers only; setting 0 restores the previous 20% rule. Native Beacon admission and motion/pressed behavior are unchanged.",
+  "expanded_reference_motion_proof": {
+    "scope": "Configured batch references whose actual accepted per-axis peak-to-peak exceeds the original 20% gate.",
+    "noise_bound_raw_per_axis": "max(abs(low_i-accepted_mean_i),abs(high_i-accepted_mean_i))",
+    "lower_bound_raw_integral_per_axis": "max(0,abs(sum_i)-noise_bound_i*N)",
+    "speed_conversion": "Vector norm after count_g*9806.65*sample_dt scaling",
+    "atomic_snapshot": [
+      "sums",
+      "N",
+      "sample_dt",
+      "end_clock"
+    ],
+    "first_sample_included_in_N": true,
+    "raw_samples_or_integrals_filtered": false,
+    "impact_threshold_or_first_sample_detection_changed": false,
+    "automatic_direction": "Select only when the signed velocity uncertainty interval is entirely beyond +30 mm/s or -30 mm/s; otherwise retain bidirectional impact detection.",
+    "startup_timeout_or_travel_budget_changed": false,
+    "native_beacon_behavior_changed": false,
+    "unexpanded_reference_behavior_changed": false,
+    "floor_only_false_motion_reproduced_and_corrected_synthetically": true,
+    "stationary_reference_noise_is_a_guaranteed_future_bound": false,
+    "insufficient_low_speed_evidence": "Fails existing no_motion policy; no automatic speed/acceleration edit"
+  }
 }
