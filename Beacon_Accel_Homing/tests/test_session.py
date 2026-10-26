@@ -525,9 +525,10 @@ class EnablePreparationTest(unittest.TestCase):
                 self.assertIsNotNone(obj.preparation.baseline())
                 self.assertEqual(len(obj.toolhead.waits), 1)
 
-    def test_half_g_candidate_keeps_point_one_g_all_axis_quiet_limit(self):
+    def test_half_g_candidate_has_bounded_half_g_all_axis_quiet_limit(self):
         for axis in range(3):
-            for excursion, accepted in ((0.04, True), (0.06, False)):
+            for excursion, accepted in ((0.04, True), (0.06, True),
+                                        (0.25, True), (0.26, False)):
                 with self.subTest(axis=axis, excursion_g=excursion):
                     obj, endstop, _log, _lines = self.session()
                     plain = obj.reactor.on_pause
@@ -537,7 +538,7 @@ class EnablePreparationTest(unittest.TestCase):
                             plain()
                             return
                         count_g = obj.session_scale["scale"] / 1000.0
-                        self.assertAlmostEqual(obj.preparation.limit * count_g, 0.1)
+                        self.assertAlmostEqual(obj.preparation.limit * count_g, 0.5)
                         batches[0] += 1
                         values = [0, 0, counts(1)]
                         values[axis] += counts(excursion if batches[0] % 2 else -excursion)

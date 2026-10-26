@@ -655,6 +655,364 @@ class BeaconSlowMotionProofTests(unittest.TestCase):
                 self.assertTrue(attempt.record["motion_seen"])
 
 
+class NativeExpandedReferenceTests(unittest.TestCase):
+    """Native raw Beacon traces; every sensor, stepper and clock is synthetic."""
+
+    rate = 4000.0
+    clock_hz = 1000000.0
+    low = (-23, -27, 101)
+    high = (24, 28, 155)
+
+    def machine(self, axis="x", threshold=0.5, speed=75.0, accel=5000.0,
+                asymmetric=False, quiet=None, impact_sign=0, epoch=10.0):
+        obj = make_homing(threshold=threshold, impact_sign=impact_sign,
+                          accel=accel, options={"homing_accel": 0})
+        obj.sensor_clock.print_time_to_clock = lambda when: round(when * self.clock_hz)
+        obj.sensor_clock.seconds_to_clock = lambda interval: interval * self.clock_hz
+        def clock_to_time(clock):
+            current = round(obj.reactor.now * self.clock_hz)
+            return (current + ((clock - current + 0x80000000) & 0xFFFFFFFF)
+                    - 0x80000000) / self.clock_hz
+        obj.clock_to_time = clock_to_time
+        obj.beacon_freq = self.clock_hz
+        obj.impact_window = round(plugin.IMPACT_WINDOW * self.clock_hz)
+        endstop = FakeEndstop(axis)
+        obj.session_axes[axis] = FakeRail(endstop, info(speed=speed, second=speed, retract=0))
+        obj.reactor.now = epoch
+
+        def stationary():
+            now = obj.reactor.now
+            rows = []
+            for number in range(20):
+                high = number % (10 if asymmetric else 2) == 0
+                rows.append((self.high if high else self.low) if quiet is None
+                            else tuple(counts(value) for value in quiet))
+            obj._inspect(batch(round((now - 19 / self.rate) * self.clock_hz), rows,
+                               delta_clock=round(19 / self.rate * self.clock_hz),
+                               receive_time=now))
+
+        obj.reactor.on_pause = stationary
+        obj._prepare_reference()
+        return obj, endstop
+
+    def prepare(self, obj, endstop, direction=1):
+        start = obj.reactor.now + 0.005
+        speed = obj.session_axes[endstop.axis].info.speed
+        accel = obj.toolhead.accel
+        endstop.get_steppers = lambda: [SignedRamp(start, accel, speed, direction)]
+        attempt = obj.prepare(endstop, start)
+        obj.arm(attempt)
+        return attempt
+
+    def send(self, obj, first, rows, age=0.001, interval=None):
+        interval = 1 / self.rate if interval is None else interval
+        end = first + (len(rows) - 1) * interval
+        obj.reactor.now = end + age
+        obj._inspect(batch(round(first * self.clock_hz), rows,
+                           delta_clock=round((len(rows) - 1) * interval * self.clock_hz),
+                           receive_time=obj.reactor.now))
+
+    def stream(self, obj, attempt, duration=0.125, direction=1, parked=False,
+               biased=False, sample_offset=0.0, watchdog_phase=0.0, frozen=False):
+        size = 10
+        next_watchdog = attempt.arm_time + watchdog_phase
+        index = 0
+        while index / self.rate < duration and not attempt.done:
+            first = attempt.arm_time + sample_offset + index / self.rate
+            rows = []
+            for offset in range(size):
+                number = index + offset
+                when = first + offset / self.rate
+                if frozen:
+                    row = [round(value) for value in attempt.bases]
+                elif biased:
+                    row = [value - number % 2 for value in self.high]
+                else:
+                    row = list(self.high if number % 2 else self.low)
+                if (not parked and 0.0 <= when - attempt.arm_time
+                        < attempt.effective_speed / attempt.effective_accel):
+                    row[attempt.index] += counts(direction * attempt.effective_accel / G)
+                rows.append(row)
+            receive = first + (size - 1) / self.rate + 0.001
+            while next_watchdog < receive and not attempt.done:
+                obj.reactor.now = next_watchdog
+                obj._watchdog(next_watchdog)
+                next_watchdog += plugin.EARLY_INTERVAL
+            if not attempt.done:
+                self.send(obj, first, rows)
+            index += size
+
+    def test_reported_stationary_xyz_noise_admits_half_g_without_changing_trigger(self):
+        for axis in ("x", "y"):
+            with self.subTest(axis=axis):
+                obj, endstop = self.machine(axis=axis)
+                attempt = self.prepare(obj, endstop)
+                status = obj.baseline_status
+                self.assertEqual(status["quiet_limit_g"], 0.5)
+                self.assertEqual(status["observed_peak_to_peak_g"],
+                                 {"x": 0.367188, "y": 0.429688, "z": 0.421875})
+                self.assertGreaterEqual(status["quiet_samples"], 50)
+                self.assertGreaterEqual(status["quiet_span_ms"], 100.0)
+                self.assertEqual(status["quiet_resets"], 0)
+                self.assertEqual(attempt.limit_raw * attempt.count_g, 0.5)
+                self.assertIsNotNone(attempt.proof_noise)
+                self.assertAlmostEqual(attempt.motion_deadline - attempt.arm_time, 0.09)
+                self.assertEqual(endstop.trigger_log.messages, [])
+                self.assertEqual(obj.toolhead.accel_log, [])
+                self.assertEqual(obj.toolhead.moves, [])
+
+    def test_native_floor_caps_small_manual_thresholds_and_preserves_large_thresholds(self):
+        obj = make_homing()
+        for threshold, expected in ((0.000001, 0.000001), (0.1, 0.1), (0.5, 0.5),
+                                    (1.0, 0.5), (2.5, 0.5), (3.0, 0.6), (5.0, 1.0)):
+            obj.threshold_g["x"] = threshold
+            self.assertAlmostEqual(obj._reference_noise_limit("x"), expected)
+        with self.assertRaisesRegex(CommandError, "fresh quiet"):
+            self.machine(threshold=0.1)
+
+    def test_every_axis_rejects_stationary_noise_above_native_floor(self):
+        for axis in range(3):
+            with self.subTest(axis=axis):
+                previous_low, previous_high = self.low, self.high
+                try:
+                    self.low = tuple(-34 if index == axis else value
+                                     for index, value in enumerate(previous_low))
+                    self.high = tuple(34 if index == axis else value
+                                      for index, value in enumerate(previous_high))
+                    with self.assertRaisesRegex(CommandError, "fresh quiet"):
+                        self.machine()
+                finally:
+                    self.low, self.high = previous_low, previous_high
+
+    def test_balanced_biased_and_asymmetric_parked_noise_cannot_succeed(self):
+        for asymmetric, biased in ((False, False), (False, True), (True, False), (True, True)):
+            for axis in ("x", "y"):
+                with self.subTest(axis=axis, asymmetric=asymmetric, biased=biased):
+                    obj, endstop = self.machine(axis=axis, asymmetric=asymmetric)
+                    attempt = self.prepare(obj, endstop)
+                    if asymmetric:
+                        self.assertGreater(attempt.proof_noise[1],
+                                           (self.high[1] - self.low[1]) / 2)
+                    self.stream(obj, attempt, parked=True, biased=biased)
+                    self.assertFalse(attempt.moving)
+                    self.assertFalse(attempt.motion_seen)
+                    self.assertEqual(attempt.auto_direction, 0)
+                    self.assertEqual(attempt.proof_speed_peak, 0.0)
+                    self.assertEqual(attempt.reason, "no_motion")
+                    self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+                    self.assertLessEqual(obj.reactor.now, attempt.motion_deadline + 0.003)
+                    self.assertGreaterEqual(obj.reactor.now, attempt.motion_deadline)
+                    with self.assertRaisesRegex(CommandError, "motion was not verified"):
+                        obj.finish(endstop, attempt, HOST)
+
+    def test_real_75mm_ramps_and_contacts_survive_batch_watchdog_phases(self):
+        for axis in ("x", "y"):
+            for direction in (-1, 1):
+                for phase in (0.0, 0.001, 0.002):
+                    with self.subTest(axis=axis, direction=direction, phase=phase):
+                        obj, endstop = self.machine(axis=axis, threshold=1.0)
+                        attempt = self.prepare(obj, endstop, direction)
+                        self.stream(obj, attempt, direction=direction,
+                                    sample_offset=phase / 4, watchdog_phase=phase)
+                        self.assertTrue(attempt.motion_seen)
+                        self.assertTrue(attempt.moving)
+                        self.assertGreaterEqual(attempt.proof_speed_peak, 37.5)
+                        self.assertEqual(attempt.auto_direction, -direction)
+                        self.assertIsNone(attempt.reason)
+                        first = obj.clock_to_time(attempt.last_end_clock) + 1 / self.rate
+                        row = [round(value) for value in attempt.bases]
+                        row[attempt.index] += counts(-1.1 * direction)
+                        self.send(obj, first, [row, row])
+                        self.assertEqual(attempt.reason, "impact")
+                        self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+                        obj.disarm()
+                        self.assertAlmostEqual(obj.finish(endstop, attempt, HIT), first, places=6)
+                        self.assertEqual(attempt.record["result"], "impact")
+
+    def test_lower_acceleration_without_reliable_motion_proof_aborts_instead_of_pressed(self):
+        obj, endstop = self.machine(threshold=1.0, accel=1000.0)
+        attempt = self.prepare(obj, endstop)
+        self.stream(obj, attempt, duration=0.2)
+        self.assertFalse(attempt.motion_seen)
+        self.assertEqual(attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_nonfinite_derived_native_deadline_fails_before_arming(self):
+        obj, endstop = self.machine(accel=5e-324)
+        with self.assertRaisesRegex(CommandError, "deadlines must be finite"):
+            self.prepare(obj, endstop)
+        self.assertIsNone(obj.attempt)
+        self.assertEqual(endstop.trigger_log.messages, [])
+
+    def test_half_g_still_reports_real_startup_acceleration_without_masking_it(self):
+        obj, endstop = self.machine()
+        attempt = self.prepare(obj, endstop)
+        self.stream(obj, attempt)
+        self.assertEqual(attempt.reason, "impact")
+        self.assertFalse(attempt.motion_seen)
+        self.assertAlmostEqual(obj.onset_time(attempt), attempt.arm_time + 1 / self.rate)
+        self.assertGreater(attempt.onset_raw * attempt.count_g, 0.5)
+        self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+        # Workflow quality rejects this startup trigger instead of raising the
+        # actual detector threshold or granting calibration a successful home.
+        quality, _message = Rig().workflow._quality("x", {
+            "result": "impact", "travel_mm": 0.0, "moving": False, "motion_seen": False})
+        self.assertNotEqual(quality, "good")
+
+    def test_first_contact_survives_old_prearm_transient_and_single_retained_sample(self):
+        for sign in (-1, 1):
+            obj, endstop = self.machine()
+            attempt = self.prepare(obj, endstop)
+            before = [0, 0, counts(1)]
+            before[attempt.index] = counts(-15)
+            contact = [round(value) for value in attempt.bases]
+            contact[attempt.index] += counts(sign * 0.55)
+            self.send(obj, attempt.arm_time - 0.010, [before, contact], interval=0.010)
+            self.assertEqual(attempt.reason, "impact")
+            self.assertAlmostEqual(obj.onset_time(attempt), attempt.arm_time)
+            self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+
+    def test_stationary_bias_cannot_choose_direction_or_hide_either_first_contact(self):
+        for axis in ("x", "y"):
+            for sign in (-1, 1):
+                with self.subTest(axis=axis, sign=sign):
+                    obj, endstop = self.machine(axis=axis)
+                    attempt = self.prepare(obj, endstop)
+                    self.stream(obj, attempt, duration=0.040, parked=True, biased=True)
+                    self.assertGreater(obj._measured_speed(attempt), 30.0)
+                    self.assertFalse(attempt.motion_seen)
+                    self.assertEqual(attempt.auto_direction, 0)
+                    self.assertIsNone(attempt.reason)
+                    first = obj.clock_to_time(attempt.last_end_clock) + 1 / self.rate
+                    contact = [round(value) for value in attempt.bases]
+                    contact[attempt.index] += counts(sign * 0.55)
+                    self.send(obj, first, [contact, contact])
+                    self.assertEqual(attempt.reason, "impact")
+                    self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+                    obj.disarm()
+                    self.assertAlmostEqual(obj.finish(endstop, attempt, HIT), first)
+                    self.assertEqual(attempt.record["result"], "impact")
+
+    def test_invalid_expanded_native_frames_cannot_update_motion_peak_or_return_home(self):
+        for fault in ("stale", "future", "duplicate", "reverse", "zero_interval", "nonfinite"):
+            with self.subTest(fault=fault):
+                obj, endstop = self.machine(threshold=1.0)
+                attempt = self.prepare(obj, endstop)
+                row = [round(value) for value in attempt.bases]
+                first = attempt.arm_time
+                if fault in ("duplicate", "reverse"):
+                    self.send(obj, first, [row] * 10)
+                    first -= 1 / self.rate if fault == "reverse" else 0
+                if fault == "nonfinite":
+                    obj.reactor.now = first + 0.004
+                    obj._inspect({"start_clock": round(first * self.clock_hz), "delta_clock": 2250,
+                                  "data": tuple([float("nan"), 0, 128] * 10),
+                                  "#receive_time": obj.reactor.now})
+                else:
+                    self.send(obj, first, [row] * 10,
+                              age=0.051 if fault == "stale" else -0.010 if fault == "future" else 0.001,
+                              interval=0 if fault == "zero_interval" else None)
+                self.assertEqual(attempt.reason, "stale_data" if fault in ("stale", "future")
+                                 else "invalid_data")
+                self.assertEqual(attempt.proof_speed_peak, 0.0)
+                self.assertFalse(attempt.motion_seen)
+                self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_gap_invalidates_early_motion_peak_and_noisy_frozen_stream_fails_closed(self):
+        obj, endstop = self.machine(threshold=1.0)
+        attempt = self.prepare(obj, endstop)
+        self.stream(obj, attempt, duration=0.0175, watchdog_phase=0.100)
+        self.assertGreaterEqual(attempt.proof_speed_peak, 37.5)
+        self.assertFalse(attempt.motion_seen)
+        first = obj.clock_to_time(attempt.last_end_clock) + 0.005
+        self.send(obj, first, [self.low, self.high] * 5)
+        self.assertTrue(attempt.gap)
+        obj._watchdog(obj.reactor.now)
+        self.assertFalse(attempt.motion_seen)
+        obj.reactor.now = attempt.motion_deadline
+        attempt.last_data = obj.reactor.now
+        obj._watchdog(obj.reactor.now)
+        self.assertEqual(attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+        obj, endstop = self.machine()
+        attempt = self.prepare(obj, endstop)
+        self.stream(obj, attempt, parked=True, frozen=True)
+        self.assertFalse(attempt.varied)
+        self.assertFalse(attempt.motion_seen)
+        self.assertEqual(attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_expanded_native_continuity_and_exact_end_duplicates_across_clock_wrap(self):
+        epoch = 0x100000000 / self.clock_hz - 0.120
+        obj, endstop = self.machine(threshold=1.0, epoch=epoch)
+        attempt = self.prepare(obj, endstop)
+        self.stream(obj, attempt, duration=0.040)
+        self.assertTrue(attempt.motion_seen)
+        self.assertTrue(attempt.moving)
+        self.assertFalse(attempt.gap)
+        self.assertIsNone(attempt.reason)
+        self.assertEqual(endstop.trigger_log.messages, [])
+        # The last valid batch straddles the 32-bit boundary, so its stored end
+        # clock is unmasked while a replay starts at the same masked clock.
+        obj, endstop = self.machine(threshold=1.0, epoch=epoch)
+        attempt = self.prepare(obj, endstop)
+        wrap = 0x100000000 / self.clock_hz
+        row = [round(value) for value in attempt.bases]
+        self.send(obj, attempt.arm_time, [row] * 37)
+        self.send(obj, wrap - 0.0005, [row] * 4)
+        self.assertGreater(attempt.last_end_clock, 0xFFFFFFFF)
+        peak = attempt.proof_speed_peak
+        self.send(obj, obj.clock_to_time(attempt.last_end_clock), [row] * 2)
+        self.assertEqual(attempt.reason, "invalid_data")
+        self.assertEqual(attempt.proof_speed_peak, peak)
+        self.assertFalse(attempt.motion_seen)
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_current_upper_bound_preserves_justified_expanded_native_pressed_start(self):
+        previous_low, previous_high = self.low, self.high
+        try:
+            self.low, self.high = (0, 0, 121), (1, 0, 135)
+            obj, endstop = self.machine(speed=100.0)
+            attempt = self.prepare(obj, endstop)
+            self.assertIsNotNone(attempt.proof_noise)
+            self.stream(obj, attempt, parked=True)
+            self.assertTrue(attempt.varied)
+            self.assertFalse(attempt.motion_seen)
+            self.assertFalse(attempt.moving)
+            lower, upper = obj._motion_speed_bounds(attempt, attempt.proof_state)
+            commanded = obj._commanded_speed(
+                attempt, obj.clock_to_time(attempt.last_end_clock) - plugin.MOTION_LAG)
+            self.assertEqual(lower, 0.0)
+            self.assertLess(upper, plugin.PRESSED_RATIO * commanded)
+            self.assertEqual(attempt.reason, "pressed")
+            self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+            self.assertEqual(obj.finish(endstop, attempt, HIT), attempt.arm_time)
+        finally:
+            self.low, self.high = previous_low, previous_high
+
+    def test_quiet_native_pressed_start_and_no_data_guard_remain_effective(self):
+        obj, endstop = self.machine(quiet=(0.0, 0.0, 1.0))
+        attempt = self.prepare(obj, endstop)
+        self.assertIsNone(attempt.proof_noise)
+        self.assertIsNone(attempt.motion_deadline)
+        for index in range(20):
+            first = attempt.arm_time + index * 10 / self.rate
+            rows = [[number % 2, 0, counts(1)] for number in range(10)]
+            self.send(obj, first, rows)
+            obj._watchdog(obj.reactor.now)
+            if attempt.done:
+                break
+        self.assertEqual(attempt.reason, "pressed")
+        self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+        self.assertEqual(obj.finish(endstop, attempt, HIT), attempt.arm_time)
+        obj, endstop = self.machine()
+        attempt = self.prepare(obj, endstop)
+        obj.reactor.now = attempt.arm_time + obj.stream_timeout + 0.001
+        obj._watchdog(obj.reactor.now)
+        self.assertEqual(attempt.reason, "no_data")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+
 class WorkflowMotionProofIntegrationTests(unittest.TestCase):
     def test_relative_motion_proof_is_accepted_when_legacy_moving_is_false(self):
         rig = Rig()

@@ -323,7 +323,7 @@ class BaselineFloorTest(unittest.TestCase):
                 generic(options={"baseline_noise_floor": value})
         native = make_homing(options={"baseline_noise_floor": 0.2})
         native.threshold_g["x"] = 0.5
-        self.assertAlmostEqual(native._reference_noise_limit("x"), 0.1)
+        self.assertAlmostEqual(native._reference_noise_limit("x"), 0.5)
         for value in (0.0, 0.1, 0.2):
             obj = generic(options={"baseline_noise_floor": value})
             obj.threshold_g["x"] = 0.5
