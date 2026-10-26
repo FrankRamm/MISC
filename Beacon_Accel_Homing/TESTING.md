@@ -19,7 +19,7 @@ bash -n Beacon_Accel_Homing/bootstrap.sh
 bash -n Beacon_Accel_Homing/uninstall.sh
 ```
 
-Focused installer/bootstrap/uninstall and homing-path checks:
+Focused installer/bootstrap/uninstall and workflow/homing-path checks:
 
 ```bash
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_installer.py -v
@@ -41,10 +41,17 @@ failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. Shell entry points are unchanged by this
-safe Z compatibility fix, so their syntax checks were not repeated. No native
+direct-command workflow change, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
-The combined offline verification run discovered **288 tests: 287 passed,
+Host-process restart guidance follows inspected upstream import/restart
+source, documented in [compatibility evidence](docs/COMPATIBILITY.md#loading-code-and-configuration).
+No service restart or live module reload was tested. Installing/updating code,
+uninstalling it or restoring previous module links requires an operator-run
+host-process restart while idle; configuration-only edits retain console
+`RESTART` and normal calibration `SAVE_CONFIG` behavior.
+
+The combined offline verification run discovered **292 tests: 291 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -80,7 +87,7 @@ and exercise verified offline-cache dispatch and download/refusal paths.
 
 Core/backend and workflow suites separately cover trigger/session behavior,
 mapped generic data and units, timing/rate/error guards, staged/independent
-models, explicit manual-centering confirmation, verified stock G28 requirements,
+models, explicit `CENTERED=1` consent, verified stock G28 requirements,
 suspect travel without automatic returns, and measured chart export. Synthetic
 chart fixtures are explicitly marked as simulated.
 
@@ -99,10 +106,18 @@ the operator's manual center; a clean run has one qualifying discovery and ten
 validation homes. Early triggers increase the default candidate to 2.5 g,
 release/invalidate XY and wait for manual recentering followed by the same
 calibration command, preserving the pending candidate and attempt count.
-Automatic recentering follows only
-accepted homes. TEST/CHARTS retain their argument-free prompt starts and
-`ACCEL_HOMING_CONFIRM CENTERED=1` response; that response cannot continue
-calibration. These checks do not detect or prove physical centering.
+Automatic recentering follows only accepted homes. TEST/CHARTS start directly
+with `ACCEL_HOMING_TEST CENTERED=1` and
+`ACCEL_HOMING_CHARTS_GENERATE CENTERED=1`, from an existing manual XY center
+with both axes unhomed. They do not release XY before the first home. Missing
+consent or a homed XY axis fails before movement or a workflow-state change.
+These checks do not detect or prove physical centering.
+
+Direct-command fixtures check that no separate centering-confirmation command
+is registered and no `action:prompt_*` messages are emitted during successful
+calibration/test/chart runs, early-trigger recentering, cancellation, timeout
+or failure. Early calibration hits retain console instructions, the same
+calibration resume command, candidate/attempt state and pending timeout.
 
 Save-and-reload fixtures run the real named-model loader for both X and Y,
 including a clean 2 g calibration and a 2.5 g calibration after an early trigger.
@@ -135,7 +150,7 @@ plans above the fixed 3 mm nominal command budget before enabling/backoff.
 Those checks establish software behavior only; no physical stop travel or
 end-to-end host/MCU latency was measured.
 
-The four changed Python files (`accel_homing_workflows.py`, `installer.py`,
-`tests/test_workflows.py` and `tests/test_installer.py`) passed Python 3.8
+The three changed Python files (`accel_homing_workflows.py`, `installer.py` and
+`tests/test_workflows.py`) passed Python 3.8
 grammar parsing on the current Python 3.13 host. No Python 3.8 runtime was
 executed; syntax parsing alone does not establish complete runtime compatibility.

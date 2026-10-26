@@ -780,6 +780,19 @@ def arguments(argv=None):
     return args
 
 
+def print_restart_advice(selected):
+    print("After reviewing the changes, while the printer is idle, restart its Klipper host "
+          "process to load the changed Python modules.")
+    service = selected.get("service")
+    if service:
+        print("Run this host command yourself: sudo systemctl restart -- %s" % shlex.quote(str(service)))
+    else:
+        print("Use this printer's actual host service manager to restart the Klipper process; "
+              "the installer could not determine a service name.")
+    print("G-code RESTART and FIRMWARE_RESTART alone do not reload already-imported Python modules. "
+          "No restart, homing, firmware flashing, or calibration was performed.")
+
+
 def main(argv=None):
     args = arguments(argv)
     if hasattr(os, "geteuid") and os.geteuid() == 0:
@@ -802,8 +815,8 @@ def main(argv=None):
         print("Uninstalled. Current-state backup: %s" % backup)
         print("Restored the pre-install activation/config state across %d installation transaction(s). "
               "Source caches, charts and original backups were retained." % len(plan["history"]))
-        print("Review the restored config. When idle, run RESTART yourself. No restart, homing, "
-              "firmware flashing, or calibration was performed.")
+        print("Review the restored config.")
+        print_restart_advice(selected)
         print("Undo this uninstall (only while its restored files remain unchanged): bash %s --config %s --klipper-path %s --rollback %s" %
               tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "install.sh", selected["config"], selected["repo"], backup)))
         return 0
@@ -813,6 +826,8 @@ def main(argv=None):
             print(assert_idle(selected))
             rollback(args.rollback, False, selected)
         print(("Would restore: " if args.dry_run else "Restored: ") + args.rollback)
+        if not args.dry_run:
+            print_restart_advice(selected)
         return 0
     changes, messages, sensor = make_plan(Path(__file__).resolve().parent, selected, args)
     print("Accelerometer: [%s] (physical mounting/orientation not inferred)" % sensor)
@@ -829,8 +844,8 @@ def main(argv=None):
     print(assert_idle(selected))
     backup = apply_plan(changes, selected["config"], selected=selected)
     print("Installed. Backup: %s" % backup)
-    print("Review the config and sensor mounting/orientation. When idle, run RESTART yourself. "
-          "No restart, homing, firmware flashing, or calibration was performed.")
+    print("Review the config and sensor mounting/orientation.")
+    print_restart_advice(selected)
     print("Restore: bash %s --config %s --klipper-path %s --rollback %s" %
           tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "install.sh", selected["config"], selected["repo"], backup)))
     print("Full uninstall (including upgrades): bash %s --config %s --klipper-path %s" %

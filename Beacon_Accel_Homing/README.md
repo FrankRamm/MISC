@@ -49,16 +49,18 @@ Multiple printer instances or sensors need explicit selection. Configure
 sensor firmware and wiring beforehand. Installation does not start movement
 or restart Klipper.
 
-Review the resulting configuration and mounting. Then, **while idle**, enter
-this in the **printer console** to load the plugin:
-
-```gcode
-RESTART
-```
+Review the resulting configuration and mounting. Then, **while idle**, run the
+host service restart command printed by the installer in the host's **shell**.
+Use its selected service name; restarting the Klipper host process loads the
+installed Python modules. Printer-console `RESTART` or `FIRMWARE_RESTART`
+alone does not reload already imported code.
 
 Keep the printed source directory under `~/.local/share/accel-homing/`; the
 installed links use it. See [installation details](docs/INSTALLATION.md) for
 manual selection, dry run, pinned downloads, backups and rollback.
+For an existing installation, use the
+[update command](docs/INSTALLATION.md#update-an-existing-installation) with
+`--replace-existing-links` to back up and repoint the previous source links.
 
 ## 2. Set thresholds
 
@@ -76,6 +78,7 @@ accel_chip: adxl345 toolhead
 Keep your existing section and sensor name; do not add a second section.
 Leave thresholds commented to use saved calibration values. To override one
 axis, uncomment its setting, change the value and issue `RESTART` while idle.
+That console command is sufficient for these configuration-only edits.
 Thresholds are in **g**: higher values
 require a stronger impact; lower values can trigger on motion vibration.
 Manual settings take priority over saved calibration values.
@@ -97,11 +100,10 @@ All commands below go in the **printer console**:
 | Command | What it does |
 | --- | --- |
 | `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` | Starts or resumes X calibration after manually centering XY, with both axes unhomed. Use `AXIS=Y` for Y. |
-| `ACCEL_HOMING_CONFIRM CENTERED=1` | Continues the current TEST/CHARTS prompt after manual centering, or use its **Centered - continue** button. |
-| `ACCEL_HOMING_TEST` | After centering confirmation, tests X and then Y with current thresholds. |
-| `ACCEL_HOMING_CHARTS_GENERATE` | Runs the same X-then-Y test and exports measured acceleration charts. |
+| `ACCEL_HOMING_TEST CENTERED=1` | Tests X then Y with current thresholds after manually centering XY, with both axes unhomed. |
+| `ACCEL_HOMING_CHARTS_GENERATE CENTERED=1` | Runs the same X-then-Y test and exports measured acceleration charts. |
 | `ACCEL_HOMING_STATUS` | Shows thresholds, recent results, calibration progress, model and chart paths. |
-| `ACCEL_HOMING_CANCEL` | Cancels the calibration/test/chart sequence and restores temporary settings. |
+| `ACCEL_HOMING_CANCEL` | Cancels a pending calibration/manual-recentering wait and restores temporary settings. |
 | `SET_ACCEL_HOMING AXIS=X THRESHOLD=4.0` | Optional temporary X threshold change until restart; use `AXIS=Y` for Y. |
 
 ## Calibrate X, then Y
@@ -132,9 +134,9 @@ for XY travel. These workflows do not perform `safe_z_home`'s Z hop.
    that generated block. Once ready, repeat the manual preparation and run
    **`ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1`**. X and Y are saved independently.
 
-Calibration starts and resumes with its own command. `ACCEL_HOMING_CONFIRM`
-is only for TEST/CHARTS and cannot continue calibration. Keep the same `AXIS`
-and optional `SAVE_CONFIG` value when resuming after manual recentering.
+Keep the same calibration command, `AXIS` and optional `SAVE_CONFIG` value
+when resuming after manual recentering. The console reports when recentering
+is needed; the pending calibration expires after its configured timeout.
 
 Existing manual threshold overrides remain active even after calibration.
 Comment them out if you want the saved model to supply the thresholds.
@@ -143,13 +145,17 @@ or motor current.
 
 ## Test and view charts
 
-`ACCEL_HOMING_TEST` and `ACCEL_HOMING_CHARTS_GENERATE` first release XY and wait
-for your manual-centering confirmation. Start either command without arguments,
-physically center XY by hand at its prompt, then run
-**`ACCEL_HOMING_CONFIRM CENTERED=1`** or use **Centered - continue**. They home
-**X, return X alone to center, then home Y**. These workflows never request a Z
-move. A suspect home aborts without an automatic return. Both axes must use
-suitable accelerometer endstops.
+Physically center XY by hand and leave both axes unhomed before either command,
+using the same manual preparation and nozzle/bed clearance as calibration.
+Then run **`ACCEL_HOMING_TEST CENTERED=1`** or
+**`ACCEL_HOMING_CHARTS_GENERATE CENTERED=1`**. `CENTERED=1` declares that this
+preparation is complete and authorizes movement. Omitting it fails before
+movement. X starts after stationary preparation, with no separate confirmation
+or preliminary XY release.
+
+They home **X, return X alone to center, then home Y**. These workflows never
+request a Z move. A suspect home aborts without an automatic return. Both axes
+must use suitable accelerometer endstops.
 
 The console reports acceleration at impact detection and its measured peak in
 **g**, plus commanded travel. Charts show X/Y/Z acceleration relative to the
@@ -178,8 +184,9 @@ If a changed setting conflicts with restoration or a backup is incomplete,
 it stops before changing configuration or plugin links and identifies the
 file and backup to review. Source downloads, charts and backups are retained.
 See [uninstall and recovery details](docs/INSTALLATION.md#uninstall-and-restore-the-pre-installation-configuration).
-Review the result, then issue **`RESTART` yourself while idle**. Uninstallation
-does not restart Klipper or move the printer.
+Review the result, then **restart the selected Klipper host process yourself
+while idle**, using the service command printed by the uninstaller.
+Uninstallation does not restart Klipper or move the printer.
 
 ## For the curious
 
