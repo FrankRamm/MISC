@@ -106,8 +106,9 @@ The preparation order is:
    samples from before the cutoff and require at least 50 fresh,
    contiguous samples spanning `baseline_time` (default 0.1 s). For native
    Beacon, peak-to-peak variation on each of the three sensor axes must not
-   exceed 20% of the active pass's impact threshold, including a calibration
-   candidate. Configured generic accelerometers use
+   exceed `max(0.20 * impact_threshold, min(0.5 g, impact_threshold))`, including
+   a calibration candidate. The floor is bounded by 0.5 g and the actual
+   threshold; it is not a user setting. Configured generic accelerometers use
    `max(0.20 * impact_threshold, baseline_noise_floor)` on each sensor axis.
 4. Freeze the validated reference before `home_start` arms trigger dispatch.
    The first valid impact at or after arming remains eligible, including
@@ -119,8 +120,12 @@ from 0 to 0.2 inclusive. Zero restores the previous 20% limit. It affects only
 configured generic accelerometers, including Cartographer's separately
 configured ADXL/LIS object. At a 0.5 g calibration candidate, the default
 stationary variation limit becomes 0.2 g; the impact threshold stays 0.5 g.
-Native Beacon retains its existing quietness, already-pressed and motion
-behavior.
+Native Beacon independently uses its bounded 0.5 g floor. At a 0.5 g candidate
+its stationary variation limit is 0.5 g and its raw impact threshold remains
+0.5 g. Manual thresholds below 0.5 g cap the floor at the actual threshold;
+they remain finite-positive settings without a new minimum. Native thresholds
+at least 2.5 g retain their previous quiet limit.
+References admitted only by the wider limit use the motion checks below.
 
 Acquisition has a `baseline_time + 0.5 s` deadline measured after queued setup
 and settling finish. Persistent vibration or no sample flow fails with
@@ -211,6 +216,46 @@ Existing saved models remain compatible without a new range check on loading.
 Their historical validations are not certified by this rule; only a new
 successful calibration records the new range qualification.
 
+## Native Beacon with an expanded reference
+
+A native reference whose accepted peak-to-peak variation exceeds 20% of the
+active impact threshold carries an observed noise envelope. Each sensor axis
+uses `max(abs(low - mean), abs(high - mean))`; a reference within the previous
+limit keeps the legacy native motion and already-pressed path.
+
+For an expanded reference, motion proof uses a lower velocity bound after
+subtracting that envelope from the accumulated acceleration. A bounded
+history retains an early lower-speed peak so watchdog/report alignment does
+not discard valid ramp evidence. A retained peak must reach at least half the
+full effective homing speed, with the usual later commanded-history evidence;
+the instantaneous lower-bound comparison remains available. Automatic impact
+direction likewise needs a signed velocity interval entirely beyond +30 or
+-30 mm/s; uncertain drift keeps detection bidirectional.
+
+Already-pressed detection uses the **current upper velocity bound**, rather
+than treating a small lower bound as proof that the toolhead is stationary.
+If uncertainty prevents a valid decision and no raw impact occurs, a finite
+startup deadline requests a host stop and reports `no_motion`. That deadline
+is the earlier of the existing travel deadline and the generic startup-time
+calculation below with native `stream_timeout`
+as the sample-age allowance and the native early-report interval as its
+reporting interval (3 ms). At 75 mm/s, 5000 mm/s² and the default 50 ms
+`stream_timeout`, the startup calculation is 90 ms. No generic travel-budget
+setting is applied to Beacon. Expanded native packets require a finite
+positive sample interval and strict sample-clock order. Their oldest retained
+post-arm sample must be no older than `stream_timeout`, and their newest
+sample no more than 5 ms in the future, before proof or trigger dispatch.
+Missing, stale, invalid or discontinuous data cannot establish initial motion
+proof on this path. A later gap does not revoke already established motion.
+
+Raw baseline-relative impact samples and the configured threshold remain
+unchanged. The first valid impact after arming is eligible, including an
+impact before motion proof; there is no blanking interval, minimum travel,
+automatic threshold increase or speed change. Workflows retain their separate
+travel and motion qualification. The observed envelope is not a guaranteed
+bound on later disturbances, and the host deadline is not a physical
+stopping-distance guarantee. This path has synthetic validation only.
+
 ## Generic startup motion policy
 
 While no impact has completed a generic home, fresh acceleration must prove
@@ -243,8 +288,7 @@ The applied bounds appear in status as
 applied) and in the console as `motion-proof noise bound XYZ ... g`.
 Raw baseline-relative acceleration, impact thresholds, manual direction
 overrides, first-impact eligibility and the startup deadline are unchanged.
-Native Beacon retains
-its existing quietness, already-pressed and motion behavior.
+Native Beacon uses the separate expanded-reference policy above.
 
 The generic adjustment has synthetic validation only. It assumes later
 stationary noise stays within the deviations observed in the accepted
