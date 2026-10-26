@@ -573,5 +573,479 @@ class BootstrapFixture(unittest.TestCase):
             self.assertNotEqual(truncated.returncode, 0)
 
 
+class UninstallFixture(unittest.TestCase):
+    """Real temp config files, with managed symlinks emulated on Windows too."""
+    plan = HostFixture.plan
+
+    def setUp(self):
+        HostFixture.setUp(self)
+        self.links = {}
+        self.real_snapshot, self.real_write = installer.snapshot, installer.write_state
+        def snapshot(path):
+            path = Path(path)
+            return dict(self.links.get(path, {"kind": "absent"})) if self.is_module(path) else self.real_snapshot(path)
+        self.snapshot = snapshot
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(installer, "snapshot", side_effect=snapshot).start()
+        mock.patch.object(installer, "write_state", side_effect=self.write).start()
+
+    def is_module(self, path):
+        return path.parent == self.extras and path.name in installer.MODULES
+
+    def write(self, path, state):
+        path = Path(path)
+        if self.is_module(path):
+            self.links[path] = dict(state)
+        else:
+            self.real_write(path, state)
+
+    def install(self, release="package", *flags):
+        self.source = self.home / release
+        self.source.mkdir(exist_ok=True)
+        for name in installer.MODULES:
+            (self.source / name).write_text("# offline source " + release + "\n")
+        changes = self.plan(*flags)[0]
+        return installer.apply_plan(changes, self.config, self.write, self.selected)
+
+    def uninstall(self):
+        plan = installer.make_uninstall_plan(self.selected)
+        backup = installer.apply_uninstall_plan(plan, self.selected, self.write)
+        return plan, backup
+
+    def capture(self):
+        return {str(path): self.snapshot(path) for path in
+                (self.config, self.axes, self.config.parent / installer.MANAGED,
+                 self.repo / ".git/info/exclude", *(self.extras / name for name in installer.MODULES))}
+
+    def manifest(self, backup):
+        return json.loads((backup / "manifest.json").read_text())
+
+    def test_full_history_two_upgrades_preserves_unrelated_edits_and_is_idempotent(self):
+        original = self.capture()
+        first = self.install()
+        self.axes.write_text(self.axes.read_text().replace("run_current: 1.2", "run_current: 1.25"))
+        second = self.install("upgrade-one")
+        self.config.write_text(self.config.read_text().replace("Keep my printer settings", "Keep edited printer settings"))
+        third = self.install("upgrade-two")
+        plan, receipt = self.uninstall()
+        self.assertEqual(len(plan["history"]), 3)
+        self.assertIn("run_current: 1.25", self.axes.read_text())
+        self.assertIn("Keep edited printer settings", self.config.read_text())
+        self.assertIn("endstop_pin: tmc2209_stepper_x:virtual_endstop", self.axes.read_text())
+        self.assertIn("diag_pin: ^PB0", self.axes.read_text())
+        self.assertIn("home_current: 0.6", self.axes.read_text())
+        self.assertFalse((self.config.parent / installer.MANAGED).exists())
+        self.assertEqual(self.capture()[str(self.repo / ".git/info/exclude")], original[str(self.repo / ".git/info/exclude")])
+        self.assertTrue(all(value["kind"] == "absent" for value in self.links.values()))
+        self.assertEqual(self.manifest(receipt)["operation"], "uninstall")
+        self.assertTrue(all(self.manifest(item)["status"] == "installed" for item in (first, second, third)))
+        again, no_backup = self.uninstall()
+        self.assertEqual(again["entries"], [])
+        self.assertIsNone(no_backup)
+
+    def test_routine_calibration_restores_original_plugin_model_and_preserves_other_saved_data(self):
+        self.install()
+        text = self.config.read_text().replace("#*# x_threshold = 6.5", "#*# x_threshold = 9.2")
+        text += ("#*# [accel_homing_model new_run]\n#*# y_threshold = 7.1\n"
+                 "#*# [bed_mesh default]\n#*# points = 0.1, 0.2\n")
+        text = text.replace("model_coef = 1.234", "model_coef = 9.876")
+        self.config.write_text(text)
+        self.uninstall()
+        restored = self.config.read_text()
+        self.assertIn("#*# x_threshold = 6.5", restored)
+        self.assertNotIn("accel_homing_model new_run", restored)
+        self.assertIn("model_coef = 9.876", restored)
+        self.assertIn("#*# [bed_mesh default]\n#*# points = 0.1, 0.2\n", restored)
+
+    def test_composed_config_upgrades_restore_both_axes_and_nested_speed_edits(self):
+        self.install("package", "--axes", "x", "--homing-speed", "80")
+        self.axes.write_bytes(self.axes.read_text().replace("run_current: 1.2", "run_current: 1.25").encode())
+        self.install("upgrade-one", "--axes", "y", "--homing-speed", "60")
+        self.install("upgrade-two", "--axes", "x", "--homing-speed", "90")
+        plan, _ = self.uninstall()
+        self.assertEqual(len(plan["history"]), 3)
+        expected = AXES.replace("run_current: 1.2", "run_current: 1.25")
+        self.assertEqual(self.axes.read_text(), expected)
+        self.assertEqual(self.config.read_bytes(), (CONFIG + SAVED).encode())
+
+    def test_calibration_when_originally_no_saved_block_removes_only_plugin_models(self):
+        self.config.write_text(CONFIG)
+        self.install()
+        self.config.write_text(self.config.read_text() + SAVED.replace("#*# [beacon model default]\n#*# model_coef = 1.234\n", ""))
+        self.uninstall()
+        self.assertEqual(self.config.read_text(), CONFIG)
+
+    def test_generated_config_tuning_is_owned_but_other_sections_fail_closed(self):
+        self.install()
+        managed = self.config.parent / installer.MANAGED
+        managed.write_text(managed.read_text().replace("#x_threshold: 8.0", "x_threshold: 7.2"))
+        before = self.capture()
+        managed.write_text(managed.read_text() + "\n[gcode_macro MY_MACRO]\ngcode: M118 mine\n")
+        with self.assertRaisesRegex(installer.InstallError, "unowned sections"):
+            installer.make_uninstall_plan(self.selected)
+        self.assertIn("MY_MACRO", managed.read_text())
+        managed.write_bytes(base64.b64decode(before[str(managed)]["data"]))
+        self.uninstall()
+        self.assertFalse(managed.exists())
+
+    def test_preexisting_legacy_config_links_models_and_commented_active_models_restored(self):
+        active_model = "\n[accel_homing_model old]\nx_threshold: 6.1\nx_successes: 10\n"
+        self.config.write_text(CONFIG + "\n[beacon_accel_homing]\nx_threshold: 6.2\ny_threshold: 6.3\n" + active_model + SAVED)
+        old_config = self.config.read_bytes()
+        original_source = self.home / "original-legacy-source"
+        original_source.mkdir()
+        for name in installer.MODULES:
+            (original_source / name).write_text("# Original legacy module\n")
+            self.links[self.extras / name] = {"kind": "symlink", "target": str(original_source / name)}
+        original_links = {path: dict(state) for path, state in self.links.items()}
+        self.install()
+        self.config.write_text(self.config.read_text().replace("x_threshold: 6.1", "#x_threshold: 6.1").replace("x_successes: 10", "#x_successes: 10") +
+                               "#*# [accel_homing_model old]\n#*# x_threshold = 8.5\n#*# x_successes = 10\n")
+        self.uninstall()
+        self.assertEqual(self.config.read_bytes(), old_config)
+        self.assertEqual(self.links, original_links)
+
+    def test_managed_line_edit_or_changed_section_refuses_before_writes(self):
+        self.install()
+        for old, new in (("endstop_pin: accel_homing:x", "endstop_pin: !PA4"),
+                         ("[stepper_x]", "[stepper_edited]")):
+            original = self.axes.read_text()
+            self.axes.write_text(original.replace(old, new))
+            current = self.capture()
+            with self.assertRaisesRegex(installer.InstallError, "Managed lines|Managed section"):
+                installer.make_uninstall_plan(self.selected)
+            self.assertEqual(self.capture(), current)
+            self.axes.write_text(original)
+
+    def test_real_save_config_normalizes_crlf_and_separator_blank_lines(self):
+        original = CONFIG + "\n[beacon_accel_homing]\nx_threshold: 6.2\n" + (
+            "\n[accel_homing_model old]\nx_threshold: 6.1\nx_successes: 10\n") + SAVED
+        self.config.write_bytes(original.replace("\n", "\r\n").encode())
+        self.install()
+        active = self.config.read_text().split(installer.SAVE_MARKER)[0].rstrip()
+        active = active.replace("x_threshold: 6.1", "#x_threshold: 6.1").replace("x_successes: 10", "#x_successes: 10")
+        saved = SAVED.lstrip("\n") + "#*# [accel_homing_model old]\n#*# x_threshold = 8.5\n#*# x_successes = 10\n"
+        self.config.write_bytes((active + "\n" + saved).encode())
+        self.uninstall()
+        text = self.config.read_bytes().decode().replace("\r\n", "\n")
+        self.assertIn("[accel_homing_model old]\nx_threshold: 6.1\nx_successes: 10\n", text)
+        self.assertNotIn("#*# [accel_homing_model old]", text)
+        self.assertNotIn("accel_chip:", text)
+
+    def test_new_active_model_or_plugin_section_and_broken_restored_include_refuse(self):
+        self.install()
+        current = self.config.read_bytes()
+        for added in ("\n[accel_homing_model manual]\nx_threshold: 6.1\n",
+                      "\n[beacon_accel_homing]\nx_threshold: 6.2\n",
+                      "\n[include accel_*.cfg]\n"):
+            text = current.decode().replace(installer.SAVE_MARKER, added + installer.SAVE_MARKER)
+            self.config.write_bytes(text.encode())
+            before = self.capture()
+            with self.assertRaisesRegex(installer.InstallError, "New/unowned active|Missing include"):
+                installer.make_uninstall_plan(self.selected)
+            self.assertEqual(self.capture(), before)
+        self.config.write_bytes(current)
+
+    def test_missing_original_link_source_refuses_but_deleted_intermediate_release_does_not(self):
+        for name in installer.MODULES:
+            self.links[self.extras / name] = {"kind": "symlink", "target": "../../../legacy/" + name}
+        self.install()
+        current = self.capture()
+        with self.assertRaisesRegex(installer.InstallError, "Original plugin source is missing"):
+            installer.make_uninstall_plan(self.selected)
+        self.assertEqual(self.capture(), current)
+        # Recover the original source and use two later releases; intermediate
+        # source deletion does not matter when its link is absent in the result.
+        legacy = self.repo / "klippy/extras/../../../legacy"
+        legacy.mkdir(parents=True, exist_ok=True)
+        for name in installer.MODULES:
+            (legacy / name).write_text("# recovered original\n")
+        self.install("upgrade")
+        shutil.rmtree(self.home / "package")
+        self.uninstall()
+        self.assertTrue(all(state.get("target", "").startswith("../../../legacy/") for state in self.links.values()))
+
+    def test_unchanged_included_context_is_rechecked_before_uninstall_mutation(self):
+        untouched = self.config.parent / "unchanged.cfg"
+        untouched.write_text("[gcode_macro USER_MACRO]\ngcode: M118 mine\n")
+        self.config.write_bytes((CONFIG + "\n[include unchanged.cfg]\n" + SAVED).encode())
+        self.install()
+        plan = installer.make_uninstall_plan(self.selected)
+        self.assertNotIn(str(untouched), {entry["path"] for entry in plan["entries"]})
+        untouched.write_text("[accel_homing_model new_unreviewed]\nx_threshold: 7.1\n")
+        with self.assertRaisesRegex(installer.InstallError, "changed after planning"):
+            installer.apply_uninstall_plan(plan, self.selected, self.write)
+
+    def test_changed_link_refuses_and_missing_history_fails_before_writes(self):
+        first = self.install()
+        second = self.install("upgrade")
+        self.links[self.extras / installer.MODULES[0]]["target"] = "/somewhere/manual.py"
+        current = self.capture()
+        with self.assertRaisesRegex(installer.InstallError, "Managed link"):
+            installer.make_uninstall_plan(self.selected)
+        self.assertEqual(self.capture(), current)
+        shutil.rmtree(first)
+        with self.assertRaisesRegex(installer.InstallError, "gapped"):
+            installer.make_uninstall_plan(self.selected)
+        self.assertTrue(second.is_dir())
+
+    def test_uninstall_wrong_checkout_unknown_path_and_edited_manifest_refuse(self):
+        first = self.install()
+        with self.assertRaisesRegex(installer.InstallError, "different Klipper checkout"):
+            installer.make_uninstall_plan(dict(self.selected, repo=self.home / "other-klipper"))
+        manifest = self.manifest(first)
+        manifest["changes"][0]["path"] = str(self.home / "unrelated.cfg")
+        (first / "manifest.json").write_text(json.dumps(manifest))
+        current = self.capture()
+        with self.assertRaisesRegex(installer.InstallError, "outside selected instance"):
+            installer.make_uninstall_plan(self.selected)
+        self.assertEqual(self.capture(), current)
+
+    def test_v2_unchanged_main_baseline_handles_wildcard_calibration_and_v1_refuses_unknown_models(self):
+        self.config.write_text(CONFIG + "\n[include accel_*.cfg]\n" + SAVED)
+        (self.config.parent / "accel_existing.cfg").write_text("# Original include\n")
+        first = self.install()
+        self.assertNotIn(str(self.config), {entry["path"] for entry in self.manifest(first)["changes"]})
+        self.config.write_text(self.config.read_text() + "#*# [accel_homing_model later]\n#*# x_threshold = 7.1\n")
+        plan = installer.make_uninstall_plan(self.selected)
+        self.assertTrue(plan["entries"])
+        manifest = self.manifest(first)
+        for key in ("context", "repo", "parent", "previous_uninstall", "operation"):
+            manifest.pop(key, None)
+        manifest["version"] = 1
+        (first / "manifest.json").write_text(json.dumps(manifest))
+        current = self.capture()
+        with self.assertRaisesRegex(installer.InstallError, "no original main-config/model baseline"):
+            installer.make_uninstall_plan(self.selected)
+        self.assertEqual(self.capture(), current)
+
+    def test_v1_complete_install_and_upgrade_restores_original_state(self):
+        before = self.capture()
+        for name in ("package", "upgrade"):
+            directory = self.install(name)
+            manifest = self.manifest(directory)
+            for key in ("context", "repo", "parent", "previous_uninstall", "operation"):
+                manifest.pop(key, None)
+            manifest["version"] = 1
+            (directory / "manifest.json").write_text(json.dumps(manifest))
+        self.uninstall()
+        self.assertEqual(self.capture(), before)
+
+    def test_uninstall_failure_recovers_entire_active_state_and_retry_works(self):
+        self.install()
+        self.install("upgrade")
+        before = self.capture()
+        plan = installer.make_uninstall_plan(self.selected)
+        calls = []
+        def fail_second(path, state):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError("offline restore failure")
+            self.write(path, state)
+        with self.assertRaisesRegex(installer.InstallError, "Uninstall failed; applied changes restored"):
+            installer.apply_uninstall_plan(plan, self.selected, fail_second)
+        self.assertEqual(self.capture(), before)
+        failed = sorted((self.config.parent / ".accel_homing_backups").iterdir())[-1]
+        self.assertEqual(self.manifest(failed)["status"], "rolled_back_after_failure")
+        self.uninstall()
+
+    def test_partial_failure_and_concurrent_edit_report_recovery_without_overwrite(self):
+        self.install()
+        plan = installer.make_uninstall_plan(self.selected)
+        first_path = Path(plan["entries"][0]["path"])
+        calls = []
+        def fail(path, state):
+            calls.append(path)
+            if len(calls) == 2:
+                if self.is_module(first_path):
+                    self.links[first_path] = {"kind": "symlink", "target": "/concurrent/manual.py"}
+                else:
+                    first_path.write_text("# concurrent edit during failed uninstall\n")
+                raise OSError("offline restore failure")
+            self.write(path, state)
+        with self.assertRaisesRegex(installer.InstallError, "rollback needs repair"):
+            installer.apply_uninstall_plan(plan, self.selected, fail)
+        failed = sorted((self.config.parent / ".accel_homing_backups").iterdir())[-1]
+        self.assertEqual(self.manifest(failed)["status"], "rollback_incomplete")
+        with self.assertRaisesRegex(installer.InstallError, "Incomplete/unknown transaction"):
+            installer.make_uninstall_plan(self.selected)
+
+    def test_successful_uninstall_can_be_precisely_rolled_back_then_uninstalled_again(self):
+        self.install()
+        self.install("upgrade")
+        installed = self.capture()
+        _, backup = self.uninstall()
+        installer.rollback(backup, selected=self.selected)
+        self.assertEqual(self.capture(), installed)
+        self.assertEqual(len(installer.make_uninstall_plan(self.selected)["history"]), 2)
+        self.uninstall()
+
+    def test_new_install_after_uninstall_has_new_baseline(self):
+        self.install()
+        self.uninstall()
+        self.axes.write_text(self.axes.read_text().replace("run_current: 1.2", "run_current: 1.3"))
+        self.install("new-installation")
+        plan, _ = self.uninstall()
+        self.assertEqual(len(plan["history"]), 1)
+        self.assertIn("run_current: 1.3", self.axes.read_text())
+
+    def test_uninstall_plan_checks_concurrent_config_history_and_instance_before_writes(self):
+        self.install()
+        plan = installer.make_uninstall_plan(self.selected)
+        with self.assertRaisesRegex(installer.InstallError, "different instance"):
+            installer.apply_uninstall_plan(plan, dict(self.selected, config=self.home / "wrong.cfg"), self.write)
+        self.axes.write_text(self.axes.read_text() + "# concurrent edit\n")
+        with self.assertRaisesRegex(installer.InstallError, "changed after planning"):
+            installer.apply_uninstall_plan(plan, self.selected, self.write)
+
+    def test_cli_uninstall_dry_run_and_idle_failure_do_not_write_or_install(self):
+        self.install()
+        before = self.capture()
+        with mock.patch.object(installer, "discover_target", return_value=self.selected), \
+             mock.patch.object(installer.os, "geteuid", return_value=1000, create=True), \
+             mock.patch.object(installer, "assert_idle", side_effect=installer.InstallError("printing")) as idle, \
+             mock.patch.object(installer, "make_plan", side_effect=AssertionError("must never install")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(installer.main(["--uninstall", "--dry-run"]), 0)
+            idle.assert_not_called()
+            with self.assertRaisesRegex(installer.InstallError, "printing"):
+                installer.main(["--uninstall"])
+        self.assertEqual(self.capture(), before)
+
+    def test_other_shared_checkout_plugin_consumer_refuses_before_writes(self):
+        self.install()
+        peer_config = self.home / "printer_b/config/printer.cfg"
+        peer_config.parent.mkdir(parents=True)
+        peer_config.write_text("[printer]\nkinematics: corexy\n[accel_homing]\naccel_chip: beacon\n")
+        peer = dict(self.selected, config=peer_config, pid=456, service="klipper-b.service", origin="offline peer")
+        before = self.capture()
+        with mock.patch.object(installer, "proc_instances", return_value=[peer]), \
+             mock.patch.object(installer, "service_instances", return_value=[]):
+            with self.assertRaisesRegex(installer.InstallError, "shared checkout module links.*printer_b"):
+                installer.make_uninstall_plan(self.selected)
+        self.assertEqual(self.capture(), before)
+        peer_config.write_text("[include missing-config.cfg]\n")
+        with mock.patch.object(installer, "proc_instances", return_value=[]), \
+             mock.patch.object(installer, "service_instances", return_value=[dict(peer, pid=None)]):
+            with self.assertRaisesRegex(installer.InstallError, "cannot resolve this shared checkout consumer"):
+                installer.make_uninstall_plan(self.selected)
+        self.assertEqual(self.capture(), before)
+
+    def test_peer_without_plugin_is_safe_but_new_consumer_after_planning_refuses(self):
+        self.install()
+        peer_config = self.home / "plain-printer.cfg"
+        peer_config.write_text("[printer]\nkinematics: corexy\n")
+        peer = dict(self.selected, config=peer_config, pid=None, service="klipper-b.service", origin="offline service")
+        with mock.patch.object(installer, "proc_instances", return_value=[]), \
+             mock.patch.object(installer, "service_instances", return_value=[peer]):
+            plan = installer.make_uninstall_plan(self.selected)
+            peer_config.write_text("[accel_homing_model old]\nx_threshold: 6.1\n")
+            before = self.capture()
+            with self.assertRaisesRegex(installer.InstallError, "shared checkout module links"):
+                installer.apply_uninstall_plan(plan, self.selected, self.write)
+            self.assertEqual(self.capture(), before)
+
+    def test_pristine_host_without_any_history_is_already_uninstalled(self):
+        plan, backup = self.uninstall()
+        self.assertEqual(plan["entries"], [])
+        self.assertIsNone(backup)
+        self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
+
+
+class UninstallBootstrapFixture(unittest.TestCase):
+    setUp = BootstrapFixture.setUp
+    fetch = BootstrapFixture.fetch
+    def embedded(self):
+        return (DIRECTORY / "uninstall.sh").read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    def response(self, url, **kwargs):
+        url = getattr(url, "full_url", url)
+        self.urls.append(url)
+        data = (DIRECTORY / "bootstrap.py").read_bytes()
+        if "/commits/" in url:
+            payload = json.dumps({"sha": self.sha}).encode()
+        elif "/contents/" in url:
+            blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+            payload = json.dumps(dict(type="file", size=len(data), sha=blob)).encode()
+        else:
+            payload = data
+        result = io.BytesIO(payload)
+        result.headers = {"Content-Length": str(len(payload))}
+        return result
+
+    def run_entry(self, source, *args, response=None):
+        with mock.patch.object(bootstrap.urllib.request, "urlopen", side_effect=response or self.response), \
+             mock.patch.object(bootstrap.sys, "argv", ["uninstall.sh", str(source)] + list(args)), \
+             mock.patch.object(bootstrap.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped:
+            exec(compile(self.embedded(), "uninstall.sh embedded Python", "exec"), {})
+        return stopped.exception.code, run
+
+    def test_standalone_with_arbitrary_sibling_installer_always_verifies_and_forces_uninstall(self):
+        self.destination.mkdir()
+        (self.destination / "installer.py").write_text("raise AssertionError('untrusted sibling')\n")
+        code, run = self.run_entry(self.destination, "--config", "/offline/printer.cfg", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertTrue(self.urls)
+        command = run.call_args.args[0]
+        self.assertIn("--uninstall", command)
+        self.assertEqual(command[2:], ["--repo", "FrankRamm/MISC", "--ref", self.sha,
+                                      "--uninstall", "--config", "/offline/printer.cfg", "--dry-run"])
+        self.assertNotEqual(command[1], str(self.destination / "installer.py"))
+
+    def test_complete_verified_local_package_uses_exact_sibling_uninstall_offline(self):
+        self.data = {name: (DIRECTORY / name).read_bytes() for name in bootstrap.FILES}
+        source = bootstrap.prepare_release("example/project", self.sha, self.destination, self.fetch)
+        self.urls.clear()
+        code, run = self.run_entry(source, "--dry-run", response=AssertionError("must stay offline"))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.urls, [])
+        run.assert_called_once_with([bootstrap.sys.executable, str(source / "installer.py"), "--uninstall", "--dry-run"])
+
+    def test_uninstall_conflicting_rollback_aborts_before_download_or_dispatch(self):
+        code, run = self.run_entry(self.destination, "--rollback", "/offline/backup")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.urls, [])
+        run.assert_not_called()
+
+    def test_uninstall_download_failure_or_valid_prefix_truncation_never_dispatches(self):
+        for failure in (OSError("offline HTTP failure"), "truncate"):
+            self.urls.clear()
+            def response(url, **kwargs):
+                address = getattr(url, "full_url", url)
+                if "raw.githubusercontent.com" in address:
+                    if isinstance(failure, Exception):
+                        raise failure
+                    result = io.BytesIO(b"# valid prefix\n")
+                    result.headers = {}
+                    return result
+                return self.response(url, **kwargs)
+            code, run = self.run_entry(self.destination, response=response)
+            self.assertEqual(code, 1)
+            run.assert_not_called()
+
+    def test_uninstall_bootstrap_preserves_forced_mode_after_release_download(self):
+        release = self.destination / "verified-release"
+        with mock.patch.object(bootstrap.os, "geteuid", return_value=1000, create=True), \
+             mock.patch.object(bootstrap, "prepare_release", return_value=release), \
+             mock.patch.object(bootstrap.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(bootstrap.main(["--uninstall", "--dry-run"]), 0)
+        run.assert_called_once_with([bootstrap.sys.executable, str(release / "installer.py"), "--uninstall", "--dry-run"])
+
+    def test_uninstall_shell_truncation_cannot_drop_forced_mode(self):
+        git_bash = Path("C:/Program Files/Git/bin/bash.exe")
+        bash = str(git_bash) if git_bash.is_file() else shutil.which("bash")
+        if not bash:
+            self.skipTest("Bash unavailable for syntax-only fixture")
+        script = (DIRECTORY / "uninstall.sh").read_text()
+        invocation = script.rindex("\n(\n") + 1
+        full = subprocess.run([bash, "-n"], input=script, text=True, capture_output=True)
+        self.assertEqual(full.returncode, 0, full.stderr)
+        for end in (invocation + 1, script.rindex(' "$@"'), script.rindex("\n)")):
+            truncated = subprocess.run([bash, "-n"], input=script[:end], text=True, capture_output=True)
+            self.assertNotEqual(truncated.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
