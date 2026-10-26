@@ -151,13 +151,27 @@ One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
 Each accepted home must exceed 10 mm of commanded travel and fall within the
 configured tolerance of expected center-to-stop travel (20% by default).
-This broad geometry check does not limit the distance spread between trials
-and does not establish precise physical repeatability.
+These geometry checks apply to the discovery and each validation.
+New calibrations also require the ten geometry-qualified validation
+homes at the same candidate to satisfy `max(travel_mm) - min(travel_mm) < 1.5 mm`.
+The limit is fixed; exactly 1.5 mm fails. Discovery and manual centering are
+excluded, and X/Y have separate validation windows. If the range reaches the
+limit before all ten validations, no later result can make that window pass:
+calibration aborts immediately without a higher threshold, another automatic
+return/home, model staging, config write or restart. The save path independently
+checks ten distinct consecutive homes from the same axis, run and candidate
+after the separate discovery. Metadata and progress expose the range and limit.
+The comparison uses the decimal reported distances; it does not add physical
+precision to the underlying step-count measurement.
 An early trigger raises the candidate, resets validation progress, releases
 XY and invalidates its homed state while retaining Z. The operator manually
 recenters and repeats the same calibration command to resume the pending
 candidate and attempt count, keeping the same `AXIS` and optional `SAVE_CONFIG`
-value. Sensor faults and excessive travel abort. Native homing errors still
+value. This existing early-hit classification includes pressed starts, travel
+at most 10 mm and travel below the geometry tolerance. It clears all previous
+validation distances; the new candidate requires a fresh qualifying discovery
+and ten new validation homes. Sensor faults and excessive travel abort.
+Native homing errors still
 use stock fault cleanup, which may release all motors.
 TEST/CHARTS use the same manual preparation, with both XY axes unhomed, and
 start directly with `ACCEL_HOMING_TEST CENTERED=1` or
@@ -174,6 +188,9 @@ it does not write or restart, and the workflow restores the previous active
 thresholds. An explicit `SAVE_CONFIG` is still required to persist and reload
 the new model; an ordinary `RESTART` discards unsaved staged values. Manual
 threshold overrides retain priority after reload.
+Existing saved models remain compatible without a new range check on loading.
+Their historical validations are not certified by this rule; only a new
+successful calibration records the new range qualification.
 
 ## Generic startup motion policy
 
@@ -203,9 +220,40 @@ or plugin backoff, a generic plan with nominal request travel above a fixed
 **3 mm** limit is rejected; planning checks run again before the homing pass.
 Resolve the speed/acceleration configuration within the machine's supported
 limits before retrying. The installer does not raise acceleration.
+The installer preserves the configured `homing_speed` unless an explicit
+`--homing-speed N` requests an edit. An incompatible configured or explicitly
+requested plan is refused before installation writes; there is no automatic
+speed edit or reduction. The generic reporting ceiling is
+`max_report_travel / max_sample_age`, which defaults to 50 mm/s from
+1 mm / 0.020 s; there is no independent fixed 50 mm/s ceiling. Higher speeds
+are conditional on explicit settings satisfying both reporting and the 3 mm
+startup budget. The installer changes neither timing nor acceleration to make
+a speed pass, and does not restore a historical speed from older backups.
+CALIBRATE/TEST/CHARTS also make a read-only check of their requested generic X/Y
+plans before workflow effects, including when both axes are still unhomed.
+The owner method `preflight_motion_policy(axes, error=None)` validates selected
+module endstops and calls the backend rail validator without moving, enabling
+motors, changing settings or consulting a presumed physical start position.
+Beacon retains its existing path. Invalid/nonpositive live toolhead limits are
+rejected; `homing_accel: 0` leaves the live acceleration in force, and a nonzero
+value only caps it. Later preparation checks remain necessary because live
+limits can change after this first check.
+Ordinary public `G28` is not wrapped by this preflight. With `safe_z_home`, a
+configured Z hop can occur before a later X/Y policy rejection. The safe Z
+section, Z settings and 3 mm limit are unchanged.
 
 For `v=50 mm/s`, `a=5000 mm/s²`, `max_sample_age=0.020`, and
 `stream_interval=0.005`, `T=0.055 s` and nominal request travel is `2.65 mm`.
+At 75 mm/s with those default timing settings and acceleration, nominal request
+travel is `4.1625 mm`, exceeding the same 3 mm limit. Removing the independent
+50 mm/s cap does not admit this default plan or relax any timing/watchdog guard.
+With the same 50 mm/s and timing settings but a live effective acceleration
+of 1500 mm/s², the request travel is approximately `3.233333 mm`, so the plan
+is rejected. A higher configured printer acceleration or plugin cap does not
+override that lower live value, which can remain after a macro or tuning run.
+The error reports effective speed/acceleration and a conservative, rounded-down
+`homing_speed` ceiling (about `47.0965 mm/s` for this example). It does not alter
+the configuration or raise acceleration automatically.
 At `v=20 mm/s` with the same other settings, `T=0.049 s` and the budget is
 `1.0 mm`. The extra 3 ms covers one nominal watchdog interval. It excludes
 unbounded host scheduling stalls, transport and MCU stop delay, and actual

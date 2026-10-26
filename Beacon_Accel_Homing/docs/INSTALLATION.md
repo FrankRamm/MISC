@@ -211,16 +211,26 @@ an unsafe status to complete installation.
   rail `homing_accel`/`min_home_dist` are commented with their previous values.
   Run currents, stall thresholds, unrelated macros, other axes, explicit X/Y
   thresholds and saved data remain intact.
-- Effective generic speeds above `min(50, max_report_travel/max_sample_age)`
-  are capped and can be lowered further for the fixed 3 mm startup request
-  budget. The installer shares the runtime formula and uses printer
+- Configured `homing_speed` is preserved by default for every sensor. Generic
+  plans must still satisfy `max_report_travel/max_sample_age` and the fixed
+  3 mm startup request budget. The default 1 mm / 0.020 s settings give a
+  50 mm/s reporting limit; there is no separate fixed 50 mm/s cap.
+  An incompatible plan produces an
+  actionable conflict before config/module writes or activation; the installer
+  does not select a lower speed. It shares the runtime formula and uses printer
   `max_velocity`, `max_accel`, and nonzero plugin `homing_accel` limits.
-  Slower speeds and Beacon speeds are kept; acceleration is never raised.
-  `--homing-speed N` is an explicit optional override and is refused if its
-  effective speed violates either policy. No universal speed is known
-  to guarantee a detectable impact on all mechanics.
+  `--homing-speed N` is a deliberate optional speed edit and is refused if its
+  effective speed violates either policy. Acceleration is never raised.
+  No universal speed is known to guarantee a detectable impact on all mechanics.
+  Installation does not change timing settings or acceleration to admit a
+  speed. Updating preserves a speed previously written by an older installer;
+  it does not automatically restore an earlier value from backup history.
   Runtime checks repeat before enable/backoff, including after later manual
-  config edits. This does not promise a physical stopping distance; see
+  config edits or temporary live acceleration changes. CALIBRATE/TEST/CHARTS
+  also check requested generic X/Y plans before any workflow effect, even
+  when XY is unhomed. Refusals report effective speed/acceleration and a lower
+  `homing_speed` ceiling; a plugin cap cannot raise a lower live acceleration.
+  This does not promise a physical stopping distance; see
   [the calculation and default 2.65 mm example](COMPATIBILITY.md).
 - All six required Python modules are linked into `klippy/extras`. Existing
   regular files at those paths are never overwritten. Links to a different
@@ -236,7 +246,9 @@ Cartographer configurations that use the built-in safe Z homing path.
 Calibration/test/chart workflows verify the active built-in handler and its
 underlying stock `G28`, then call that stock handler for X or Y only so the
 wrapper's `z_hop` is not invoked. Normal `G28` continues through the existing
-safe Z handler. See [the source contract](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
+safe Z handler, whose configured hop may occur before a later X/Y motion-policy
+refusal. The workflow preflight does not intercept public `G28` or change Z
+settings. See [the source contract](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
 `[homing_override]` and `G28` macros still require manual review before
 installation. After adapting their behavior you can explicitly acknowledge
@@ -266,12 +278,23 @@ unhomed; center it manually again and reissue the same calibration command to
 resume, keeping the same `AXIS` and optional `SAVE_CONFIG` value. The console
 reports manual-recentering instructions; the pending calibration retains its
 configured timeout. The default 0.5 g step makes the first retry 1.0 g.
+One geometry-qualified discovery must be followed by ten additional consecutive
+geometry-qualified homes at the same candidate. Their commanded-travel range
+(`max - min`) must be **strictly less than 1.5 mm**; exactly 1.5 mm fails.
+Discovery and manual centering are excluded, and each axis has its own window.
+If that validation range reaches 1.5 mm, calibration aborts before another
+automatic return/home, without increasing the candidate or staging, saving or
+restarting. Existing early-hit retries still clear the count and distance
+window; after manual recentering, the new candidate needs another qualifying
+discovery and ten fresh validations. These commanded distances do not prove
+contact with the correct stop or absence of skipped steps.
 Calibration and saved models accept finite values from 0.5 g; existing models
 at 1 g and 2 g remain valid. Manual threshold settings and temporary SET
 commands retain their 3–15 g range. An explicit existing
 `calibration_start_threshold` is preserved; set it to `0.5` or leave it absent
 to use the new default. Updating does not replace a saved model's threshold;
-run calibration to create a new one.
+run calibration to create a new one. Previous models remain loadable, but
+updating does not qualify their historical distances under the new 1.5 mm rule.
 
 TEST and CHARTS require the same existing manual XY center, both axes unhomed
 and nozzle/bed clearance. Start them directly with
