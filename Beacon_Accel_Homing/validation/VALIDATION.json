@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for 0.5 g calibration and saved models",
-  "timestamp_utc": "2026-10-26T13:57:47.504660+00:00",
-  "source_base_commit": "4094a0fdfa641ebd91f667717a46a176ae6cf1f0",
+  "stage": "completed offline validation for strict repeatability, live preflight and configured-speed preservation",
+  "timestamp_utc": "2026-10-26T14:40:09.635114+00:00",
+  "source_base_commit": "8b7b3d6d21709490b06c2fa7e83454a1573ba8bb",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 309,
-  "passed": 308,
+  "tests_run": 345,
+  "passed": 344,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,18 +14,18 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 4.809,
+  "elapsed_seconds": 4.707,
   "test_returncode": 0,
-  "installer_tests": 92,
-  "workflow_tests": 61,
+  "installer_tests": 100,
+  "workflow_tests": 75,
   "module_tests": {
     "test_backends": 48,
-    "test_installer": 92,
-    "test_motion_policy": 10,
+    "test_installer": 100,
+    "test_motion_policy": 24,
     "test_session": 53,
     "test_single_touch": 16,
     "test_trigger": 29,
-    "test_workflows": 61
+    "test_workflows": 75
   },
   "preparation_fixture_tests": {
     "test_backends.GenericPreparationTest": 6,
@@ -85,28 +85,31 @@
       "uninstaller.py"
     ],
     "scope": "All production and test Python files in the package",
-    "line_ending_only_files": [],
+    "line_ending_only_files": [
+      "tests/test_single_touch.py",
+      "tests/test_trigger.py"
+    ],
     "passed": true,
     "errors": [],
     "actual_python_38_runtime_tested": false
   },
   "validated_python_sha256": {
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
-    "accel_homing_backends.py": "ce22a0a59c6a05f3d7954e853c2dcd17bf0b3b51cb1e9e78efa944878824f536",
+    "accel_homing_backends.py": "0976ecde53fcb8da1a8d966da5cf568688f171b9cc3ee96f57294e491aff8cc4",
     "accel_homing_charts.py": "88963c11d9f934be168cf80fb34548c41cc534b24d819cfd7750ba1943f4e5f7",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
-    "accel_homing_workflows.py": "cb215ff2f4e81a43a0d3b09010ca25e941429ab4e135ffd9826dab0f6896872b",
-    "beacon_accel_homing.py": "c8d1d4ba9fd545b8950211f66d82f9de01fc5d465dd3dc944c09eb9fa14979bd",
+    "accel_homing_workflows.py": "fb8c89a7bb37f01f7f4f3a49ca0fd82636daf4fdbf611fc334283222b73c6ad3",
+    "beacon_accel_homing.py": "c525c0dbabe190c78a5cbccff0be7d0e8756466c5d2fa76b71e497e974e7a920",
     "bootstrap.py": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b",
-    "installer.py": "2d6aec46b1cea15c66ba80f8a3f48e01c90a5e560b8fa1dae7ad70007d1b41e3",
+    "installer.py": "ec4d1f131659099a20bcc16f94e753f84c7e233c7c6d47b15b906d1f99484937",
     "tests/harness.py": "7a418b30ef79060a8f74251ec9b69721e6afbefcbc3404f7d05d06a271534e18",
     "tests/test_backends.py": "2719a148fe1da5f283409b6a3ba26976e5d5352a7b296d79b771576c2cc94e30",
-    "tests/test_installer.py": "16d826fab9e0ee54c4d747607be2314d0cd2734b71e7013cf692c2631a71c441",
-    "tests/test_motion_policy.py": "5a9fa4cd4497c739bd5a757be506a67afeefa235f03c456c020ac2bc457bf763",
+    "tests/test_installer.py": "4bc3794c4f6b3a90107d46cb77c2c654e84f78237d56137b13728172761f816b",
+    "tests/test_motion_policy.py": "b5a9362830d0b2c3b002390c7e3f4ed1c6f2233c89c1b4aa104d1abcd2896ec7",
     "tests/test_session.py": "eb4173a267895bf2eba87993a8190d690de978ffe0067c6d16dd0989bf1a36fd",
     "tests/test_single_touch.py": "234c3c5a60a89eb8de98268205800e946fef9b706c4812c47c7bbf35979b1a44",
     "tests/test_trigger.py": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
-    "tests/test_workflows.py": "188f69ea6248795144cba3f3a7377caf30f6788cc640579447b5cf27013cab48",
+    "tests/test_workflows.py": "ffc0f23e5b5496e8cfb0d41b6fdb458c73d726e76df08027cce1f5152ed4e1cf",
     "uninstaller.py": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23"
   },
   "native_linux_integration_tested": false,
@@ -125,17 +128,24 @@
     "Hosted GitHub download validation is separate; this report uses mocked offline downloads.",
     "Python 3.8 grammar parsing is not a Python 3.8 runtime compatibility test.",
     "Automatic host-service activation uses mocked process/systemd/privilege fixtures; no real service restart or live Python module reload was performed.",
-    "The postrestart process check does not prove Klipper Ready state, module behavior, or hardware correctness; the final idle check cannot atomically lock other clients out."
+    "The postrestart process check does not prove Klipper Ready state, module behavior, or hardware correctness; the final idle check cannot atomically lock other clients out.",
+    "The fixed <1.5 mm repeatability rule applies to new geometry-qualified validation windows; existing saved models remain loadable without retroactive certification.",
+    "Commanded travel and decimal range comparison do not measure absolute position, prove correct-stop contact or rule out skipped steps.",
+    "The new preflight protects workflow entry; ordinary public G28 and safe_z_home remain unchanged, so a configured Z hop can precede a later X/Y policy refusal.",
+    "Temporary live acceleration reductions can invalidate a previously configured plan; this patch does not automatically restore limits or raise acceleration.",
+    "Admitted 75 mm/s moving/no-motion traces use constructed sensor delivery and fake clocks; no real sensor/MCU/host timing or higher-speed hardware behavior was qualified.",
+    "The independent fixed 50 mm/s cap is removed, but default reporting settings still give 50 mm/s and all reporting/startup/watchdog guards remain enforced.",
+    "Default installation preserves the currently configured speed; it does not restore a historical value from old backups or auto-tune timing/acceleration."
   ],
-  "git_diff_check_base": "4094a0fdfa641ebd91f667717a46a176ae6cf1f0",
+  "git_diff_check_base": "8b7b3d6d21709490b06c2fa7e83454a1573ba8bb",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
-  "previous_validation_timestamp_utc": "2026-10-26T13:25:44.290374+00:00",
-  "validation_reason": "Final combined run after reviewer clearance for the 0.5 g calibration start and saved-model floor; save policy, repeat-validation algorithm and automatic selected-host-service activation are unchanged.",
+  "previous_validation_timestamp_utc": "2026-10-26T14:22:40.594740+00:00",
+  "validation_reason": "Final combined run after reviewer clearance for strict max-minus-min <1.5 mm across ten geometry-qualified validation homes excluding discovery; guarded model saving; read-only workflow preflight against live startup-motion limits; actionable diagnostics; configured homing-speed preservation; shared reporting ceiling without an independent fixed 50 mm/s cap; and admitted 75 mm/s moving/no-motion synthetic fixtures. Existing early-hit retries, saved-model loading compatibility, 0.5 g start/step and SAVE_CONFIG policy are retained.",
   "host_service_restart_tested": false,
   "live_python_module_reload_tested": false,
   "automatic_restart_fixture_tests": 15,
@@ -147,8 +157,8 @@
     3.0,
     15.0
   ],
-  "test_log_sha256": "c7b0ebf92620bc50d672cd62cac4e9453ad231196f14b5be75fe05765c63bf7c",
-  "suite_completed_utc": "2026-10-26T13:56:20.146317+00:00",
+  "test_log_sha256": "da3e6b1e8b9f1e5268671b252b246b3ac8b3ba5063be4ec3c303e533c11783be",
+  "suite_completed_utc": "2026-10-26T14:40:08.997298+00:00",
   "additional_unchanged_file_content_checks": [
     {
       "file": "uninstaller.py",
@@ -158,5 +168,36 @@
       "source_base_sha256": "04902fa33d7503b195e2d356f1e9f212bb8c37bcf40d4be7f76dd851e6ce6c23"
     }
   ],
-  "quiet_reference_peak_to_peak_limit_default_g": 0.1
+  "quiet_reference_peak_to_peak_limit_default_g": 0.1,
+  "repeatability_fixture_tests": 12,
+  "calibration_validation_homes": 10,
+  "calibration_discovery_in_validation_range": false,
+  "calibration_repeatability_limit_mm": 1.5,
+  "calibration_repeatability_comparison": "max(commanded travel) - min(commanded travel) < limit; equality fails",
+  "calibration_repeatability_scope": "Ten distinct consecutive geometry-qualified validation homes at the same axis/candidate/run",
+  "calibration_existing_early_hits_reset_window": true,
+  "legacy_saved_models_retroactively_qualified": false,
+  "startup_request_travel_limit_mm": 3.0,
+  "startup_workflow_preflight": "Read-only requested-axis validation against live velocity/acceleration before workflow effects",
+  "startup_diagnostic_example": {
+    "speed_mm_s": 50.0,
+    "live_acceleration_mm_s2": 1500.0,
+    "nominal_request_travel_mm": 3.2333333333333334,
+    "conservative_homing_speed_ceiling_mm_s": 47.0965,
+    "physical_stopping_guaranteed": false
+  },
+  "public_g28_safe_z_hop_intercepted": false,
+  "test_log_line_endings": "Raw captured bytes preserved; CRLF normalized only in parser input",
+  "test_log_crlf_count": 350,
+  "suite_started_utc": "2026-10-26T14:40:04.057684+00:00",
+  "source_bytes_unchanged_during_suite": true,
+  "final_validation": true,
+  "validated_python_hash_scope": "Actual on-disk bytes; existing source line endings preserved",
+  "startup_reporting_speed_ceiling_formula": "max_report_travel / max_sample_age",
+  "independent_fixed_50_mm_s_cap": false,
+  "installer_preserves_configured_homing_speed_by_default": true,
+  "installer_explicit_homing_speed_is_only_speed_edit": true,
+  "installer_auto_tunes_timing_or_acceleration": false,
+  "installer_restores_historical_speed_automatically": false,
+  "higher_speed_support": "Conditional on explicitly configured reporting and startup budgets; synthetic fixtures do not qualify hardware timing"
 }
