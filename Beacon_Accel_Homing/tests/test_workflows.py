@@ -5,6 +5,7 @@ import copy
 import csv
 import importlib.util
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -299,6 +300,7 @@ class Rig:
         self.idle_state, self.print_state = "Ready", "standby"
         self.paused, self.sd_active, self.shutdown = False, False, False
         self.save_error = False
+        self.policy_checks, self.policy_error = [], None
         self.home_results = collections.deque()
         self.on_home = None
         self.capture_active, self.capture_stops = False, 0
@@ -329,6 +331,7 @@ class Rig:
             homing_active=False, attempt=None, last={}, endstops={"x": object(), "y": object()},
             rails_by_axis={"x": Rail(), "y": Rail(bounds=(0.0, 200.0))},
             sensor_name="simulated", start_capture=self.start_capture, stop_capture=self.stop_capture,
+            preflight_motion_policy=self.preflight_motion_policy,
             _end_session=self.end_session, cmd_STATUS=lambda g: g.respond_info("core status"))
         self.workflow = AccelHomingWorkflows(self.owner, self.config)
         self.owner.workflows = self.workflow
@@ -354,6 +357,11 @@ class Rig:
         if name in self.gcode.ready_gcode_handlers:
             raise ConfigError("duplicate command: " + name)
         self.gcode.ready_gcode_handlers[name] = callback
+
+    def preflight_motion_policy(self, axes, error=None):
+        self.policy_checks.append(tuple(axes))
+        if self.policy_error is not None:
+            raise (error or self.command_error)(self.policy_error)
 
     def end_session(self):
         self.end_sessions += 1
@@ -940,7 +948,263 @@ class CalibrationTests(unittest.TestCase):
         self.assertFalse(rig.capture_active)
 
 
+class RepeatabilityCalibrationTests(unittest.TestCase):
+    def test_exact_one_point_five_range_is_rejected_including_decimal_endpoints(self):
+        for axis, low, high in (("X", 150.0, 151.5), ("X", 150.1, 151.6),
+                                ("X", 127.1, 128.6), ("Y", 100.0, 101.5)):
+            with self.subTest(axis=axis, low=low, high=high):
+                rig = Rig()
+                rig.home_results.extend([{}] + [{"travel_mm": low}] * 9 + [{"travel_mm": high}])
+                with self.assertRaisesRegex(CommandError, "spread 1.5 mm.*strictly < 1.50 mm"):
+                    rig.calibrate(axis)
+                self.assertEqual(rig.scripts, ["G28 " + axis] * 11)
+                self.assertEqual(len(rig.toolhead.moves), 10)
+                self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 11)
+                self.assertEqual(rig.configfile.saved, {})
+                self.assertEqual(rig.workflow.last_result["result"], "aborted")
+                self.assertIsNone(rig.workflow.session)
+                self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                self.assertEqual(rig.owner.back_off_dist, 5.0)
+                self.assertEqual(rig.toolhead.kin.get_status(0)["homed_axes"], "z")
+                self.assertTrue(rig.lines["stepper_z"].enabled)
+                self.assertTrue(rig.lines["stepper_z1"].enabled)
+                self.assertFalse(rig.capture_active)
+
+    def test_just_below_limit_passes_all_ten_and_records_spread_for_both_save_modes(self):
+        high = 151.499
+        for save in (0, 1):
+            with self.subTest(save=save):
+                rig = Rig()
+                rig.home_results.extend([{}] + [{"travel_mm": 150.0}] * 9 + [{"travel_mm": high}])
+                rig.calibrate(save=save)
+                self.assertEqual(len(rig.home_calls), 11)
+                self.assertEqual(len(rig.toolhead.moves), 10)
+                metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
+                self.assertEqual(metadata["min_commanded_travel_mm"], 150.0)
+                self.assertEqual(metadata["max_commanded_travel_mm"], high)
+                self.assertLess(metadata["repeatability_spread_mm"], 1.5)
+                self.assertEqual(metadata["repeatability_limit_mm"], 1.5)
+                self.assertEqual(rig.workflow.last_result["repeatability_spread_mm"],
+                                 metadata["repeatability_spread_mm"])
+                self.assertEqual(rig.workflow.last_result["repeatability_limit_mm"], 1.5)
+                self.assertEqual(rig.scripts.count("SAVE_CONFIG"), save)
+                self.assertTrue(any("strictly < 1.50 mm" in message for message in rig.output))
+
+    def test_geometry_qualified_outlier_aborts_immediately_without_recenter_or_escalation(self):
+        for axis, center in (("X", 150.0), ("Y", 100.0)):
+            for offset in (-1.6, 1.6):
+                with self.subTest(axis=axis, offset=offset):
+                    rig = Rig()
+                    rig.home_results.extend([{}, {"travel_mm": center},
+                                             {"travel_mm": center + offset}] + [{}] * 8)
+                    with self.assertRaisesRegex(CommandError, "repeatability.*without raising.*no automatic move"):
+                        rig.calibrate(axis)
+                    self.assertEqual(rig.scripts, ["G28 " + axis] * 3)
+                    self.assertEqual(len(rig.toolhead.moves), 2)
+                    self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 3)
+                    self.assertEqual(rig.configfile.saved, {})
+                    self.assertIsNone(rig.workflow.session)
+                    self.assertEqual(rig.workflow.last_result["result"], "aborted")
+
+    def test_reported_three_point_six_two_five_range_cannot_produce_a_saved_model(self):
+        travels = [152.0, 152.034, 153.713, 153.075, 151.981,
+                   153.728, 155.606, 154.919, 153.347, 152.003]
+        self.assertEqual(workflow_module.AccelHomingWorkflows._repeatability_spread(
+            [{"travel_mm": value} for value in travels]), 3.625)
+        rig = Rig()
+        rig.home_results.extend([{}] + [{"travel_mm": value} for value in travels])
+        with self.assertRaisesRegex(CommandError, "repeatability"):
+            rig.calibrate()
+        # The third validation already makes the completed ten-home window impossible.
+        self.assertEqual(len(rig.home_calls), 4)
+        self.assertEqual(len(rig.toolhead.moves), 3)
+        self.assertEqual(rig.configfile.saved, {})
+        self.assertNotIn("SAVE_CONFIG", rig.scripts)
+
+    def test_discovery_and_manual_center_are_excluded_from_ten_distinct_validation_homes(self):
+        for axis, travel in (("X", 150.0), ("Y", 100.0)):
+            with self.subTest(axis=axis):
+                rig = Rig()
+                rig.toolhead.position[:2] = [12.0, 19.0]
+                rig.home_results.extend([{"travel_mm": travel + 4.0}] +
+                                         [{"travel_mm": travel}] * 10)
+                save_model = rig.workflow._save_model
+                inspected = []
+
+                def inspect_then_save():
+                    session = rig.workflow.session
+                    qualified = session["validation_records"]
+                    self.assertEqual(len(qualified), 10)
+                    self.assertEqual(len({id(record) for record in qualified}), 10)
+                    self.assertEqual([record["workflow_attempt"] for record in qualified],
+                                     list(range(2, 12)))
+                    self.assertEqual(session["candidate_attempt"], 1)
+                    self.assertIsNot(qualified[0], session["records"][0])
+                    inspected.append(True)
+                    save_model()
+
+                with mock.patch.object(rig.workflow, "_save_model", side_effect=inspect_then_save):
+                    rig.calibrate(axis, save=0)
+                self.assertEqual(inspected, [True])
+                self.assertEqual([call["successes"] for call in rig.home_calls], [0, 0] + list(range(1, 10)))
+                metadata = json.loads(rig.configfile.saved[("accel_homing_model default", axis.lower() + "_metadata")])
+                self.assertEqual(metadata["min_commanded_travel_mm"], travel)
+                self.assertEqual(metadata["max_commanded_travel_mm"], travel)
+                self.assertEqual(metadata["repeatability_spread_mm"], 0.0)
+
+    def test_axes_keep_independent_windows_and_saved_repeatability_metadata(self):
+        rig = Rig()
+        rig.home_results.extend([{}] + [{"travel_mm": 150.0}] * 9 + [{"travel_mm": 151.4}])
+        rig.calibrate("X", save=0)
+        x_metadata = rig.configfile.saved[("accel_homing_model default", "x_metadata")]
+        rig.workflow._disable_xy()
+        rig.idle_state = "Ready"
+        rig.home_results.extend([{}] + [{"travel_mm": 100.0}] * 9 + [{"travel_mm": 100.5}])
+        rig.calibrate("Y", save=0)
+        self.assertEqual(rig.configfile.saved[("accel_homing_model default", "x_metadata")], x_metadata)
+        self.assertEqual(json.loads(x_metadata)["repeatability_spread_mm"], 1.4)
+        y_metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "y_metadata")])
+        self.assertEqual(y_metadata["repeatability_spread_mm"], 0.5)
+        self.assertEqual(rig.workflow.last_result["axis"], "y")
+        self.assertEqual(rig.scripts, ["G28 X"] * 11 + ["G28 Y"] * 11)
+
+    def test_early_hit_resets_window_before_new_candidate_and_fresh_discovery(self):
+        for early in (8.0, 119.0):
+            with self.subTest(early=early):
+                rig = Rig()
+                rig.home_results.extend([{}, {"travel_mm": 151.0}, {"travel_mm": early}])
+                rig.calibrate(save=0)
+                session = rig.workflow.session
+                self.assertEqual(session["candidate"], 1.0)
+                self.assertEqual(session["state"], "waiting")
+                self.assertEqual(session["successes"], 0)
+                self.assertEqual(session["validation_records"], [])
+                self.assertIsNone(session["repeatability_spread_mm"])
+                self.assertIsNone(session["candidate_attempt"])
+                self.assertFalse(session["candidate_qualified"])
+                self.assertEqual(len(rig.toolhead.moves), 2)
+                self.assertEqual(rig.configfile.saved, {})
+                status = rig.workflow.get_status(0)["active"]
+                self.assertEqual(status["repeatability_limit_mm"], 1.5)
+                self.assertIsNone(status["repeatability_spread_mm"])
+                rig.home_results.extend([{"travel_mm": 148.0}] * 11)
+                rig.calibrate()
+                metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
+                self.assertEqual(metadata["min_commanded_travel_mm"], 148.0)
+                self.assertEqual(metadata["max_commanded_travel_mm"], 148.0)
+                self.assertEqual(metadata["repeatability_spread_mm"], 0.0)
+                self.assertEqual(rig.workflow.last_result["threshold_g"], 1.0)
+                self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 3 + [1.0] * 11)
+
+    def test_repeatability_failure_after_retry_still_cannot_stage_or_raise_threshold(self):
+        rig = Rig()
+        rig.home_results.extend([{}, {"travel_mm": 150.0}, {"travel_mm": 8.0}])
+        rig.calibrate()
+        rig.home_results.extend([{}, {"travel_mm": 150.0}, {"travel_mm": 151.5}])
+        with self.assertRaisesRegex(CommandError, "repeatability"):
+            rig.calibrate()
+        self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 3 + [1.0] * 3)
+        self.assertEqual(rig.configfile.saved, {})
+        self.assertEqual(rig.scripts, ["G28 X"] * 6)
+        self.assertEqual(len(rig.toolhead.moves), 4)
+        self.assertIsNone(rig.workflow.session)
+
+    def test_status_reports_current_validation_spread_and_fixed_limit(self):
+        rig = Rig()
+        states = []
+        rig.on_home = lambda axis: states.append(rig.workflow.get_status(0)["active"])
+        rig.home_results.extend([{}] + [{"travel_mm": 150.0 + 0.1 * index} for index in range(10)])
+        rig.calibrate(save=0)
+        self.assertEqual(states[1]["successes"], 0)
+        self.assertIsNone(states[1]["repeatability_spread_mm"])
+        self.assertEqual(states[2]["successes"], 1)
+        self.assertEqual(states[2]["repeatability_spread_mm"], 0.0)
+        self.assertEqual(states[-1]["successes"], 9)
+        self.assertEqual(states[-1]["repeatability_spread_mm"], 0.8)
+        self.assertTrue(all(status["repeatability_limit_mm"] == 1.5 for status in states))
+
+    def test_save_guard_rejects_malformed_or_unqualified_windows_before_any_write(self):
+        mutations = {
+            "missing session": lambda w: setattr(w, "session", None),
+            "missing validation window": lambda w: w.session.pop("validation_records"),
+            "too few successes": lambda w: w.session.update(successes=9),
+            "too few homes": lambda w: w.session["validation_records"].pop(),
+            "missing discovery": lambda w: w.session.update(candidate_attempt=None),
+            "unqualified discovery": lambda w: w.session.update(candidate_qualified=False),
+            "wrong axis": lambda w: w.session["validation_records"][-1].update(axis="y"),
+            "wrong candidate": lambda w: w.session["validation_records"][-1].update(workflow_threshold_g=1.0),
+            "wrong run": lambda w: w.session["validation_records"][-1].update(run_id="other-run"),
+            "discovery counted": lambda w: w.session["validation_records"][-1].update(workflow_phase="discovery"),
+            "repeated attempt": lambda w: w.session["validation_records"][-1].update(workflow_attempt=2),
+            "unobserved home": lambda w: w.session["validation_records"].__setitem__(
+                -1, dict(w.session["validation_records"][-1])),
+            "bad geometry": lambda w: w.session["validation_records"][-1].update(travel_mm=1.0),
+            "nonfinite distance": lambda w: w.session["validation_records"][-1].update(travel_mm=math.nan),
+            "forged spread summary": lambda w: w.session["validation_records"][-1].update(travel_mm=151.5),
+            "missing save mode": lambda w: w.session.pop("save_config"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name):
+                rig = Rig()
+                with mock.patch.object(rig.workflow, "_save_model"):
+                    rig.calibrate(save=0)
+                mutate(rig.workflow)
+                before = rig.effects()
+                with self.assertRaisesRegex(CommandError, "cannot save calibration"):
+                    rig.workflow._save_model()
+                self.assertEqual(rig.effects(), before)
+                self.assertEqual(rig.configfile.saved, {})
+                self.assertNotIn("SAVE_CONFIG", rig.scripts)
+
+    def test_save_guard_rejects_one_home_reused_as_multiple_validation_records(self):
+        rig = Rig()
+        with mock.patch.object(rig.workflow, "_save_model"):
+            rig.calibrate(save=0)
+        session = rig.workflow.session
+        session["validation_records"][-1] = session["records"][-1] = session["validation_records"][0]
+        with self.assertRaisesRegex(CommandError, "ten distinct"):
+            rig.workflow._save_model()
+        self.assertEqual(rig.configfile.saved, {})
+        self.assertNotIn("SAVE_CONFIG", rig.scripts)
+
+    def test_exact_workflow_threshold_supports_rounded_sensor_record_threshold(self):
+        rig = Rig({"calibration_start_threshold": 0.755})
+        rig.home_results.extend([{"threshold_g": 0.76}] * 11)
+        rig.calibrate(save=0)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 0.755)
+        self.assertEqual(rig.workflow.last_result["repeatability_spread_mm"], 0.0)
+
+
 class GuardTests(unittest.TestCase):
+    def test_runtime_policy_refusal_precedes_workflow_effects_with_stock_or_safe_z(self):
+        for safe in (False, True):
+            for command, axes in (("cmd_CALIBRATE", ("x",)), ("cmd_TEST", ("x", "y")),
+                                  ("cmd_CHARTS", ("x", "y"))):
+                with self.subTest(safe=safe, command=command):
+                    rig = Rig()
+                    if safe:
+                        rig.use_safe_z_home()
+                    rig.policy_error = "synthetic unsafe runtime homing policy"
+                    before = rig.effects()
+                    with self.assertRaisesRegex(CommandError, "unsafe runtime homing policy"):
+                        getattr(rig.workflow, command)(GCmd(AXIS="X", CENTERED=1))
+                    self.assertEqual(rig.policy_checks, [axes])
+                    self.assertEqual(rig.effects(), before)
+
+    def test_resume_rechecks_runtime_policy_before_another_home(self):
+        rig = Rig()
+        rig.home_results.append({"travel_mm": 8.0})
+        rig.calibrate(save=0)
+        rig.policy_error = "synthetic runtime policy changed"
+        with self.assertRaisesRegex(CommandError, "runtime policy changed"):
+            rig.calibrate()
+        self.assertEqual(rig.policy_checks, [("x",), ("x",)])
+        self.assertEqual(rig.scripts, ["G28 X"])
+        self.assertEqual(rig.toolhead.moves, [])
+        self.assertEqual(rig.configfile.saved, {})
+        self.assertIsNone(rig.workflow.session)
+        self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+
     def test_missing_zero_or_malformed_centered_has_no_start_or_resume_side_effects(self):
         for waiting in (False, True):
             for params in ({}, {"CENTERED": 0}, {"CENTERED": "invalid"},
