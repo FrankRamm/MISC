@@ -1,11 +1,11 @@
 {
-  "stage": "completed offline validation for built-in safe_z_home compatibility",
-  "timestamp_utc": "2026-10-26T12:02:44.659427+00:00",
-  "source_base_commit": "4b36a816092c638404766b153767d8661e4dfed3",
+  "stage": "completed offline validation for direct workflow commands and manual code-activation guidance",
+  "timestamp_utc": "2026-10-26T12:55:16.209072+00:00",
+  "source_base_commit": "6e20f6ec95946921afc0bf7ade480ee0b61ed542",
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 288,
-  "passed": 287,
+  "tests_run": 292,
+  "passed": 291,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -14,10 +14,10 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 3.31,
+  "elapsed_seconds": 3.653,
   "test_returncode": 0,
   "installer_tests": 77,
-  "workflow_tests": 56,
+  "workflow_tests": 60,
   "module_tests": {
     "test_backends": 48,
     "test_installer": 77,
@@ -25,7 +25,7 @@
     "test_session": 52,
     "test_single_touch": 16,
     "test_trigger": 29,
-    "test_workflows": 56
+    "test_workflows": 60
   },
   "preparation_fixture_tests": {
     "test_backends.GenericPreparationTest": 6,
@@ -40,29 +40,28 @@
   "command": "python -m unittest discover -s Beacon_Accel_Homing/tests -v",
   "log": "tests.txt",
   "shell_syntax_checks": [],
-  "shell_syntax_checks_note": "Not repeated: shell entry-point contents match the source base commit after line-ending normalization.",
+  "shell_syntax_checks_note": "Not repeated: shell entry-point contents exactly match the source base commit.",
   "shell_file_content_checks": [
     {
       "file": "install.sh",
       "matches_source_base": true,
-      "line_endings_normalized": true
+      "line_endings_normalized": false
     },
     {
       "file": "bootstrap.sh",
       "matches_source_base": true,
-      "line_endings_normalized": true
+      "line_endings_normalized": false
     },
     {
       "file": "uninstall.sh",
       "matches_source_base": true,
-      "line_endings_normalized": true
+      "line_endings_normalized": false
     }
   ],
   "python_38_grammar_checks": {
     "files": [
       "accel_homing_workflows.py",
       "installer.py",
-      "tests/test_installer.py",
       "tests/test_workflows.py"
     ],
     "passed": true,
@@ -70,10 +69,9 @@
     "actual_python_38_runtime_tested": false
   },
   "validated_python_sha256": {
-    "accel_homing_workflows.py": "0d270b4121e273a66aff51e067f9ebaa18e91417d03fcc8b3a5ff06f911a8761",
-    "installer.py": "ff5933b566d91e31b0c6c5bcd671708f179bcd4de8686924173b9c376bbe9d35",
-    "tests/test_installer.py": "92502fd9d19bbbe9ba9fe3fc02f0efc1f463a3630a757fc5138efdd5d4f07d23",
-    "tests/test_workflows.py": "c5e7886276af4bb87c1fb4ad1deee943520db38a447721e2a490fee432e5419b"
+    "accel_homing_workflows.py": "ed016a2cd7dde19c398d6d621168075b3b12229614a29f544b2881709cd61b7b",
+    "installer.py": "26507d0abcc737827d48301ef492b0702e72dc200a68f5095d69079ecd632da5",
+    "tests/test_workflows.py": "1704b86cb1291b682c02210edb41ddaca8f67006b8504e12d6e9bb91a91ad06c"
   },
   "native_linux_integration_tested": false,
   "upstream_klipper_kalico_runtime_integration_tested": false,
@@ -89,13 +87,19 @@
     "No physical stopping latency/distance measurement.",
     "No live Linux systemd or Unix-socket integration run.",
     "Hosted GitHub download validation is separate; this report uses mocked offline downloads.",
-    "Python 3.8 grammar parsing is not a Python 3.8 runtime compatibility test."
+    "Python 3.8 grammar parsing is not a Python 3.8 runtime compatibility test.",
+    "Host-process restart guidance follows upstream source inspection; no service restart or live Python module reload was performed."
   ],
-  "git_diff_check_base": "4b36a816092c638404766b153767d8661e4dfed3",
+  "git_diff_check_base": "6e20f6ec95946921afc0bf7ade480ee0b61ed542",
   "whitespace_check_scope": [
     "Beacon_Accel_Homing",
     "README.md"
   ],
   "git_diff_check_returncode": 0,
-  "git_cached_diff_check_returncode": 0
+  "git_cached_diff_check_returncode": 0,
+  "process_elapsed_seconds": 3.909,
+  "previous_validation_timestamp_utc": "2026-10-26T12:43:10.187729+00:00",
+  "validation_reason": "Final run after user-log update handoff correction and installer host-process restart-advice changes.",
+  "host_service_restart_tested": false,
+  "live_python_module_reload_tested": false
 }
