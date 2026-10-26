@@ -363,7 +363,7 @@ class StatusTest(unittest.TestCase):
         obj.last["x"]["impact_peak_g"] = 12.0
         self.assertEqual(status["last"]["x"]["impact_peak_g"], 10.0)
         self.assertEqual(set(status), {"threshold_g", "impact_sign", "homing_accel", "back_off_dist",
-                                       "homing", "last", "sensor", "backend", "workflows"})
+                                       "homing", "baseline", "last", "sensor", "backend", "workflows"})
 
 
 if __name__ == "__main__":
@@ -635,6 +635,27 @@ class EnablePreparationTest(unittest.TestCase):
                 self.assert_unarmed_cleanup(obj, endstop)
                 self.assertIn(obj.sensor_fault, ("stale_data", "invalid_data", "sample_gap", "scale"))
 
+    def test_native_stale_oldest_retains_actual_fresh_newest_batch_age(self):
+        obj, endstop, _log, _lines = self.session()
+        plain = obj.reactor.on_pause
+        def flow():
+            if obj.preparation is None:
+                plain()
+                return
+            obj.reactor.now += 0.080
+            now = obj.reactor.now
+            obj._inspect(batch(round(now * 1000) - 80, [(0, 0, counts(1))] * 80,
+                               delta_clock=79, receive_time=now))
+        obj.reactor.on_pause = flow
+        with self.assertRaisesRegex(CommandError, "stale"):
+            self.begin(obj, endstop)
+        self.assert_unarmed_cleanup(obj, endstop)
+        diagnostic = obj.get_status(obj.reactor.now)["baseline"]
+        self.assertEqual(diagnostic["result"], "stale_data")
+        self.assertGreater(diagnostic["oldest_batch_age_ms"], diagnostic["max_sample_age_ms"])
+        self.assertAlmostEqual(diagnostic["newest_batch_age_ms"], 1.0)
+        self.assertEqual(diagnostic["accepted_samples"], 0)
+
     def test_reference_cannot_be_reused_or_become_stale_before_trsync(self):
         for mode in ("missing", "stale", "new_noise", "reused"):
             with self.subTest(mode=mode):
@@ -653,6 +674,39 @@ class EnablePreparationTest(unittest.TestCase):
                 with self.assertRaisesRegex(CommandError, "fresh quiet"):
                     endstop.home_start(obj.reactor.now + 0.010, 0, 0, 0)
                 self.assert_unarmed_cleanup(obj, endstop)
+                expected = {"missing": "missing_before_arm", "stale": "expired_before_arm",
+                            "new_noise": "quiet_window_invalidated_before_arm", "reused": "missing_before_arm"}
+                self.assertEqual(obj.baseline_status["result"], expected[mode])
+                self.assertEqual(obj.baseline_status["phase"], "before_arm")
+
+    def test_native_reference_diagnostics_use_machine_axes_and_survive_cleanup(self):
+        obj, endstop, _log, _lines = self.session()
+        obj.helper.config.axes_map = ((1, -1), (0, 1), (2, -1))
+        plain = obj.reactor.on_pause
+        n = [0]
+        def flow():
+            if obj.preparation is None:
+                plain()
+                return
+            n[0] += 1
+            sign = 1 if n[0] % 2 else -1
+            obj._inspect(batch(round(obj.reactor.now * 1000) - 4,
+                               [(counts(sign * 0.03125), counts(sign * 0.015625), counts(1))] * 5,
+                               delta_clock=4, receive_time=obj.reactor.now))
+        obj.reactor.on_pause = flow
+        self.begin(obj, endstop)
+        obj._end_session()
+        diagnostic = obj.get_status(obj.reactor.now)["baseline"]
+        self.assertEqual(diagnostic["result"], "ready")
+        self.assertAlmostEqual(diagnostic["observed_peak_to_peak_g"]["x"], 0.03125, delta=0.001)
+        self.assertAlmostEqual(diagnostic["observed_peak_to_peak_g"]["y"], 0.0625, delta=0.001)
+        self.assertAlmostEqual(diagnostic["observed_peak_to_peak_g"]["z"], 0.0)
+        diagnostic["observed_peak_to_peak_g"]["x"] = 999
+        self.assertLess(obj.get_status(obj.reactor.now)["baseline"]["observed_peak_to_peak_g"]["x"], 1)
+        messages = []
+        obj.cmd_STATUS(types.SimpleNamespace(respond_info=messages.append))
+        self.assertTrue(any("best quiet" in message and "p-p XYZ" in message for message in messages))
+        self.assertLess(len(next(message for message in messages if "best quiet" in message)), 600)
 
     def test_second_touch_gets_new_reference_after_retract_finishes(self):
         obj, endstop, _log, _lines = self.session()

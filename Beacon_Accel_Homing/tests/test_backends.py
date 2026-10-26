@@ -17,8 +17,8 @@ HOST = plugin.mcu.MCU_trsync.REASON_HOST_REQUEST
 class GenericPreparationTest(unittest.TestCase):
     """Real rails/move callbacks with decoded sensor delivery and fake clocks."""
 
-    def session(self, legacy=False, backlog=False):
-        obj = generic(legacy=legacy, connect=False)
+    def session(self, legacy=False, backlog=False, options=None):
+        obj = generic(legacy=legacy, options=options, connect=False)
         obj.fake_printer.send_event("klippy:connect")
         obj.threshold_g["x"] = 2.0
         endstop = with_endstops(obj)["x"]
@@ -104,6 +104,94 @@ class GenericPreparationTest(unittest.TestCase):
                 self.assertFalse(obj.homing_active)
                 self.assertFalse(obj.backend.active)
                 self.assertEqual(obj.backend.helper.batch_interval, 0.1)
+                diagnostic = obj.get_status(obj.reactor.now)["baseline"]
+                self.assertEqual(diagnostic["phase"], "acquisition")
+                self.assertEqual(diagnostic["result"], obj.sensor_fault or "acquisition_timeout")
+                if mode == "stale":
+                    self.assertGreater(diagnostic["oldest_batch_age_ms"], diagnostic["max_sample_age_ms"])
+                elif mode == "future":
+                    self.assertLess(diagnostic["newest_batch_age_ms"], -5.0)
+
+    def test_rounded_3200hz_reference_spans_small_deque_and_print_clock_offset(self):
+        obj, endstop = self.session(options={"baseline_batches": 10})
+        obj.threshold_g["x"] = 0.5
+        # Decoded ADXL rows have microsecond-rounded print times, even when
+        # host monotonic time and synchronized print time use different epochs.
+        obj.main_mcu.estimated_print_time = lambda eventtime: eventtime + 123456.0
+        def flow():
+            now = obj.main_mcu.estimated_print_time(obj.reactor.now)
+            rows = [(round(t, 6), x, y, z) for t, x, y, z in
+                    samples(now - 0.001 - 15 / 3200.0, x=0.02, y=-0.03)]
+            obj.backend.helper.emit({"data": rows})
+        obj.reactor.on_pause = flow
+        self.begin(obj, endstop)
+        reference = obj.preparation
+        self.assertGreaterEqual(reference.count, 321)
+        self.assertGreaterEqual(reference.last - reference.first, 0.1)
+        self.assertEqual(len(obj.recent), 10)
+        self.assertAlmostEqual(reference.baseline()[0], 20.0)
+        self.assertIsNone(obj.sensor_fault)
+        self.assertEqual(endstop._dispatch.started, [])
+
+    def test_timeout_retains_best_quiet_candidate_and_observed_noise(self):
+        obj, endstop = self.session()
+        obj.threshold_g["x"] = 0.5
+        def flow():
+            now = obj.reactor.now
+            cutoff = obj.preparation.cutoff
+            rows = [(round(t, 6), (0.2 if int((t - cutoff) / 0.090) % 2 else 0) * G, y, z)
+                    for t, x, y, z in samples(now - 0.001 - 15 / 3200.0)]
+            obj.backend.helper.emit({"data": rows})
+        obj.reactor.on_pause = flow
+        with self.assertRaisesRegex(CommandError, "acquisition timeout") as caught:
+            self.begin(obj, endstop)
+        diagnostic = obj.get_status(obj.reactor.now)["baseline"]
+        self.assertEqual(diagnostic["result"], "acquisition_timeout")
+        self.assertEqual(diagnostic["phase"], "acquisition")
+        self.assertGreaterEqual(diagnostic["best_quiet_span_ms"], 80.0)
+        self.assertLess(diagnostic["best_quiet_span_ms"], 100.0)
+        self.assertGreater(diagnostic["best_quiet_samples"], diagnostic["quiet_samples"])
+        self.assertGreater(diagnostic["quiet_resets"], 0)
+        self.assertAlmostEqual(diagnostic["observed_peak_to_peak_g"]["x"], 0.2)
+        self.assertAlmostEqual(diagnostic["quiet_limit_g"], 0.1)
+        self.assertIn("g", str(caught.exception))
+        self.assertIn("ms", str(caught.exception))
+        self.assertFalse(obj.homing_active)
+        self.assertIsNone(obj.preparation)
+        self.assertEqual(endstop._dispatch.started, [])
+
+    def test_timeout_differentiates_absent_from_pre_cutoff_only_data(self):
+        for mode in ("absent", "pre_cutoff"):
+            with self.subTest(mode=mode):
+                obj, endstop = self.session()
+                def flow():
+                    if mode == "pre_cutoff":
+                        obj.backend.helper.emit({"data": samples(obj.preparation.cutoff - 0.010)})
+                obj.reactor.on_pause = flow
+                with self.assertRaisesRegex(CommandError, "acquisition timeout"):
+                    self.begin(obj, endstop)
+                diagnostic = obj.get_status(obj.reactor.now)["baseline"]
+                self.assertEqual(diagnostic["accepted_samples"], 0)
+                self.assertEqual(diagnostic["quiet_samples"], 0)
+                self.assertIsNone(diagnostic["sample_age_ms"])
+                self.assertEqual(diagnostic["best_quiet_span_ms"], 0.0)
+                self.assertEqual(diagnostic["pre_cutoff_samples"] > 0, mode == "pre_cutoff")
+                self.assertEqual(endstop._dispatch.started, [])
+
+    def test_ready_reference_expiry_before_arm_is_reported_separately(self):
+        obj, endstop = self.session()
+        self.begin(obj, endstop)
+        obj.reactor.now += 0.040
+        with self.assertRaisesRegex(CommandError, "expired before arm"):
+            endstop.home_start(obj.reactor.now + 0.010, 0, 0, 0)
+        diagnostic = obj.get_status(obj.reactor.now)["baseline"]
+        self.assertEqual(diagnostic["result"], "expired_before_arm")
+        self.assertEqual(diagnostic["phase"], "before_arm")
+        self.assertGreaterEqual(diagnostic["best_quiet_span_ms"], 100.0)
+        self.assertGreater(diagnostic["sample_age_ms"], diagnostic["max_sample_age_ms"])
+        self.assertFalse(obj.homing_active)
+        self.assertIsNone(obj.preparation)
+        self.assertEqual(endstop._dispatch.started, [])
 
     def test_first_single_post_arm_contact_survives_generic_batch_boundary(self):
         obj, endstop = self.session()
