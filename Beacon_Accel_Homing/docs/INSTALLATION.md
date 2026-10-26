@@ -341,8 +341,16 @@ window; after manual recentering, the new candidate needs another qualifying
 discovery and ten fresh validations. These commanded distances do not prove
 contact with the correct stop or absence of skipped steps.
 Calibration and saved models accept finite values from 0.5 g; existing models
-at 1 g and 2 g remain valid. Manual threshold settings and temporary SET
-commands retain their 3–15 g range. An explicit existing
+at 1 g and 2 g remain valid. Manual `threshold`, `x_threshold` and `y_threshold`
+settings in either current or legacy section, and temporary `SET_ACCEL_HOMING`
+or `SET_BEACON_ACCEL_HOMING` commands, accept any finite value greater than 0 g,
+including values below 0.5 g. There is no fixed 3 g minimum or 15 g maximum.
+When the sensor range is known, the effective value must be at most 80% of it
+(for example, 12.8 g for a generic ±16 g sensor); the active stream range is
+checked again before arming. Native Beacon without known clip/range data keeps
+its existing behavior, and the derived raw trigger limit must remain finite
+and positive. Installation and updates preserve existing manual values.
+An explicit existing
 `calibration_start_threshold` is preserved; set it to `0.5` or leave it absent
 to use the new default. Updating does not replace a saved model's threshold;
 run calibration to create a new one. Previous models remain loadable, but

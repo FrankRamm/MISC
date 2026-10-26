@@ -152,8 +152,17 @@ The first home tests the candidate threshold, starting at 0.5 g by default.
 Calibration and saved models accept finite thresholds from 0.5 to 15 g, with
 the configured calibration ceiling and sensor-range limit still applied.
 The default step stays 0.5 g, so the first early-trigger retry uses 1.0 g.
-Previous models at 1 g and 2 g remain valid; manual threshold settings and
-temporary SET commands retain their 3–15 g range.
+Previous models at 1 g and 2 g remain valid. Manual `threshold`, `x_threshold`
+and `y_threshold` settings in either section, and both `SET_ACCEL_HOMING` and
+`SET_BEACON_ACCEL_HOMING`, accept any finite value greater than 0 g. They have
+no fixed 3 g minimum or 15 g maximum. When the configured/detected sensor range
+is known, the effective threshold must be at most 80% of full-scale (12.8 g for
+a generic ±16 g sensor); a wider sensor range permits values above 15 g.
+The active stream range is checked again before arming, including a narrower
+Beacon stream already in use. Native Beacon without known clip/range data
+retains the existing behavior without an invented upper limit. A derived raw
+trigger limit must also remain finite and positive before arming. These manual
+settings do not change the separate 0.5–15 g calibration/model bounds.
 An explicit existing `calibration_start_threshold` is preserved. The 0.5 g
 default applies when that setting is absent or set to 0.5; updating does not
 replace any saved model threshold.
