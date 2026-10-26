@@ -3,6 +3,7 @@ import json
 import math
 import types
 import unittest
+from unittest import mock
 
 from harness import (CommandError, ConfigError, FakeEndstop, acquire_reference, batch,
                      counts, make_homing, plugin)
@@ -683,23 +684,24 @@ class NativeExpandedReferenceTests(unittest.TestCase):
         def stationary():
             now = obj.reactor.now
             rows = []
-            for number in range(20):
+            size = max(2, round(self.rate * 0.005))
+            for number in range(size):
                 high = number % (10 if asymmetric else 2) == 0
                 rows.append((self.high if high else self.low) if quiet is None
                             else tuple(counts(value) for value in quiet))
-            obj._inspect(batch(round((now - 19 / self.rate) * self.clock_hz), rows,
-                               delta_clock=round(19 / self.rate * self.clock_hz),
+            obj._inspect(batch(round((now - (size - 1) / self.rate) * self.clock_hz), rows,
+                               delta_clock=round((size - 1) / self.rate * self.clock_hz),
                                receive_time=now))
 
         obj.reactor.on_pause = stationary
         obj._prepare_reference()
         return obj, endstop
 
-    def prepare(self, obj, endstop, direction=1):
+    def prepare(self, obj, endstop, direction=1, step_delay=0.0):
         start = obj.reactor.now + 0.005
         speed = obj.session_axes[endstop.axis].info.speed
         accel = obj.toolhead.accel
-        endstop.get_steppers = lambda: [SignedRamp(start, accel, speed, direction)]
+        endstop.get_steppers = lambda: [SignedRamp(start + step_delay, accel, speed, direction)]
         attempt = obj.prepare(endstop, start)
         obj.arm(attempt)
         return attempt
@@ -713,8 +715,8 @@ class NativeExpandedReferenceTests(unittest.TestCase):
                            receive_time=obj.reactor.now))
 
     def stream(self, obj, attempt, duration=0.125, direction=1, parked=False,
-               biased=False, sample_offset=0.0, watchdog_phase=0.0, frozen=False):
-        size = 10
+               biased=False, sample_offset=0.0, watchdog_phase=0.0, frozen=False,
+               step_delay=0.0, sensor_lag=0.0, size=10, acceleration=None):
         next_watchdog = attempt.arm_time + watchdog_phase
         index = 0
         while index / self.rate < duration and not attempt.done:
@@ -729,7 +731,9 @@ class NativeExpandedReferenceTests(unittest.TestCase):
                     row = [value - number % 2 for value in self.high]
                 else:
                     row = list(self.high if number % 2 else self.low)
-                if (not parked and 0.0 <= when - attempt.arm_time
+                if acceleration is not None:
+                    row[attempt.index] += counts(acceleration(when - attempt.arm_time) / G)
+                elif (not parked and 0.0 <= when - attempt.arm_time - step_delay - sensor_lag
                         < attempt.effective_speed / attempt.effective_accel):
                     row[attempt.index] += counts(direction * attempt.effective_accel / G)
                 rows.append(row)
@@ -1011,6 +1015,277 @@ class NativeExpandedReferenceTests(unittest.TestCase):
         obj._watchdog(obj.reactor.now)
         self.assertEqual(attempt.reason, "no_data")
         self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+
+class NativeStepEpochTests(unittest.TestCase):
+    """Model stock/Kalico arm -> homing dwell -> drip scan dwell -> real steps."""
+
+    def machine(self, rate=3300.0, **options):
+        fixture = NativeExpandedReferenceTests()
+        fixture.rate = rate
+        fixture.low, fixture.high = (-24, -25, 98), (24, 25, 158)
+        obj, endstop = fixture.machine(threshold=1.5, speed=100.0, **options)
+        return fixture, obj, endstop
+
+    def test_real_step_delays_and_watchdog_phases_keep_original_deadline(self):
+        for rate in (3300.0, 4000.0):
+            for axis in ("x", "y"):
+                for direction in (-1, 1):
+                    for delay in (0.0, 0.010, 0.015, 0.030, 0.050):
+                        for phase in (0.0, 0.001, 0.002):
+                            with self.subTest(rate=rate, axis=axis, direction=direction,
+                                              delay=delay, phase=phase):
+                                fixture, obj, endstop = self.machine(rate=rate, axis=axis)
+                                attempt = fixture.prepare(obj, endstop, direction, step_delay=delay)
+                                deadline = attempt.motion_deadline
+                                fixture.stream(obj, attempt, direction=direction, step_delay=delay,
+                                               watchdog_phase=phase, size=8)
+                                self.assertTrue(attempt.motion_seen)
+                                self.assertTrue(attempt.moving)
+                                self.assertFalse(attempt.gap)
+                                self.assertIsNone(attempt.reason)
+                                self.assertEqual(attempt.motion_deadline, deadline)
+                                self.assertAlmostEqual(deadline - attempt.arm_time, 0.095)
+                                self.assertGreaterEqual(attempt.proof_step_epoch,
+                                                        attempt.arm_time + delay)
+                                # First discrete step follows the motion start;
+                                # this search precision is independent of sample rate.
+                                self.assertLess(attempt.proof_step_epoch,
+                                                attempt.arm_time + delay + 0.003)
+                                self.assertEqual(endstop.trigger_log.messages, [])
+
+    def test_sensor_step_skew_is_separate_from_pre_motion_dwell(self):
+        for delay in (0.015, 0.030, 0.050):
+            for lag in (-0.015, 0.0, 0.015):
+                for phase in (0.0, 0.001, 0.002):
+                    with self.subTest(delay=delay, lag=lag, phase=phase):
+                        fixture, obj, endstop = self.machine(axis="y")
+                        attempt = fixture.prepare(obj, endstop, -1, step_delay=delay)
+                        fixture.stream(obj, attempt, direction=-1, step_delay=delay,
+                                       sensor_lag=lag, watchdog_phase=phase, size=8)
+                        self.assertTrue(attempt.motion_seen)
+                        self.assertIsNone(attempt.reason)
+                        self.assertEqual(endstop.trigger_log.messages, [])
+
+    def test_prearm_missing_sensor_ramp_is_not_reconstructed_as_motion(self):
+        fixture, obj, endstop = self.machine(axis="y")
+        attempt = fixture.prepare(obj, endstop, -1)
+        fixture.stream(obj, attempt, direction=-1, sensor_lag=-0.015, size=8)
+        self.assertFalse(attempt.motion_seen)
+        self.assertEqual(attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_stationary_within_envelope_bias_never_qualifies_a_step_interval(self):
+        for biased in (False, True):
+            for phase in (0.0, 0.001, 0.002):
+                fixture, obj, endstop = self.machine(axis="y")
+                attempt = fixture.prepare(obj, endstop, -1, step_delay=0.030)
+                fixture.stream(obj, attempt, parked=True, biased=biased,
+                               watchdog_phase=phase, size=8)
+                self.assertFalse(attempt.motion_seen)
+                self.assertAlmostEqual(attempt.proof_interval_peak, 0.0)
+                self.assertEqual(attempt.reason, "no_motion")
+                self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_later_jolts_and_subthreshold_ringing_do_not_create_startup_proof(self):
+        for profile in ("late_jolt", "startup_ringing"):
+            fixture, obj, endstop = self.machine(axis="y")
+            delay = 0.015
+            attempt = fixture.prepare(obj, endstop, -1, step_delay=delay)
+            def acceleration(elapsed):
+                since_steps = elapsed - delay
+                if profile == "late_jolt" and 0.050 <= since_steps < 0.062:
+                    return -9806.65
+                if profile == "startup_ringing" and 0.0 <= since_steps < 0.025:
+                    return 0.8 * G * (1 if int(since_steps / 0.001) % 2 else -1)
+                return 0.0
+            fixture.stream(obj, attempt, acceleration=acceleration, size=8)
+            self.assertFalse(attempt.motion_seen)
+            self.assertLess(attempt.proof_interval_peak, 50.0)
+            self.assertEqual(attempt.reason, "no_motion")
+            self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_delayed_motion_keeps_first_and_later_real_contact_samples(self):
+        for early in (False, True):
+            fixture, obj, endstop = self.machine(axis="y")
+            attempt = fixture.prepare(obj, endstop, -1, step_delay=0.030)
+            if not early:
+                fixture.stream(obj, attempt, duration=0.080, direction=-1, step_delay=0.030,
+                               sensor_lag=0.015, size=8)
+                self.assertTrue(attempt.motion_seen)
+                first = obj.clock_to_time(attempt.last_end_clock) + 1 / fixture.rate
+            else:
+                first = attempt.arm_time
+            row = [round(value) for value in attempt.bases]
+            row[attempt.index] += counts(1.6)
+            fixture.send(obj, first, [row, row])
+            self.assertEqual(attempt.reason, "impact")
+            self.assertAlmostEqual(obj.onset_time(attempt), first, places=6)
+            self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+
+    def test_history_overflow_and_post_dispatch_diagnostic_failure_fail_safely(self):
+        with mock.patch.object(plugin, "NATIVE_PROOF_HISTORY_SAMPLES", 10):
+            fixture, obj, endstop = self.machine(axis="y")
+            attempt = fixture.prepare(obj, endstop, -1, step_delay=0.030)
+            fixture.stream(obj, attempt, parked=True, size=8)
+            self.assertEqual(attempt.reason, "proof_overflow")
+            self.assertTrue(attempt.proof_overflow)
+            self.assertEqual(len(attempt.proof_history), 9)
+            self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+            obj.disarm()
+            self.assertTrue(attempt.record["motion_proof"]["overflow"])
+        fixture, obj, endstop = self.machine(axis="y")
+        attempt = fixture.prepare(obj, endstop)
+        obj.main_mcu.estimated_print_time = mock.Mock(side_effect=RuntimeError("diagnostic clock"))
+        obj._fire(attempt, "impact", HIT)
+        self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+        self.assertIsNone(attempt.request_time)
+
+    def test_each_real_watchdog_callback_shares_one_scan_budget(self):
+        fixture, obj, endstop = self.machine(axis="y")
+        attempt = fixture.prepare(obj, endstop, -1, step_delay=0.015)
+        fixture.stream(obj, attempt, duration=0.045, parked=True, watchdog_phase=0.200, size=8)
+        clock_calls = [0]
+        def moving_clock():
+            clock_calls[0] += 1
+            return obj.reactor.now + clock_calls[0] * 0.000001
+        obj.reactor.monotonic = moving_clock
+        with mock.patch.object(plugin, "NATIVE_PROOF_SCAN_BUDGET", 7):
+            for eventtime in (obj.reactor.now, obj.reactor.now + 0.003):
+                before = attempt.proof_scan_comparisons
+                obj._watchdog(eventtime)
+                self.assertEqual(attempt.proof_scan_comparisons - before, 7)
+        self.assertFalse(attempt.motion_seen)
+        self.assertEqual(endstop.trigger_log.messages, [])
+
+    def test_failed_proof_diagnostics_survive_session_and_capture_cleanup(self):
+        fixture, obj, endstop = self.machine(axis="y")
+        attempt = fixture.prepare(obj, endstop, -1, step_delay=0.030)
+        fixture.stream(obj, attempt, parked=True, biased=True, size=8)
+        obj.disarm()
+        obj._end_session()
+        status = obj.get_status(obj.reactor.now)
+        proof = status["last"]["y"]["motion_proof"]
+        self.assertEqual(status["last"]["y"]["result"], "no_motion")
+        self.assertEqual(proof["effective_speed_mm_s"], 100.0)
+        self.assertEqual(proof["effective_accel_mm_s2"], 5000.0)
+        self.assertGreater(proof["first_step_after_arm_ms"], 30.0)
+        self.assertEqual(proof["deadline_after_arm_ms"], 95.0)
+        self.assertGreaterEqual(proof["request_after_arm_ms"], 95.0)
+        self.assertLessEqual(proof["request_after_arm_ms"], 98.0)
+        self.assertEqual(proof["step_epoch_peak_mm_s"], 0.0)
+        self.assertTrue(proof["command_eligible"])
+        self.assertFalse(proof["gap"])
+        self.assertFalse(proof["overflow"])
+        json.dumps(status, allow_nan=False)
+        proof["gap"] = True
+        self.assertFalse(obj.get_status(obj.reactor.now)["last"]["y"]["motion_proof"]["gap"])
+        messages = []
+        obj.cmd_STATUS(types.SimpleNamespace(respond_info=messages.append))
+        self.assertTrue(any("Y motion proof" in message and "95.0" in message for message in messages))
+
+    def test_serial_prefix_path_never_queries_step_history(self):
+        fixture, obj, endstop = self.machine(axis="y")
+        attempt = fixture.prepare(obj, endstop, -1, step_delay=0.030)
+        stepper = attempt.steppers[0]
+        original = stepper.get_past_mcu_position
+        in_serial = [False]
+        def checked_position(stamp):
+            self.assertFalse(in_serial[0], "step history queried by serial sample processing")
+            return original(stamp)
+        stepper.get_past_mcu_position = checked_position
+        inspect = obj._inspect
+        def serial_inspect(params):
+            in_serial[0] = True
+            try:
+                inspect(params)
+            finally:
+                in_serial[0] = False
+        obj._inspect = serial_inspect
+        fixture.stream(obj, attempt, direction=-1, step_delay=0.030, size=8)
+        self.assertTrue(attempt.motion_seen)
+
+    def test_broadened_matched_step_and_sensor_ramp_still_fails_conservatively(self):
+        fixture, obj, endstop = self.machine(axis="y")
+        delay = 0.015
+        attempt = fixture.prepare(obj, endstop, -1, step_delay=delay)
+        actual_accel = 2500.0  # A 40 ms physical/history ramp, despite the nominal 5000 plan.
+        attempt.steppers = [SignedRamp(attempt.arm_time + delay, actual_accel, 100.0, -1)]
+        def acceleration(elapsed):
+            return -actual_accel if delay <= elapsed < delay + 100.0 / actual_accel else 0.0
+        fixture.stream(obj, attempt, acceleration=acceleration, size=8)
+        self.assertFalse(attempt.motion_seen)
+        self.assertLess(attempt.proof_interval_peak, 50.0)
+        self.assertEqual(attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+        obj.disarm()
+        proof = attempt.record["motion_proof"]
+        self.assertEqual(proof["effective_accel_mm_s2"], 5000.0)  # Planned, not measured.
+        self.assertEqual(proof["deadline_after_arm_ms"], 95.0)
+
+    def test_step_epoch_history_survives_clock_wrap_and_cannot_leak_into_next_attempt(self):
+        fixture, obj, endstop = self.machine(axis="y", epoch=0x100000000 / 1000000.0 - 0.120)
+        attempt = fixture.prepare(obj, endstop, -1, step_delay=0.015)
+        fixture.stream(obj, attempt, direction=-1, step_delay=0.015, size=8)
+        self.assertTrue(attempt.motion_seen)
+        self.assertFalse(attempt.gap)
+        self.assertGreater(attempt.proof_step_epoch, 0x100000000 / fixture.clock_hz)
+        old_history = attempt.proof_history
+        obj.disarm()
+        obj._end_session()
+        obj.homing_active = True
+        obj.session_axes["y"] = FakeRail(endstop, info(speed=100.0, second=100.0, retract=0))
+        obj.passes = 0
+        obj.reactor.now += 0.5
+        obj._prepare_reference()
+        new_attempt = fixture.prepare(obj, endstop, -1, step_delay=0.015)
+        self.assertIsNot(new_attempt.proof_history, old_history)
+        self.assertEqual(new_attempt.proof_interval_peak, 0.0)
+        obj._fire(attempt, "impact", HIT)
+        self.assertEqual(endstop.trigger_log.messages, [])
+        fixture.stream(obj, new_attempt, parked=True, biased=True, size=8)
+        self.assertFalse(new_attempt.motion_seen)
+        self.assertEqual(new_attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_disconnect_after_verified_delayed_start_still_stops_immediately(self):
+        fixture, obj, endstop = self.machine(axis="y")
+        attempt = fixture.prepare(obj, endstop, -1, step_delay=0.030)
+        fixture.stream(obj, attempt, duration=0.080, direction=-1, step_delay=0.030, size=8)
+        self.assertTrue(attempt.motion_seen)
+        obj.reactor.now = attempt.last_data + obj.stream_timeout + 0.001
+        obj._watchdog(obj.reactor.now)
+        self.assertEqual(attempt.reason, "no_data")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_step_epoch_query_failure_cannot_fall_through_to_full_arm_success(self):
+        fixture, obj, endstop = self.machine(axis="y")
+        attempt = fixture.prepare(obj, endstop, -1)
+        fixture.stream(obj, attempt, duration=0.030, direction=-1, watchdog_phase=0.200, size=8)
+        self.assertGreater(attempt.proof_speed_peak, 50.0)
+        self.assertFalse(attempt.motion_seen)
+        stepper = attempt.steppers[0]
+        original = stepper.get_past_mcu_position
+        calls = [0]
+        def unreliable_history(stamp):
+            calls[0] += 1
+            if calls[0] == 1:
+                raise RuntimeError("one failed epoch-search query")
+            return original(stamp)
+        stepper.get_past_mcu_position = unreliable_history
+        obj._watchdog(obj.reactor.now)
+        self.assertFalse(attempt.motion_seen)
+        self.assertEqual(attempt.proof_step_error, "RuntimeError")
+        while not attempt.done:
+            first = obj.clock_to_time(attempt.last_end_clock) + 1 / fixture.rate
+            fixture.send(obj, first, [fixture.low, fixture.high] * 4)
+            obj._watchdog(obj.reactor.now)
+        self.assertEqual(attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+        obj.disarm()
+        proof = attempt.record["motion_proof"]
+        self.assertEqual(proof["result"], "step_history_error")
+        self.assertLess(proof["evaluated_sample_after_arm_ms"], proof["sample_after_arm_ms"])
 
 
 class WorkflowMotionProofIntegrationTests(unittest.TestCase):
