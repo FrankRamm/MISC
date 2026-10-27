@@ -305,8 +305,8 @@ can repeatedly reset the quiet window before it spans `baseline_time`.
 The retained `impact_threshold_g` identifies the threshold used for that
 reference. A failed calibration restores the ordinary homing thresholds, so
 the current X/Y thresholds can differ from the trial recorded in the baseline
-summary. For example, a 0.5 g generic calibration trial has a 0.2 g quiet
-limit even if cleanup subsequently restores an ordinary threshold of 8 g.
+summary. For example, a 0.5 g generic calibration trial has a default 0.7 g
+quiet limit even if cleanup subsequently restores an ordinary threshold of 8 g.
 Review duration, reset count, variation and sample ages together; the error
 alone does not prove excessive sensor noise. Include the status output and
 matching Klipper log when reporting a failure.
@@ -327,10 +327,20 @@ cap that floor. It is not a configuration option and does not raise the
 impact threshold.
 Configured generic accelerometers, including Cartographer's separate ADXL/LIS
 sensor, use `max(0.20 * threshold, baseline_noise_floor)`.
-`baseline_noise_floor` defaults to **0.2 g** and accepts finite values from
-**0 to 0.2 g**; zero restores the previous 20% rule. With a 0.5 g calibration
-candidate, the default quiet limit is 0.2 g while the impact threshold remains
-0.5 g. This setting does not affect native Beacon.
+`baseline_noise_floor` defaults to **0.7 g** and accepts finite values from
+**0 to 0.7 g**; zero restores the previous 20% rule. With a 0.5 g or 1 g
+calibration candidate, the default quiet limit is 0.7 g while the actual
+impact threshold remains the selected candidate. Existing explicit floor
+settings remain active; set `baseline_noise_floor: 0.7` to use the wider
+allowance when an older value is configured. This setting does not affect
+native Beacon.
+
+For generic references admitted above the original 20% limit, movement proof
+still discounts each axis's maximum observed deviation from the accepted
+mean. A wider baseline can therefore qualify for preparation while later
+movement remains unproven and aborts with `no_motion`. Raw impact detection
+still compares against the actual trial threshold from the first eligible
+sample; the wider quiet allowance does not suppress those triggers.
 
 When a native Beacon reference exceeds the original 20% limit, movement
 proof discounts the observed stationary-noise envelope. An additional bounded

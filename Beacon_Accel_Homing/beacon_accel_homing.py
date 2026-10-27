@@ -374,8 +374,8 @@ class BeaconAccelHoming:
         self.back_off_dist = config.getfloat("back_off_dist", 5.0, minval=0.0, maxval=20.0)
         self.baseline_batches = config.getint("baseline_batches", 25, minval=10, maxval=200)
         self.baseline_time = config.getfloat("baseline_time", 0.1, minval=0.05, maxval=1.0)
-        self.baseline_noise_floor = config.getfloat("baseline_noise_floor", 0.2,
-                                                    minval=0.0, maxval=0.2)
+        self.baseline_noise_floor = config.getfloat("baseline_noise_floor", 0.7,
+                                                    minval=0.0, maxval=0.7)
         self.enable_settle_time = config.getfloat("enable_settle_time", ENABLE_SETTLE,
                                                   minval=0.0, maxval=2.0)
         self.stream_timeout = config.getfloat("stream_timeout", 0.05, minval=0.01, maxval=0.5)

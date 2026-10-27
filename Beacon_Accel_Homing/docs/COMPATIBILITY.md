@@ -168,11 +168,16 @@ The preparation order is:
    samples delivered in the batch that crosses the arming boundary. There is
    no post-arm blanking interval or minimum-travel impact filter.
 
-`baseline_noise_floor` is in g, defaults to 0.2, and accepts finite values
-from 0 to 0.2 inclusive. Zero restores the previous 20% limit. It affects only
+`baseline_noise_floor` is in g, defaults to 0.7, and accepts finite values
+from 0 to 0.7 inclusive. Zero restores the previous 20% limit. It affects only
 configured generic accelerometers, including Cartographer's separately
-configured ADXL/LIS object. At a 0.5 g calibration candidate, the default
-stationary variation limit becomes 0.2 g; the impact threshold stays 0.5 g.
+configured ADXL/LIS object. At a 0.5 g or 1 g calibration candidate, the default
+stationary variation limit is 0.7 g; the impact threshold stays at the selected
+candidate. An explicit older `baseline_noise_floor` still takes precedence;
+set it to 0.7 to use this allowance on an existing configuration. The required
+reference duration, sample count and timestamp limits remain unchanged.
+Generic references above the original 20% limit retain the measured-noise
+envelope in movement proof, which can still fail closed with `no_motion`.
 Native Beacon independently uses its bounded 0.5 g floor. At a 0.5 g candidate
 its stationary variation limit is 0.5 g and its raw impact threshold remains
 0.5 g. Manual thresholds below 0.5 g cap the floor at the actual threshold;

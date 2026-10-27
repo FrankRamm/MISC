@@ -1,8 +1,30 @@
 # Offline verification
 
+## Generic quiet-baseline floor of 0.7 g — 2026-10-27
+
+The package passed **632 tests** with:
+
+```bash
+python -m unittest discover -s Beacon_Accel_Homing/tests -v
+```
+
+The run completed in 7.494 seconds with no failures, errors or skips.
+`git diff --check` also passed. Five new regression methods, with
+parameterized subcases, exercise the requested wider generic baseline floor.
+Constructed XYZ ranges of 0.581/0.392/0.258 g qualify for the full 100 ms at
+0.5 g and 1 g impact thresholds. Above-floor variation still prevents arming,
+stationary bias cannot prove motion, raw impacts retain their thresholds,
+and a ramp with sufficient signal margin can prove movement. Existing
+explicit lower floors and native Beacon behavior remain covered.
+
+These are synthetic software checks. They do not replay a raw printer
+recording or establish that every admitted noise trace can prove movement.
+The existing motion checks can still abort with `no_motion` after the wider
+baseline qualifies. No printer or printer service was accessed.
+
 ## Noise-window timing correction — 2026-10-27
 
-The current package passed **627 tests** with CPython 3.12.14 on Linux:
+At commit `62295b1`, the package passed **627 tests** with CPython 3.12.14 on Linux:
 
 ```bash
 python -m unittest discover -s Beacon_Accel_Homing/tests -v
@@ -33,7 +55,7 @@ The integrated run exposed an unrelated existing updater fixture with a
 malformed simulated `ExecStart`. Its literal command now includes systemctl's
 `path=... ; argv[]=...` structure. The production updater is unchanged.
 
-No quiet-baseline limit, impact threshold, calibration-candidate policy,
+That revision changed no quiet-baseline limit, impact threshold, calibration-candidate policy,
 homing freshness limit or motor behavior changed. The suite verifies the
 software boundary correction and diagnostics; it does not establish that a
 particular printer's physical noise or delivery timing is acceptable.
@@ -42,7 +64,7 @@ particular printer's physical noise or delivery timing is acceptable.
 
 The following notes record validation at earlier revisions. The historical
 `validation/VALIDATION.json` and `validation/tests.txt` are unchanged and do not
-describe the 627-test run above.
+describe the newer runs above.
 
 **Earlier installation fixes: source review only at the time.** The separation of automatic
 link ownership validation from uninstall restoration, live Moonraker path-default
@@ -431,17 +453,28 @@ snapshots at the reported gate, not live readings after cleanup. Native Beacon
 fixtures verify machine-axis mapping, status-copy isolation and rejection of
 stale oldest data even when the actual newest batch sample is fresh.
 
-Configured baseline-floor checks add **13 tests** in
-`test_backends.BaselineFloorTest`, with parameterized subcases. The finite
-`baseline_noise_floor` accepts 0–0.2 g and defaults to 0.2 g for configured
+Configured baseline-floor checks in
+`test_backends.BaselineFloorTest` and `test_backends.RaisedBaselineFloorTest`
+use parameterized subcases. The finite
+`baseline_noise_floor` accepts 0–0.7 g and defaults to 0.7 g for configured
 batch backends. Their effective quiet limit is the larger of that floor and
 20% of the active impact threshold. A zero floor restores the prior rule;
-thresholds at least 1 g retain their prior limit. Native Beacon independently
+explicit lower floors remain active, and thresholds at least 3.5 g retain
+their prior limit. Native Beacon independently
 uses `max(0.20 * threshold, min(0.5 g, threshold))`; the generic setting does
 not control it. At a 0.5 g candidate, native preparation accepts at most
 0.5 g peak-to-peak variation on every sensor axis while the actual impact
 threshold remains 0.5 g. Neither policy reduces the required reference
 sample count, duration or freshness.
+
+The wider generic-floor fixtures use constructed 3200 Hz samples with
+X/Y/Z peak-to-peak ranges of 0.581/0.392/0.258 g, matching a reported summary.
+They are synthetic regression inputs, not a recording from the printer.
+They check full-duration reference admission, all-axis rejection above 0.7 g,
+unchanged raw impact thresholds, retained measured-noise bounds, and rejection
+of stationary bias as movement. A separate ramp with sufficient signal margin
+checks that motion can still be proved; a wider admitted reference does not
+guarantee that every speed, acceleration or noise trace will prove motion.
 
 **15 tests** in `test_motion_policy.NativeExpandedReferenceTests` use constructed native
 Beacon samples with X/Y/Z peak-to-peak ranges of approximately
