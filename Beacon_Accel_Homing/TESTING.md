@@ -23,6 +23,20 @@ working-directory identity, and bounded rejection diagnostics that omit raw
 environment/configuration and exception payloads. No affected-host cause or
 universal installation compatibility is established by this source review.
 
+Optional CHARTS `AXIS=X`/`AXIS=Y` selection was reviewed as source. Its five new
+workflow regression methods were not imported, compiled or executed. The
+fixtures cover early invalid-axis rejection, selected-axis capture/final release,
+single-axis installations, unchanged manual XY preparation and failure cleanup.
+Omitting `AXIS` retains the existing X-then-Y path. The historical executed
+counts below do not validate this change. The current PNG layout, local display
+timestamps and portable filenames also remain outside that executed run.
+
+Separately authorized PC runs executed the isolated chart renderer with
+simulated data. Final capture, accuracy and three-window noise PNGs were
+visually checked. These are layout previews: workflow/unit regressions remained
+unexecuted, no printer actions were performed and no physical accuracy is
+established.
+
 All recorded verification uses synthetic Klipper objects, fake sensor
 batches, temporary config files and mocked status/download responses. No
 printer connection, SSH session, deployment, service restart, physical home,
@@ -95,8 +109,8 @@ The representative three-window chart retained outside this source package is
 isolated worker. The three signed XYZ panels share a vertical scale; the
 2/1/0.5 g peaks and separate 2.5/1.5 g starting candidates stay distinct.
 Additional capture/accuracy PNGs check threshold/onset/peak and travel layout.
-PNG filenames/titles share a current timezone-aware UTC instant. This is layout
-verification, not a measurement of a physical sensor or printer.
+Those historical PNG filenames/titles share a timezone-aware UTC instant.
+This is layout verification, not a measurement of a physical sensor or printer.
 
 The chart fixtures also run a real tiny worker render and a bounded worker
 timeout with temporary-file cleanup. Matplotlib/NumPy/Pillow do not appear in

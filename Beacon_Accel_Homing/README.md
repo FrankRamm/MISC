@@ -68,7 +68,7 @@ TEST, CHARTS and ACCURACY need the same manual preparation as calibration.
 | `ACCEL_HOMING_STATUS` | Show settings, progress and results. |
 | `ACCEL_HOMING_CALIBRATE_NOISE` | Optional stationary measurement after preparation, before calibration; no movement. |
 | `ACCEL_HOMING_TEST CENTERED=1` | Test X and Y. |
-| `ACCEL_HOMING_CHARTS_GENERATE CENTERED=1` | Test and create ready-to-open PNG charts. |
+| `ACCEL_HOMING_CHARTS_GENERATE AXIS=X CENTERED=1` | Chart X; use `AXIS=Y` or omit `AXIS` for both. |
 | `ACCEL_HOMING_ACCURACY AXIS=X SAMPLES=10 CENTERED=1` | Measure repeated X commanded-travel variation and export PNG charts. |
 | `ACCEL_HOMING_CANCEL` | Cancel pending work; not an emergency stop. |
 

@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import zlib
 
@@ -183,9 +184,13 @@ def preflight_renderer(renderer=None, check_running=None):
 
 def _clock():
     instant = datetime.datetime.now(datetime.timezone.utc)
+    local = instant.astimezone()
+    offset = local.strftime("%z")
     return {"created_utc": instant.isoformat(),
-            "timestamp": instant.strftime("%Y-%m-%d %H:%M:%S.%f UTC"),
-            "filename_time": instant.strftime("%Y%m%d_%H%M%S_%fUTC")}
+            "created_local": local.isoformat(),
+            "timestamp": local.strftime("%Y-%m-%d %H:%M:%S"),
+            "timezone": "UTC%s:%s" % (offset[:3], offset[3:]),
+            "filename_time": local.strftime("%Y-%m-%d %H-%M-%S")}
 
 
 def _identity(run_id, axis):
@@ -248,7 +253,7 @@ def _publish(directory, label, clock, data, check_running=None):
     _check_running(check_running)
     destination = Path(directory).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    stem = label + "_" + clock["filename_time"]
+    stem = label + " - " + clock["filename_time"]
     # Moonraker adds watches to new directories asynchronously. Keep this root
     # durable and publish files only; a directory created then renamed/removed
     # here can disappear before its queued watch registration runs.
@@ -311,12 +316,13 @@ def write_capture(directory, run_id, axis, capture, record, simulated=False,
     clock = _clock()
     phase = record.get("workflow_phase")
     sample = record.get("accuracy_sample")
-    suffix = ("qualifier" if phase == "discovery" else "home%02d" % sample
-              if type(sample) is int and sample > 0 else "home")
+    suffix = (" - Qualifier" if phase == "discovery" else " - Home %02d" % sample
+              if type(sample) is int and sample > 0 else "")
+    title = "Accel Homing %s%s" % (axis.upper(), suffix)
     payload = {"kind": "capture", "axis": axis, "record": record, "trace": trace,
-               "capture": metadata, "simulated": bool(simulated), **clock}
+               "capture": metadata, "title": title, "simulated": bool(simulated), **clock}
     data = (renderer or PNGRenderer()).render(payload, check_running=check_running)
-    path = _publish(directory, "accel_homing_%s_%s" % (axis, suffix), clock, data, check_running)
+    path = _publish(directory, title, clock, data, check_running)
     receipt = _Receipt("capture", run_id, axis, record.get("workflow_attempt"),
                        _json(record), _json(metadata), _envelope(trace, 64), path,
                        hashlib.sha256(data).hexdigest(), bool(simulated))
@@ -382,7 +388,7 @@ def write_accuracy(directory, run_id, axis_results, result, reason=None, simulat
                    "statistics": item["statistics"], "traces": traces,
                    "discovery": item.get("discovery"), "simulated": bool(simulated), **clock}
         data = (renderer or PNGRenderer()).render(payload, check_running=check_running)
-        paths[axis + "_png"] = _publish(directory, "accel_homing_accuracy_" + axis,
+        paths[axis + "_png"] = _publish(directory, "Accel Homing Accuracy " + axis.upper(),
                                         clock, data, check_running)
     _check_running(check_running)
     return paths
@@ -449,7 +455,7 @@ def write_noise(directory, run_id, iterations, recommendation, result, reason=No
                "traces": [receipt.trace for receipt in receipts],
                "recommendation": recommendation, "simulated": bool(simulated), **clock}
     data = (renderer or PNGRenderer()).render(payload, check_running=check_running)
-    path = _publish(directory, "accel_homing_stationary_noise", clock, data, check_running)
+    path = _publish(directory, "Accel Homing Noise", clock, data, check_running)
     _check_running(check_running)
     return {"png": path}
 
@@ -703,7 +709,7 @@ def _worker_main(source, target, dependency_directory):
         rcParams["text.parse_math"] = False
     payload = json.loads(Path(source).read_text(encoding="utf-8"))
     kind = payload["kind"]
-    figure = Figure(figsize=(14, 7) if kind == "capture" else (14, 12), dpi=120)
+    figure = Figure(figsize=(10, 6) if kind == "capture" else (10, 10) if kind == "accuracy" else (10, 8), dpi=120)
     try:
         canvas = FigureCanvasAgg(figure)
         if kind == "preflight":
@@ -720,6 +726,7 @@ def _worker_main(source, target, dependency_directory):
         canvas.print_png(target, metadata={
             "Software": "Beacon Accelerometer Homing",
             "Creation Time": payload.get("created_utc", ""),
+            "Local Time": payload.get("created_local", ""),
             "Description": "SIMULATED - NOT PRINTER MEASUREMENT" if payload.get("simulated")
                            else "Captured accelerometer measurements"})
         _check_png(Path(target).read_bytes())
@@ -727,28 +734,51 @@ def _worker_main(source, target, dependency_directory):
         figure.clear()
 
 
-def _title(figure, payload, title, note=""):
+def _title(figure, payload, title):
     status = payload.get("result", "complete")
     if status != "complete":
-        title = "INCOMPLETE / %s - %s" % (status.upper(), title)
+        title = "%s - %s" % (title, status.upper())
     if payload.get("simulated"):
         title = "SIMULATED / NOT PRINTER MEASUREMENT\n" + title
-    figure.suptitle(title + "\n" + payload["timestamp"], fontsize=15, y=.975, va="top")
-    if note:
-        figure.text(.07, .88, note, fontsize=10, va="top", wrap=True)
+    figure.suptitle("%s\n%s" % (title, payload["timestamp"]), fontsize=12)
 
 
-def _axes_style(axis, ylabel="Acceleration minus stationary baseline (g)"):
-    axis.grid(True, color="#dbe2ea", linewidth=.65)
+def _number(value, significant=3):
+    return ("%.*g" % (significant, value)) if _finite(value) else "n/a"
+
+
+def _axes_summary(axis, lines):
+    axis.set_title("\n".join(lines), loc="left", fontsize=8, pad=6)
+
+
+def _finish_layout(figure, footer, reason=None):
+    lines = textwrap.wrap(footer, 100)
+    if reason:
+        reason_lines = textwrap.wrap(" ".join(str(reason).split()), 100)
+        lines.extend(reason_lines[:2])
+        if len(reason_lines) > 2:
+            lines[-1] = lines[-1].rstrip(".") + "..."
+    figure.text(.5, .012, "\n".join(lines), ha="center", va="bottom", fontsize=8, color=".3")
+    bottom = .025 + len(lines) * 11.0 / 72.0 / figure.get_figheight()
+    figure.tight_layout(pad=1.1, h_pad=1.4, rect=(0, bottom, 1, 1))
+
+
+def _axes_style(axis, ylabel="Acceleration (g)", zero=True):
+    axis.minorticks_on()
+    axis.grid(which="major", color="grey", linewidth=.6, alpha=.4)
+    axis.grid(which="minor", color="lightgrey", linewidth=.4, alpha=.4)
+    axis.tick_params(labelsize=9)
     axis.set_ylabel(ylabel)
-    axis.set_xlabel("Time since first sample (s)")
-    axis.axhline(0, color="#637083", linewidth=.5)
+    axis.set_xlabel("Time (s)")
+    if zero:
+        axis.axhline(0, color="grey", linewidth=.5)
+    axis.margins(x=.02, y=.12)
 
 
 def _traces(axis, trace, alpha=1.0, labels=True):
-    for index, (letter, color) in enumerate(zip("XYZ", ("#1769aa", "#c54238", "#217746")), 1):
+    for index, (letter, color) in enumerate(zip("XYZ", ("red", "green", "blue")), 1):
         axis.plot([row[0] for row in trace], [row[index] for row in trace], color=color,
-                  linewidth=.9, alpha=alpha, label=letter if labels else None)
+                  linewidth=.75, alpha=alpha, label=letter if labels else None)
 
 
 def _threshold(axis, record, label=True):
@@ -757,56 +787,55 @@ def _threshold(axis, record, label=True):
         return
     direction = record.get("direction", 0)
     limits = [direction * threshold] if direction in (-1, 1) else [-threshold, threshold]
+    name = ("Trigger %+.4g g" % limits[0] if len(limits) == 1 else
+            "Trigger ±%s g" % _number(threshold, 4))
     for index, value in enumerate(limits):
         axis.axhline(value, color="#744b98", linestyle="--", linewidth=1.1,
-                     label=("Configured trigger %+.9g g" % value) if label else None)
+                     label=name if label and index == 0 else None)
 
 
 def _plot_capture(figure, payload):
     record, trace, captured = payload["record"], payload["trace"], payload["capture"]
-    title = "%s homing - measured XYZ acceleration" % payload["axis"].upper()
+    title = payload.get("title", "Accel Homing " + payload["axis"].upper())
     _title(figure, payload, title)
     axis = figure.subplots()
-    figure.subplots_adjust(left=.09, right=.97, bottom=.24, top=.78)
     _axes_style(axis)
     _traces(axis, trace)
     _threshold(axis, record)
     onset = record.get("onset_time_s", record.get("onset_time"))
+    elapsed = None
     if _finite(onset):
         elapsed = onset - captured["first_sample_time_s"]
         if trace[0][0] <= elapsed <= trace[-1][0]:
-            axis.axvline(elapsed, color="#5e4c77", linestyle=":", linewidth=1.1,
-                         label="Detected onset %.9g s" % elapsed)
+            axis.axvline(elapsed, color="#5e4c77", linestyle=":", linewidth=1.1, label="Detected onset")
+        else:
+            elapsed = None
     channel = {"x": 1, "y": 2}[payload["axis"]]
     peak = max(trace, key=lambda row: abs(row[channel]))
     axis.plot([peak[0]], [peak[channel]], "o", color="#192d45", markersize=4)
-    axis.annotate("Captured |%s| peak %.9g g" % (payload["axis"].upper(), abs(peak[channel])),
-                  (peak[0], peak[channel]), xytext=(8, 12), textcoords="offset points", fontsize=9)
-    axis.legend(loc="best", fontsize=9)
-    figure.text(.09, .07, "Samples: %d   |   detector onset: %s g   |   detector impact peak: %s g\n"
-                "Commanded travel: %s mm; does not certify physical stop position. "
-                "Signed XYZ traces retain positive and negative extrema." %
-                (captured["sample_count"], record.get("onset_g", "unavailable"),
-                 record.get("impact_peak_g", "unavailable"), record.get("travel_mm", "unavailable")),
-                fontsize=10, va="bottom")
+    _axes_summary(axis, ["Samples: %d  |  Travel: %s mm  |  Onset: %s s / %s g" % (
+                            captured["sample_count"], _number(record.get("travel_mm"), 6),
+                            _number(elapsed, 4), _number(record.get("onset_g"))),
+                         "Detector peak: %s g  |  Captured |%s| peak: %s g" % (
+                            _number(record.get("impact_peak_g")), payload["axis"].upper(), _number(abs(peak[channel])))])
+    axis.legend(loc="best", fontsize=8)
+    _finish_layout(figure, "Stationary baseline removed. Commanded travel is not physical stop accuracy.")
 
 
 def _plot_accuracy(figure, payload):
     stats = payload.get("statistics") or {}
     trials, traces = payload["trials"], payload["traces"]
-    summary = "Measured homes %d/%d; qualifier excluded. " % (len(trials), payload["requested"])
+    summary = ["Accepted homes: %d / %d" % (len(trials), payload["requested"])]
     if stats:
-        summary += ("Min %.6g / max %.6g / mean %.6g / range %.6g mm; population stddev %s mm." %
-                    (stats["min_mm"], stats["max_mm"], stats["mean_mm"], stats["spread_mm"],
-                     "unavailable" if stats["stddev_mm"] is None else "%.6g" % stats["stddev_mm"]))
-    _title(figure, payload, "%s repeated homing - commanded travel and measured acceleration" %
-           payload["axis"].upper(), summary)
+        summary[0] += "  |  Mean: %s mm  |  Range: %s mm" % (_number(stats["mean_mm"], 6), _number(stats["spread_mm"]))
+        summary += ["Min: %s mm  |  Max: %s mm  |  Std dev: %s mm  |  Variance: %s mm²" % (
+                    _number(stats["min_mm"], 6), _number(stats["max_mm"], 6),
+                    _number(stats["stddev_mm"]), _number(stats.get("variance_mm2")))]
+    _title(figure, payload, "Accel Homing Accuracy " + payload["axis"].upper())
     axes = figure.subplots(4, 1)
-    figure.subplots_adjust(left=.09, right=.97, bottom=.09, top=.81, hspace=.55)
     travel = axes[0]
-    travel.set_ylabel("Commanded travel (mm)")
+    _axes_style(travel, "Travel (mm)", zero=False)
     travel.set_xlabel("Accepted measured home")
-    travel.grid(True, color="#dbe2ea")
     travel.ticklabel_format(axis="y", style="plain", useOffset=False)
     if trials:
         travel.plot(range(1, len(trials) + 1), [row["travel_mm"] for row in trials], "o-",
@@ -814,23 +843,19 @@ def _plot_accuracy(figure, payload):
         travel.set_xlim(.5, max(1.5, len(trials) + .5))
     else:
         travel.text(.5, .5, "No accepted measured homes", ha="center", transform=travel.transAxes)
+    _axes_summary(travel, summary)
     for channel, (axis, color, letter) in enumerate(zip(axes[1:],
-                    ("#1769aa", "#c54238", "#217746"), "XYZ"), 1):
-        _axes_style(axis, "%s baseline-relative (g)" % letter)
+                    ("red", "green", "blue"), "XYZ"), 1):
+        _axes_style(axis, "%s acceleration (g)" % letter)
         for index, trace in enumerate(traces):
             axis.plot([row[0] for row in trace], [row[channel] for row in trace], color=color,
                       alpha=.35 if len(traces) > 1 else 1., linewidth=.7,
-                      label="%d accepted capture(s)" % len(traces) if index == 0 else None)
+                      label="%s (%d homes)" % (letter, len(traces)) if index == 0 else None)
         if channel == {"x": 1, "y": 2}[payload["axis"]] and trials:
             _threshold(axis, trials[0])
         if traces:
             axis.legend(fontsize=8, loc="best")
-    note = ("Population variance: %s mm². Per-home PNGs retain individual XYZ, threshold/onset and peak details. "
-            "Commanded steps are not physical stop accuracy or a calibrated impact threshold." %
-            ("unavailable" if stats.get("variance_mm2") is None else "%.9g" % stats["variance_mm2"]))
-    if payload.get("reason"):
-        note = str(payload["reason"])[:300] + "\n" + note
-    figure.text(.09, .015, note, fontsize=9, va="bottom", wrap=True)
+    _finish_layout(figure, "Commanded travel only; not physical stop accuracy. Qualifier excluded. Population statistics.", payload.get("reason"))
 
 
 def _plot_noise(figure, payload):
@@ -838,31 +863,31 @@ def _plot_noise(figure, payload):
     note = ""
     if recommendation:
         candidates = recommendation["start_threshold_g"]
-        fmt = lambda value: "unavailable" if value is None else "%.3g g" % value
-        note = "Starting candidates (not calibrated): X %s; Y %s. Max noise peaks XYZ: %s g." % (
+        fmt = lambda value: "unavailable" if value is None else "%s g" % _number(value, 4)
+        note = "Initial candidates: X %s; Y %s (not calibrated)." % (
             fmt(candidates["x"]), fmt(candidates["y"]),
-            " / ".join("%.3g" % recommendation["noise_peak_g"][axis] for axis in "xyz"))
+            )
     else:
         note = "Incomplete measurement: no starting candidate."
-    _title(figure, payload, "Stationary accelerometer vibration - %d of 3 windows" % len(records), note)
-    axes = figure.subplots(3, 1)
-    figure.subplots_adjust(left=.09, right=.97, bottom=.07, top=.81, hspace=.55)
+    _title(figure, payload, "Accel Homing Noise")
+    axes = figure.subplots(3, 1, sharex=True)
     peak = max(.001, max((abs(value) for trace in traces for row in trace for value in row[1:]), default=0.)) * 1.1
     for index, axis in enumerate(axes):
-        _axes_style(axis, "Acceleration minus window mean (g)")
+        _axes_style(axis)
         axis.set_ylim(-peak, peak)
         if index >= len(traces):
-            axis.set_title("Iteration %d: no complete valid window" % (index + 1), fontsize=10)
+            axis.set_title("Window %d - no valid data" % (index + 1), fontsize=10)
             continue
         record = records[index]
         _traces(axis, traces[index])
-        axis.set_title("Iteration %d - %.3g s | peak XYZ %s g | RMS XYZ %s g" %
-                       (index + 1, record["duration_s"],
-                        " / ".join("%.3g" % record["noise_peak_g"][key] for key in "xyz"),
-                        " / ".join("%.3g" % record["noise_rms_g"][key] for key in "xyz")), fontsize=10)
-        axis.legend(loc="best", fontsize=8)
-    if payload.get("reason"):
-        figure.text(.09, .015, str(payload["reason"])[:240], fontsize=9, va="bottom", wrap=True)
+        _axes_summary(axis, ["Window %d (%s s)  |  Peak XYZ: %s g" % (
+                                index + 1, _number(record["duration_s"]),
+                                " / ".join(_number(record["noise_peak_g"][key]) for key in "xyz")),
+                             "RMS XYZ: %s g" % " / ".join(_number(record["noise_rms_g"][key]) for key in "xyz")])
+        axis.legend(loc="best", ncol=3, fontsize=8)
+    for axis in axes[:-1]:
+        axis.set_xlabel("")
+    _finish_layout(figure, "Window means removed. " + note, payload.get("reason"))
 
 
 if __name__ == "__main__":

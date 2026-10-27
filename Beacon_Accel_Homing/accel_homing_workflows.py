@@ -187,7 +187,7 @@ class AccelHomingWorkflows:
                 ("ACCEL_HOMING_TEST", self.cmd_TEST,
                  "Test X then Y from an explicitly confirmed center"),
                 ("ACCEL_HOMING_CHARTS_GENERATE", self.cmd_CHARTS,
-                 "Home X then Y and export measured acceleration PNG charts"),
+                 "Export acceleration PNG charts; optional AXIS=X or AXIS=Y, default both"),
                 ("ACCEL_HOMING_ACCURACY", self.cmd_ACCURACY,
                  "Measure repeated X/Y commanded homing travel and accelerometer captures"),
                 ("ACCEL_HOMING_STATUS", self.cmd_STATUS,
@@ -1249,13 +1249,13 @@ class AccelHomingWorkflows:
         self._finish({"result": "cancelled", "reason": "operator cancelled"})
         gcmd.respond_info("Accelerometer homing workflow cancelled; settings restored")
 
-    def _start_xy(self, gcmd, mode):
+    def _start_xy(self, gcmd, mode, axes=("x", "y")):
         self._require_centered(gcmd)
         if mode == "charts":
             self._chart_preflight()
-        self._begin(gcmd, mode)
+        self._begin(gcmd, mode, axes=axes)
         try:
-            self.session["state"] = "running"
+            self.session.update(state="running", axes=axes)
             self._test_xy()
         except Exception as exc:
             if self.session is not None:
@@ -1266,7 +1266,14 @@ class AccelHomingWorkflows:
         self._start_xy(gcmd, "test")
 
     def cmd_CHARTS(self, gcmd):
-        self._start_xy(gcmd, "charts")
+        requested = gcmd.get("AXIS", None)
+        axes = ("x", "y")
+        if requested is not None:
+            axis = str(requested).strip().lower()
+            if axis not in AXES:
+                raise gcmd.error("AXIS must be X or Y; omit AXIS to chart both axes")
+            axes = (axis,)
+        self._start_xy(gcmd, "charts", axes=axes)
 
     def cmd_ACCURACY(self, gcmd):
         requested = str(gcmd.get("AXIS", "XY")).strip().lower()
@@ -1426,7 +1433,8 @@ class AccelHomingWorkflows:
 
     def _test_xy(self):
         session = self.session
-        for axis in "xy":
+        axes = session["axes"]
+        for index, axis in enumerate(axes):
             record, capture = self._home(axis)
             quality, reason = self._quality(axis, record)
             if session["mode"] == "charts":
@@ -1438,16 +1446,16 @@ class AccelHomingWorkflows:
                 paths = list(session["paths"])
                 self._finish({"result": "rejected", "reason": reason, "paths": paths}, release=True)
                 raise self._error(reason + "; no automatic move follows this result; manually recenter")
-            if axis == "x":
-                # Return only the trusted X axis to its center before Y homes;
-                # Y retains the physical center the operator confirmed.
-                self._recenter("x")
-        self._release_terminal_home("y", record)
+            if index + 1 < len(axes):
+                # Return only the trusted axis to center when another axis
+                # follows; the next axis retains its manually confirmed center.
+                self._recenter(axis)
+        self._release_terminal_home(axis, record)
         self._finish({"result": "complete", "mode": session["mode"],
                       "run_id": session["run_id"], "records": list(session["records"]),
                       "paths": list(session["paths"])})
-        self._info("X and Y %s complete; these measurements do not certify physical stop position"
-                   % session["mode"])
+        self._info("%s %s complete; these measurements do not certify physical stop position"
+                   % (" and ".join(axis.upper() for axis in axes), session["mode"]))
 
     def get_status(self, eventtime):
         session = self.session
