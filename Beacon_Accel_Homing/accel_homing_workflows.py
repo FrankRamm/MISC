@@ -6,20 +6,27 @@ The operator confirms the initial center. Later automatic returns rely on a
 qualified center-to-stop home and remain an experimental physical heuristic.
 """
 import datetime
+import configparser
 from decimal import Decimal
+import html
 import json
 import logging
 import math
 import os
+from pathlib import Path
 import re
 import types
+import sys
+import urllib.parse
 import uuid
 
 try:
-    from .accel_homing_charts import (validate_accuracy, write_accuracy, write_capture, write_noise,
+    from .accel_homing_charts import (PNGRenderer, default_dependency_directory, preflight_renderer,
+                                      validate_accuracy, write_accuracy, write_capture, write_noise,
                                       write_noise_capture)
 except ImportError:
-    from accel_homing_charts import (validate_accuracy, write_accuracy, write_capture, write_noise,
+    from accel_homing_charts import (PNGRenderer, default_dependency_directory, preflight_renderer,
+                                     validate_accuracy, write_accuracy, write_capture, write_noise,
                                      write_noise_capture)
 
 try:
@@ -39,6 +46,71 @@ REPEATABILITY_LIMIT_MM = 1.5
 MIN_TRAVEL = 10.0
 NOISE_ITERATIONS = 3
 NOISE_DURATION = 1.0
+
+
+def verified_moonraker_config_root(start_args, proc_root="/proc"):
+    """Correlate one same-user Moonraker data path to this Klippy Unix socket.
+
+    Main-config containment alone does not identify Moonraker's config root.
+    Unresolved includes, wrappers or paths deliberately return no web mapping.
+    """
+    socket = start_args.get("apiserver")
+    if not socket or not hasattr(os, "getuid"):
+        return None
+    expected, roots = Path(socket).expanduser().resolve(), set()
+    try:
+        processes = list(Path(proc_root).iterdir())
+    except OSError:
+        return None
+    for process in processes:
+        if not process.name.isdigit():
+            continue
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+            data = (process / "cmdline").read_bytes()
+            if len(data) > 65536:
+                continue
+            argv = [part.decode("utf-8") for part in data.split(b"\0") if part]
+            indexes = [index for index, value in enumerate(argv) if Path(value).name == "moonraker.py"]
+            indexes += [index + 1 for index, value in enumerate(argv[:-1])
+                        if value == "-m" and argv[index + 1] == "moonraker"]
+            if len(indexes) != 1:
+                continue
+            options = {}
+            iterator = iter(argv[indexes[0] + 1:])
+            for value in iterator:
+                key, separator, inline = value.partition("=")
+                if key in ("-d", "--datapath", "-c", "--configfile"):
+                    options[key] = inline if separator else next(iterator, "")
+            raw_data = options.get("-d", options.get("--datapath"))
+            if not raw_data:
+                continue
+            cwd = (process / "cwd").resolve()
+            data_path = Path(raw_data).expanduser()
+            data_path = (data_path if data_path.is_absolute() else cwd / data_path).resolve()
+            raw_config = options.get("-c", options.get("--configfile"))
+            config_path = Path(raw_config).expanduser() if raw_config else data_path / "config/moonraker.conf"
+            config_path = config_path if config_path.is_absolute() else cwd / config_path
+            encoded = config_path.read_bytes()
+            if len(encoded) > 262144:
+                continue
+            parser = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=("#", ";"))
+            parser.read_string(encoded.decode("utf-8"))
+            if any(section.lower().startswith("include ") for section in parser.sections()):
+                continue
+            raw_socket = parser.get("server", "klippy_uds_address", fallback=str(data_path / "comms/klippy.sock"))
+            if any(character in raw_socket for character in ("{", "}", "$", "%", "\n")):
+                continue
+            actual_socket = Path(raw_socket).expanduser()
+            if not actual_socket.is_absolute() or actual_socket.resolve() != expected:
+                continue
+            root = (data_path / "config").resolve()
+            if root.is_dir():
+                roots.add(str(root))
+        except (OSError, UnicodeError, ValueError, configparser.Error):
+            continue
+    return next(iter(roots)) if len(roots) == 1 else None
 
 
 class AccelHomingWorkflows:
@@ -86,6 +158,11 @@ class AccelHomingWorkflows:
                           "~/printer_data/config/accel_homing_charts")
         self.charts_directory = os.path.abspath(os.path.expanduser(config.get(
             "charts_directory", default_charts)))
+        self.renderer = PNGRenderer(sys.executable, default_dependency_directory(), self.reactor)
+        self.chart_start_args = dict(start_args)
+        self.chart_config_root = None
+        self.preflight_generation = 0
+        self.chart_preflight_check = None
         self.kinematics_name = None
         if hasattr(config, "getsection"):
             self.kinematics_name = config.getsection("printer").get("kinematics")
@@ -99,6 +176,7 @@ class AccelHomingWorkflows:
         self.printer.register_event_handler("klippy:shutdown", self._shutdown)
         self.printer.register_event_handler("klippy:disconnect", self._disconnect)
         self.printer.register_event_handler("klippy:connect", self._validate_model_connection)
+        self.printer.register_event_handler("klippy:connect", self._find_chart_root)
         for name, callback, description in (
                 ("ACCEL_HOMING_CALIBRATE", self.cmd_CALIBRATE,
                  "Calibrate one X or Y homing threshold with ten qualified homes"),
@@ -109,7 +187,7 @@ class AccelHomingWorkflows:
                 ("ACCEL_HOMING_TEST", self.cmd_TEST,
                  "Test X then Y from an explicitly confirmed center"),
                 ("ACCEL_HOMING_CHARTS_GENERATE", self.cmd_CHARTS,
-                 "Home X then Y and export measured acceleration CSV/SVG/HTML"),
+                 "Home X then Y and export measured acceleration PNG charts"),
                 ("ACCEL_HOMING_ACCURACY", self.cmd_ACCURACY,
                  "Measure repeated X/Y commanded homing travel and accelerometer captures"),
                 ("ACCEL_HOMING_STATUS", self.cmd_STATUS,
@@ -121,6 +199,74 @@ class AccelHomingWorkflows:
 
     def _info(self, message):
         self.gcode.respond_info("accel_homing: " + message)
+
+    def _find_chart_root(self):
+        self.chart_config_root = verified_moonraker_config_root(self.chart_start_args)
+
+    def _chart_check(self, session):
+        if session.get("finish_interrupted"):
+            raise self._error(session["finish_interrupted"])
+        if session.get("finishing") and session.get("finish_result") != "complete":
+            if self.session is not session:
+                raise self._error("partial PNG export was interrupted")
+            # A shutdown/print interruption is reportable after cleanup. This
+            # branch exports only already-qualified data and cannot seed a
+            # model, resume a trial or authorize movement.
+            return
+        if session["mode"] == "noise" and not session.get("sensor_stopped"):
+            self._check_noise_running(session)
+        else:
+            self._check_running(session)
+            if session["mode"] == "noise":
+                self._check_stopped_noise_context(session)
+
+    def _chart_options(self, session):
+        return {"renderer": self.renderer, "check_running": lambda: self._chart_check(session)}
+
+    def _chart_preflight(self):
+        generation, operation = self.preflight_generation, self.owner.operation_generation
+        def check():
+            if (self.preflight_generation != generation or self.owner.operation_generation != operation):
+                raise self._error("PNG renderer preflight was cancelled or disconnected")
+            if hasattr(self.printer, "is_shutdown") and self.printer.is_shutdown():
+                raise self._error("printer is shut down")
+            if self._printing():
+                raise self._error("cannot prepare PNG charts while printing or paused")
+        try:
+            preflight_renderer(renderer=self.renderer, check_running=check)
+            check()
+            self.chart_preflight_check = check
+        except Exception as exc:
+            raise self._error("PNG renderer is unavailable before motion/acquisition: %s. "
+                              "Run the package installer for this Klipper Python environment" % exc)
+
+    def _show_pngs(self, paths, description):
+        root = Path(self.chart_config_root).resolve() if self.chart_config_root else None
+        for label, filename in paths.items():
+            path = Path(filename).resolve()
+            if path.suffix.lower() != ".png":
+                raise self._error("chart writer returned a non-PNG output")
+            self._info(html.escape("%s %s: %s" % (description, label.upper(), path), quote=False))
+            try:
+                relative = path.relative_to(root) if root is not None else None
+            except ValueError:
+                relative = None
+            if relative is None:
+                self._info("PNG saved locally; the Moonraker config root is unverified for this path. "
+                           "Open it through this printer's file browser when available")
+                continue
+            url = "/server/files/config/" + urllib.parse.quote(relative.as_posix(), safe="/")
+            def attribute(value):
+                # Fluidd linkifies known uppercase G-code tokens before its
+                # HTML sanitizer, including tokens inside attributes. Numeric
+                # references keep the owned URL/alt intact through that pass.
+                return re.sub(r"[A-Z_]", lambda match: "&#%d;" % ord(match.group()),
+                              html.escape(value, quote=True))
+            escaped = attribute(url)
+            alt = attribute("%s: %s" % (description, path.name))
+            self.gcode.respond_info('<a href="%s">View PNG: %s<br><img src="%s" alt="%s" '
+                                    'style="max-width:100%%;height:auto"></a>' % (
+                                        escaped, alt, escaped, alt))
 
     def _status(self, name):
         obj = self.printer.lookup_object(name, None)
@@ -337,6 +483,7 @@ class AccelHomingWorkflows:
             return
         if session["mode"] == "noise":
             self.owner.stop_noise_measurement()
+            session["sensor_stopped"] = True
             return
         try:
             self.owner._end_session()
@@ -347,6 +494,12 @@ class AccelHomingWorkflows:
 
     def _finish(self, result, release=False):
         session = self.session
+        if session is not None and session.get("finishing"):
+            session["finish_interrupted"] = result.get("reason", "workflow interrupted during PNG export")
+            return
+        if session is not None:
+            session["finishing"] = True
+            session["finish_result"] = result.get("result")
         try:
             self._restore()
             if release:
@@ -360,6 +513,8 @@ class AccelHomingWorkflows:
             raise
         finally:
             try:
+                if session is not None:
+                    session["finish_result"] = result.get("result")
                 if session is not None and session["mode"] == "accuracy":
                     result = self._accuracy_result(session, result)
                 elif session is not None and session["mode"] == "noise":
@@ -370,11 +525,13 @@ class AccelHomingWorkflows:
                 self.reactor.update_timer(self.timer, self.reactor.NEVER)
 
     def _shutdown(self, *args):
+        self.preflight_generation += 1
         self._clear_noise_seeds()
         if self.session is not None:
             self._finish({"result": "aborted", "reason": "printer shutdown"})
 
     def _disconnect(self, *args):
+        self.preflight_generation += 1
         self._clear_noise_seeds()
         if self.session is not None:
             self._finish({"result": "aborted", "reason": "printer disconnected"})
@@ -423,6 +580,8 @@ class AccelHomingWorkflows:
         axes = axes if axes is not None else [axis] if axis else ["x", "y"]
         self._preflight(axes)
         self._require_unhomed_xy()
+        if mode in ("charts", "accuracy") and self.chart_preflight_check is not None:
+            self.chart_preflight_check()
         self.session = {"mode": mode, "axis": axis, "state": "starting",
                         "run_id": uuid.uuid4().hex, "successes": 0, "attempts": 0,
                         "candidate_qualified": False, "candidate_attempt": None,
@@ -530,6 +689,8 @@ class AccelHomingWorkflows:
 
     def _check_noise_running(self, session):
         self._check_running(session)
+        if self.owner.operation_generation != session["noise_generation"]:
+            raise self._error("stationary noise was interrupted")
         if (session.get("sensor_token") is None
                 or self.owner.noise_session is not session["sensor_token"]):
             raise self._error("stationary sensor session was cancelled or disconnected")
@@ -537,6 +698,13 @@ class AccelHomingWorkflows:
         if (self._noise_snapshot() != session["snapshot"]
                 or self._noise_context() != session["context"]):
             raise self._error("printer or sensor context changed during stationary noise measurement")
+
+    def _check_stopped_noise_context(self, session):
+        self._noise_idle_queue()
+        if (self.owner.operation_generation != session["noise_generation"]
+                or self._noise_snapshot() != session["snapshot"]
+                or self._noise_context() != session["context"]):
+            raise self._error("stationary context was interrupted or changed during PNG export")
 
     def _noise_record(self, session, iteration, capture):
         samples = capture.get("samples", ())
@@ -613,9 +781,8 @@ class AccelHomingWorkflows:
         try:
             result["summary_paths"] = write_noise(
                 self.charts_directory, session["run_id"], session["iterations"],
-                recommendation, result["result"], result.get("reason"))
-            self._info("Stationary noise report files:\n" + "\n".join(
-                "%s: %s" % (kind.upper(), path) for kind, path in result["summary_paths"].items()))
+                recommendation, result["result"], result.get("reason"), **self._chart_options(session))
+            self._show_pngs(result["summary_paths"], "Stationary noise")
         except Exception as exc:
             logging.exception("accel_homing: unable to export stationary noise summary")
             result.update(chart_error=str(exc), recommendation=None)
@@ -626,11 +793,14 @@ class AccelHomingWorkflows:
     def cmd_NOISE(self, gcmd):
         self._clear_noise_seeds()
         self._preflight_noise()
+        self._chart_preflight()
+        self._preflight_noise()
         if gcmd.get("SAVE_CONFIG", None) is not None:
             raise gcmd.error("SAVE_CONFIG is not supported by ACCEL_HOMING_CALIBRATE_NOISE")
         context = self._noise_context()
         session = {"mode": "noise", "state": "running", "run_id": uuid.uuid4().hex,
                    "iterations": [], "context": context, "snapshot": self._noise_snapshot(),
+                   "noise_generation": self.owner.operation_generation,
                    "iteration": 0, "recommendation": None}
         self.session = session
         try:
@@ -647,7 +817,7 @@ class AccelHomingWorkflows:
                 record = self._noise_record(session, iteration, capture)
                 try:
                     paths = write_noise_capture(self.charts_directory, session["run_id"],
-                                                iteration, capture, record)
+                                                iteration, capture, record, **self._chart_options(session))
                 finally:
                     del capture
                 session["iterations"].append({"record": record, "capture_paths": paths})
@@ -660,8 +830,7 @@ class AccelHomingWorkflows:
             self._finish({"result": "complete"})
             if self.last_result["result"] != "complete":
                 raise self._error(self.last_result.get("reason", "noise export failed"))
-            if self._noise_context() != context:
-                raise self._error("sensor context changed before publishing stationary noise seeds")
+            self._check_stopped_noise_context(session)
             self.noise_recommendation = {"run_id": session["run_id"], **session["recommendation"]}
             self.noise_seed_context = context
             self.noise_seeds = {axis: value for axis, value in
@@ -744,11 +913,11 @@ class AccelHomingWorkflows:
                     or (previous is not None and sample[0] <= previous):
                 raise self._error("homing capture has invalid or stale sensor samples")
             previous = sample[0]
-        if session["mode"] == "accuracy":
+        if session["mode"] in ("accuracy", "charts"):
             self._validate_accuracy_capture(session, axis, source_record, detector_record,
                                             record, capture)
             record["capture_valid"] = True
-        else:
+        if session["mode"] != "accuracy":
             session["records"].append(record)
         self._info("%s home: result %s; onset %s g; peak %s g; threshold %s g; "
                    "commanded travel %s mm" % (
@@ -1072,6 +1241,7 @@ class AccelHomingWorkflows:
             raise
 
     def cmd_CANCEL(self, gcmd):
+        self.preflight_generation += 1
         self._clear_noise_seeds()
         if self.session is None:
             gcmd.respond_info("No accelerometer homing workflow is active")
@@ -1081,6 +1251,8 @@ class AccelHomingWorkflows:
 
     def _start_xy(self, gcmd, mode):
         self._require_centered(gcmd)
+        if mode == "charts":
+            self._chart_preflight()
         self._begin(gcmd, mode)
         try:
             self.session["state"] = "running"
@@ -1106,6 +1278,7 @@ class AccelHomingWorkflows:
         if gcmd.get("SAVE_CONFIG", None) is not None:
             raise gcmd.error("SAVE_CONFIG is not supported by ACCEL_HOMING_ACCURACY")
         self._require_centered(gcmd)
+        self._chart_preflight()
         axes = list(requested)
         self._begin(gcmd, "accuracy", axes=axes)
         session = self.session
@@ -1128,7 +1301,8 @@ class AccelHomingWorkflows:
             # Validate all exported captures and prospective summary inputs
             # before terminal release. Publish afterward so a release failure
             # receives an aborted summary retaining accepted measurements.
-            validate_accuracy(self.charts_directory, session["run_id"], session["axis_results"])
+            validate_accuracy(self.charts_directory, session["run_id"], session["axis_results"],
+                              **self._chart_options(session))
             axis, record, _source = session["terminal_home"]
             self._release_terminal_home(axis, record)
             self._finish({"result": "complete"})
@@ -1177,7 +1351,7 @@ class AccelHomingWorkflows:
                 try:
                     paths = write_capture(self.charts_directory,
                                           "%s_a%03d" % (session["run_id"], session["attempts"]),
-                                          axis, capture, record)
+                                          axis, capture, record, **self._chart_options(session))
                 finally:
                     # Bound memory to one capture, even on export rejection.
                     del capture
@@ -1235,10 +1409,10 @@ class AccelHomingWorkflows:
                   "records": list(session["records"]), "paths": list(session["paths"]), **ending}
         try:
             paths = write_accuracy(self.charts_directory, session["run_id"],
-                                   session["axis_results"], result["result"], result.get("reason"))
+                                   session["axis_results"], result["result"], result.get("reason"),
+                                   **self._chart_options(session))
             result["summary_paths"] = paths
-            self._info("Accuracy report files:\n" + "\n".join(
-                "%s: %s" % (kind.upper(), path) for kind, path in paths.items()))
+            self._show_pngs(paths, "Accuracy")
         except Exception as exc:
             logging.exception("accel_homing: unable to export accuracy summary")
             result["chart_error"] = str(exc)
@@ -1256,11 +1430,10 @@ class AccelHomingWorkflows:
             record, capture = self._home(axis)
             quality, reason = self._quality(axis, record)
             if session["mode"] == "charts":
-                paths = write_capture(self.charts_directory, session["run_id"], axis, capture, record)
+                paths = write_capture(self.charts_directory, session["run_id"], axis, capture, record,
+                                      **self._chart_options(session))
                 session["paths"].append({"axis": axis, **paths})
-                self._info("%s measured acceleration files:\n%s" % (
-                    axis.upper(), "\n".join("%s: %s" % (kind.upper(), path)
-                                           for kind, path in paths.items())))
+                self._show_pngs(paths, axis.upper() + " measured acceleration")
             if quality != "good":
                 paths = list(session["paths"])
                 self._finish({"result": "rejected", "reason": reason, "paths": paths}, release=True)

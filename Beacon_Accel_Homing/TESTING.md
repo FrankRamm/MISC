@@ -30,23 +30,41 @@ python -m unittest discover -s Beacon_Accel_Homing/tests -p test_accuracy_charts
 
 The chart module's focused command includes the stationary-noise fixtures.
 Those fixtures check three separate one-second windows, independent XYZ means,
-signed raw-minus-mean traces, absolute peak/RMS/peak-to-peak statistics and
-full-resolution raw/delta CSV. A 2 g X peak produces a distinct 2.5 g initial
+signed raw-minus-mean traces and exact absolute peak/RMS/peak-to-peak statistics.
+A 2 g X peak produces a distinct 2.5 g initial
 candidate on the default grid; Y is independent and Z gravity stays in raw
 data while its window mean is removed from the plotted trace. Incomplete or
 faulted data cannot recommend a seed. Over-ceiling and unknown-range cases
-retain all three valid charts with unavailable candidates. Same-run identity,
-chronological non-overlap, sensor/map/scale consistency, escaped metadata,
-passive SVG, bounded display reduction and no-overwrite publication are checked.
-Nested panels have explicit 1100×445 viewports in the all-window SVG.
+retain the complete three-panel PNG with unavailable candidates. Same-run
+identity, chronological non-overlap, sensor/map/scale consistency, immutable
+receipts, PNG path/hash/CRC, bounded extrema-preserving traces and collision-safe
+publication are checked. Chart directories contain PNG files only; there are
+no CSV/JSON/SVG/HTML sidecars or full-resolution raw-data exports.
 
 The representative three-window chart retained outside this source package is
-**SIMULATED / NOT PRINTER MEASUREMENT**. Its aggregate SVG was rendered with an
-existing PyMuPDF installation and visually checked: all three panels, signed
-XYZ axes, sample/time labels, the 2/1/0.5 g observed peaks and separate 2.5/1.5 g
-initial candidates were legible without clipping. The charts need no plotting
-dependency or network connection on the printer host. This is layout
+**SIMULATED / NOT PRINTER MEASUREMENT**. Matplotlib/Agg rendered it in an
+isolated worker. The three signed XYZ panels share a vertical scale; the
+2/1/0.5 g peaks and separate 2.5/1.5 g starting candidates stay distinct.
+Additional capture/accuracy PNGs check threshold/onset/peak and travel layout.
+PNG filenames/titles share a current timezone-aware UTC instant. This is layout
 verification, not a measurement of a physical sensor or printer.
+
+The chart fixtures also run a real tiny worker render and a bounded worker
+timeout with temporary-file cleanup. Matplotlib/NumPy/Pillow do not appear in
+the parent process's module set. Other synthetic workflow fixtures inject a
+small valid-PNG renderer; they verify orchestration/provenance rather than
+repeating the real plotting dependency startup for every fake home. The
+maximum XY accuracy fixture retains 102 per-home PNGs and two bounded overviews,
+with 100 accepted traces and population statistics. Validation yields between
+PNG files and can cancel before publication. PNG checks reject bad CRCs,
+duplicate headers, truncation/trailing bytes and oversized dimensions.
+
+`test_plotting_setup` covers selected lexical venv/ABI identification, existing
+renderer reuse, guarded private binary-wheel preparation/verification, dry-run
+behavior and dependency failure before printer writes/restart. Integration
+fixtures cover same-origin inline display only with correlated Moonraker paths,
+path fallback, formatted-console limits and safe URL handling. No real package
+installation or printer/frontend service operation is performed by these tests.
 
 Focused motor-enable and fresh-reference fixtures, run from
 `Beacon_Accel_Homing/tests/`:
@@ -63,7 +81,7 @@ failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
 claiming a host integration test. All three shell entry points are byte-identical to the source base
-`51202db1ef03a4e33626265be15341ede6942eb5`, so their syntax checks were not repeated. No native
+`253f85e1df1b85ff89aebf3237552a30a4e6edc2`, so their syntax checks were not repeated. No native
 Linux systemd/Unix-socket integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -79,7 +97,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The final combined offline verification run discovered **504 tests: 503 passed,
+The final combined offline verification run discovered **523 tests: 522 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -200,15 +218,12 @@ impact data. Exact detector threshold/onset/peak values survive a 0.001 g
 configured threshold; negative/permuted native sensor mappings retain the
 machine-axis sign. Capture conversion happens after trigger handling, and
 raw sample arrays are released after each trial and excluded from status.
-The aggregate CSV/SVG/HTML/JSON preserves individual measured-acceleration
-charts, signed trigger thresholds and the commanded-travel statistics.
-
-The root agent also used CUA to inspect a generated **SIMULATED / NOT PRINTER
-MEASUREMENT** complete HTML report: the statistics table was readable, its
-trial selector selected Y measurement 10, and that trace displayed the exact
-0.750001 g threshold and measured onset. This visual check is separate from
-the combined unittest run and used constructed data only. It does not validate
-hardware capture, physical centering, nozzle clearance or mechanical accuracy.
+Per-home PNGs and per-axis overview PNGs preserve measured-acceleration plots,
+precise signed trigger thresholds and commanded-travel statistics. Raw arrays
+are released after bounded trace/metric preparation; private immutable receipts
+are excluded from status JSON. No image pixels or sidecars are used to invent
+sensor samples. Synthetic visual checks do not validate physical centering,
+nozzle clearance, impact behavior or mechanical accuracy.
 
 Direct-command fixtures check that no separate centering-confirmation command
 is registered and no `action:prompt_*` messages are emitted during successful
@@ -246,14 +261,14 @@ existing shared/X/Y values below 3 g through initial installation and update
 in either section. The next-float fixture uses portable struct operations;
 Python 3.8 runtime compatibility was not exercised.
 
-The recorded run used CPython 3.13.5 on Windows: **504 tests in 11.043 seconds**
-(11.29669 seconds subprocess wall time). The full UTF-8 unittest output is
+The recorded run used CPython 3.13.5 on Windows: **523 tests in 12.025 seconds**
+(12.29249 seconds subprocess wall time). The full UTF-8 unittest output is
 retained in `validation/tests.txt` as its exact binary-captured bytes, without
-newline conversion: **85,122 bytes and 509 CRLF pairs**. The JSON report hashes
-that stored log and all **21 Python sources both before and after** the run;
-the two source snapshots match. All **36 package files** were also identical
+newline conversion: **88,841 bytes and 528 CRLF pairs**. The JSON report hashes
+that stored log and all **22 Python sources both before and after** the run;
+the two source snapshots match. All **37 package files** were also identical
 between the snapshots taken during the suite; this summary, the new log and
-the validation report were written afterward. The package inventory contains **36 files**,
+the validation report were written afterward. The package inventory contains **37 files**,
 with **22 immutable bootstrap payload files**; no private user log
 or raw hardware samples are included.
 
@@ -464,7 +479,7 @@ engineering ranges do not certify hardware safety. No current printer
 settings were changed and no private user log or raw measurements were
 included in this package.
 
-All **21 production and test Python files** listed in
+All **22 production and test Python files** listed in
 `validation/VALIDATION.json` passed Python 3.8
 grammar parsing on the current Python 3.13 host. No Python 3.8 runtime was
 executed; syntax parsing alone does not establish complete runtime compatibility.

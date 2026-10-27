@@ -16,6 +16,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -938,7 +939,8 @@ def execute_transaction(entries, config, metadata, writer=write_state, before_wr
     for entry in entries:
         path = Path(entry["path"])
         if not state_matches(path, entry["before"]):
-            raise InstallError("%s changed after planning. No files changed; retry after editor/SAVE_CONFIG finishes." % path)
+            raise InstallError("%s changed after planning. No printer transaction files changed; a private plotting cache "
+                               "may have been prepared. Retry after editor/SAVE_CONFIG finishes." % path)
         if not os.access(path.parent, os.W_OK):
             raise InstallError("No write access to %s. Run as Klipper service user; files are never written with sudo." % path.parent)
     if before_write:
@@ -1089,6 +1091,7 @@ def arguments(argv=None):
     parser.add_argument("--config", default=os.environ.get("PRINTER_CONFIG"), help="main printer.cfg")
     parser.add_argument("--service", default=os.environ.get("KLIPPER_SERVICE"), help="exact systemd instance")
     parser.add_argument("--klippy-socket", default=os.environ.get("KLIPPY_SOCKET"), help="read-only Klipper API socket (-a)")
+    parser.add_argument("--klipper-python", help="exact selected Klipper venv interpreter when it cannot be detected; never bootstrap/global Python")
     parser.add_argument("--accel-chip", help="full configured section, e.g. 'adxl345 toolhead'")
     parser.add_argument("--axes", default="x,y", help="x,y (default), x or y")
     parser.add_argument("--homing-speed", type=float,
@@ -1127,6 +1130,145 @@ def print_restart_advice(selected):
               "the installer could not determine a service name.")
     print("G-code RESTART and FIRMWARE_RESTART alone do not reload already-imported Python modules. "
           "No restart, homing, firmware flashing, or calibration was performed.")
+
+
+def load_plotting():
+    path = Path(__file__).resolve().with_name("accel_homing_charts.py")
+    spec = importlib.util.spec_from_file_location("accel_homing_plotting_setup", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _lexical_python(value):
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise InstallError("Klipper Python must be an absolute venv executable, not %r. "
+                           "A relative service command cannot establish its environment." % value)
+    # Resolving bin/python's symlink would silently select the system prefix.
+    return os.path.abspath(str(path))
+
+
+def assert_python_instance(selected, executable):
+    if selected.get("pid"):
+        matches = [item for item in proc_instances() if item.get("pid") == selected["pid"]]
+        if (len(matches) != 1 or any(matches[0].get(key) != selected.get(key)
+                                     for key in ("repo", "config", "socket", "start_time"))
+                or _lexical_python(matches[0]["executable"]) != executable):
+            raise InstallError("Selected Klipper process/interpreter changed before printer transaction writes; "
+                               "a private plotting cache may already have been prepared.")
+    elif selected.get("service"):
+        matches = [item for item in service_instances(Path.home())
+                   if item.get("service") == selected["service"]
+                   and item.get("repo") == selected["repo"] and item.get("config") == selected["config"]]
+        if len(matches) != 1 or _lexical_python(matches[0]["executable"]) != executable:
+            raise InstallError("Cannot reverify the selected stopped service's exact Python environment.")
+
+
+def inspect_plotting_python(selected, explicit=None):
+    detected = selected.get("executable")
+    if explicit and detected and _lexical_python(explicit) != _lexical_python(detected):
+        raise InstallError("--klipper-python does not match the selected instance's executable %s; "
+                           "it cannot override another instance's environment." % detected)
+    if not detected and not explicit:
+        raise InstallError("Cannot identify this selected instance's Klipper Python. Supply "
+                           "--klipper-python /absolute/path/to/its/venv/bin/python; bootstrap/system Python will not be used.")
+    executable = _lexical_python(detected or explicit)
+    assert_python_instance(selected, executable)
+    script = ("import json,os,sys; p=sys.prefix; "
+              "print(json.dumps(dict(executable=sys.executable,prefix=p,base_prefix=sys.base_prefix,"
+              "cache_tag=sys.implementation.cache_tag,uid=os.getuid(),prefix_uid=os.stat(p).st_uid,"
+              "writable=os.access(p,os.W_OK),venv_config=os.path.isfile(os.path.join(p,'pyvenv.cfg')))))")
+    try:
+        result = subprocess.run([executable, "-I", "-c", script], capture_output=True,
+                                text=True, timeout=15)
+        details = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise InstallError("Cannot interrogate selected Klipper Python %s: %s" % (executable, exc))
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    if (not isinstance(details, dict) or details.get("uid") != uid or uid == 0
+            or details.get("prefix_uid") != uid or details.get("writable") is not True
+            or details.get("venv_config") is not True or not details.get("cache_tag")
+            or details.get("prefix") == details.get("base_prefix")
+            or _lexical_python(details.get("executable", "")) != executable):
+        raise InstallError("Selected Python %s is not a verified writable venv owned by the Klipper service user. "
+                           "No global/root pip fallback is permitted." % executable)
+    details["command"] = executable
+    return details
+
+
+def prepare_plotting(selected, args, before_write=None):
+    """Reuse Agg or atomically prepare private wheels, never mutate venv pins."""
+    try:
+        details = inspect_plotting_python(selected, getattr(args, "klipper_python", None))
+    except InstallError as exc:
+        if not args.dry_run:
+            raise
+        print("PNG dependency preflight unresolved (dry run): %s" % exc)
+        return {"available": False, "reason": str(exc)}
+    charts = load_plotting()
+    target = Path(charts.default_dependency_directory(details["prefix"], details["cache_tag"]))
+    owned_root = Path(__file__).resolve().parent / ".plot-deps"
+    try:
+        relative = target.resolve().relative_to(owned_root)
+        if not relative.parts:
+            raise ValueError("empty environment key")
+    except ValueError:
+        raise InstallError("Refusing a plotting dependency target outside this source release.")
+    if before_write is not None:
+        before_write()
+    def verify(directory):
+        renderer = charts.PNGRenderer(details["command"], directory)
+        charts.preflight_renderer(renderer=renderer)
+    try:
+        verify(target)
+        assert_python_instance(selected, details["command"])
+        print("PNG Agg renderer verified with selected Klipper Python: %s" % details["command"])
+        return {"available": True, "python": details["command"], "target": str(target)}
+    except Exception as original:
+        if args.dry_run:
+            print("PNG renderer needs private binary matplotlib dependencies for %s (dry run; no installation): %s" %
+                  (details["command"], original))
+            return {"available": False, "python": details["command"], "target": str(target)}
+        if target.exists():
+            raise InstallError("Existing private plotting dependencies failed a real render: %s. "
+                               "Preserve/review %s before replacing it; no printer files changed." % (original, target))
+    assert_python_instance(selected, details["command"])
+    if before_write is not None:
+        before_write()
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stage = Path(tempfile.mkdtemp(prefix=".prepare-", dir=str(target.parent)))
+    try:
+        command = [details["command"], "-I", "-m", "pip", "--isolated", "install",
+                   "--disable-pip-version-check", "--no-warn-script-location", "--only-binary=:all:",
+                   "--index-url", "https://pypi.org/simple", "--target", str(stage), "matplotlib>=3.3,<4"]
+        print("Preparing private PNG plotting wheels with %s; existing environment packages are unchanged." % details["command"])
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise InstallError("Private plotting wheel installation failed: %s. No printer files changed." % exc)
+        if result.returncode:
+            raise InstallError("Private matplotlib binary-wheel installation failed (including missing pip/unsupported wheels): %s. "
+                               "No printer files changed; no global pip or source-build fallback was attempted." %
+                               result.stderr[-3000:].strip())
+        verify(stage)
+        assert_python_instance(selected, details["command"])
+        if before_write is not None:
+            before_write()
+        if target.exists():
+            verify(target)  # Another verified installer may have published first.
+        else:
+            os.rename(stage, target)
+        print("Private PNG dependencies verified: %s. Removing this cache reverses only plotting setup; "
+              "uninstall retains it with the source cache." % target)
+        return {"available": True, "python": details["command"], "target": str(target)}
+    except Exception as exc:
+        if isinstance(exc, InstallError):
+            raise
+        raise InstallError("Private PNG dependency preparation failed before printer writes: %s" % exc)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
 
 
 def main(argv=None):
@@ -1172,16 +1314,21 @@ def main(argv=None):
     for path, change in changes.items():
         print(("Link " if change["kind"] == "symlink" else "Edit ") + str(path))
     if args.dry_run:
+        prepare_plotting(selected, args)
         print("Dry run: no writes, restart, or movement.")
         return 0
     restart = None if args.no_restart else prepare_restart(selected)
+    def before_write():
+        executable = selected.get("executable") or args.klipper_python
+        if executable:
+            assert_python_instance(selected, _lexical_python(executable))
+        if restart:
+            assert_restart_safe(selected, restart)
+        else:
+            print(assert_idle(selected))
+    prepare_plotting(selected, args, before_write)
     backup = None
     if changes:
-        def before_write():
-            if restart:
-                assert_restart_safe(selected, restart)
-            else:
-                print(assert_idle(selected))
         backup = apply_plan(changes, selected["config"], selected=selected, before_write=before_write)
         print("Installed. Backup: %s" % backup)
         print("Review the config and sensor mounting/orientation.")

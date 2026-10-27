@@ -88,8 +88,9 @@ Success **automatically saves** that axis in `printer.cfg`'s **DO NOT EDIT**
 block and restarts Klipper. Leave that block alone. When ready, repeat the
 preparation and calibrate Y; each axis is saved independently.
 
-TEST and CHARTS home X, return X alone to center, then home Y. Charts export
-CSV, JSON, SVG and HTML; their paths appear in the console and STATUS.
+TEST and CHARTS home X, return X alone to center, then home Y. Every chart is
+a completed **PNG image**, ready to open, with the current UTC timestamp in
+its filename and title. Paths appear in the console and STATUS.
 ACCURACY uses the same preparation, excludes one qualifying home per axis,
 then measures `SAMPLES` repeats (2–50; default 10). Omit `AXIS` to test X and Y.
 It reports commanded-travel variation without tuning or saving thresholds.
@@ -249,11 +250,10 @@ motor/fan state as it is; neither manual centering nor `CENTERED=1` is required.
 It does not home, move, enable/release motors, save a model or restart Klipper.
 `SAVE_CONFIG` is not accepted by this command.
 
-Each of three separate one-second windows subtracts its own XYZ mean. The
-report retains signed XYZ traces, raw and baseline-subtracted full-resolution
-CSV, exact JSON values, per-axis absolute peak, RMS and peak-to-peak vibration.
-HTML embeds all three plots and SVG includes all three windows. The report
-records sensor, mapping/scale context, duration, sample count and run identity.
+Each of three separate one-second windows subtracts its own XYZ mean. One PNG
+contains all three signed XYZ plots on the same vertical scale, with absolute
+peaks, RMS and the separate starting candidates. Exact metrics, sensor context,
+duration and count remain in STATUS; intermediate windows create no files.
 `ACCEL_HOMING_STATUS` shows results, paths, `noise_recommendation` and the
 remaining `noise_seed_axes`.
 
@@ -513,19 +513,37 @@ Travel is the firmware's commanded step distance, recorded to **0.001 mm**,
 not an encoder measurement of physical stop position. These statistics describe
 variation across those repeated commands; they do not prove absolute accuracy,
 absence of skipped steps, or calibration qualification for any sample count.
-The HTML opens with a travel chart and statistics, then lets you select each
-home's embedded X/Y/Z acceleration trace. CSV and JSON retain the individual
-values and references to the complete per-home captures.
+Each home has its own PNG with XYZ acceleration, the actual trigger threshold,
+detected onset and measured peak. ACCURACY also creates one overview PNG per
+tested axis with commanded travel/statistics and the accepted XYZ traces.
+Overview dimensions and stored traces stay bounded for up to 100 measured homes.
 
 The console reports acceleration at impact detection, its measured peak in g
 and commanded travel. Charts show X/Y/Z acceleration relative to the stationary
 baseline, configured trigger threshold and detected onset marker when available.
 That threshold is the value used by the detector, not a newly calibrated minimum
-g requirement. The measured onset and peak can differ from it. Outputs include
-full-resolution CSV, metadata JSON and ready-to-open SVG/HTML without plotting
-tools to install. The default `accel_homing_charts/` directory is beside the
+g requirement. The measured onset and peak can differ from it. All new chart
+outputs, including incomplete reports, are **PNG only**: no CSV, JSON, SVG or
+HTML sidecars. Each image uses bounded samples that retain signed extrema;
+there is no full-resolution raw-data export. Previously generated files are
+retained. The default `accel_homing_charts/` directory is beside the
 main `printer.cfg`; `charts_directory` changes it. See the
 [configuration example](examples/accel_homing.cfg) for all settings.
+
+The installer prepares plotting dependencies for the selected Klipper Python
+in a private, ignored `.plot-deps/` cache. Global package pins are unchanged;
+the cache is retained on uninstall. Matplotlib/Agg renders in a separate
+process while Klippy keeps servicing its reactor. A small real render is
+checked before CHARTS/ACCURACY movement or stationary noise acquisition. A
+missing renderer fails before those operations begin.
+
+Completed PNGs can appear inline when a verified Moonraker file route and the
+frontend's formatted console are available. Mainsail's raw-output mode does
+not render inline images. The PNG path remains available to open directly;
+direct preview needs a same-origin Moonraker route accessible to an ordinary
+browser GET, such as a trusted LAN or session-cookie route. Remote frontends
+or header-token-only authentication may require opening the PNG through the
+frontend file browser. No tokens are embedded in chart links.
 
 `SET_ACCEL_HOMING AXIS=X THRESHOLD=0.5` changes X temporarily until restart;
 use `AXIS=Y` for Y. It does not save a calibration model. For manual configuration,
