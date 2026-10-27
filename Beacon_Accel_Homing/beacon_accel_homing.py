@@ -85,11 +85,13 @@ def validate_threshold(value, name, error, full_scale=None):
 
 
 class QuietReference:
-    """Exact bounded quiet suffix, protected by the owner lock."""
+    """Bounded contiguous reference, optionally quiet, protected by the owner lock."""
 
-    def __init__(self, axis, cutoff, duration, limit, threshold_g=None):
+    def __init__(self, axis, cutoff, duration, limit, threshold_g=None,
+                 require_quiet=True):
         self.axis, self.cutoff, self.duration, self.limit = axis, cutoff, duration, limit
         self.threshold_g = threshold_g
+        self.require_quiet = require_quiet
         self.first = self.last = None
         self.count = 0
         self.totals = [0.0, 0.0, 0.0]
@@ -124,8 +126,8 @@ class QuietReference:
                 maximum.pop()
             minimum.append((self.accepted, value))
             maximum.append((self.accepted, value))
-        if any(high[0][1] - low[0][1] > self.limit
-               for low, high in zip(self._minimum, self._maximum)):
+        if self.require_quiet and any(high[0][1] - low[0][1] > self.limit
+                                      for low, high in zip(self._minimum, self._maximum)):
             # Keep the longest contiguous suffix that is quiet on every axis.
             # Resetting to only the new sample would discard valid overlapping
             # windows whenever an old extremum is the sole offending sample.
@@ -222,14 +224,18 @@ def describe_reference(status):
         return "/".join("%.3f" % values[axis] for axis in ("x", "y", "z"))
     def age(value):
         return "unknown" if value is None else "%.2f" % value
-    result = ("baseline %s: %s (%s); best quiet %d/%d samples, %.2f/%.2f ms,"
-            " p-p XYZ %s g (limit %.3f g); observed p-p XYZ %s g;"
+    require_quiet = status.get("quiet_range_enforced", True)
+    limit = ("limit %.3f g" % status["quiet_limit_g"] if require_quiet else
+             "quiet range not required for calibration")
+    result = ("baseline %s: %s (%s); best %s %d/%d samples, %.2f/%.2f ms,"
+            " p-p XYZ %s g (%s); observed p-p XYZ %s g;"
             " accepted %d, pre-cutoff %d, resets %d; sample age %s ms"
             " (max %.2f ms), batch oldest/newest %s/%s ms"
             % (status["axis"].upper(), status["result"].replace("_", " "), status["phase"].replace("_", " "),
+               "quiet" if require_quiet else "reference",
                status["best_quiet_samples"], status["required_samples"],
                status["best_quiet_span_ms"], status["required_span_ms"],
-               xyz(status["best_quiet_peak_to_peak_g"]), status["quiet_limit_g"],
+               xyz(status["best_quiet_peak_to_peak_g"]), limit,
                xyz(status["observed_peak_to_peak_g"]), status["accepted_samples"],
                status["pre_cutoff_samples"], status["quiet_resets"],
                age(status["sample_age_ms"]), status["max_sample_age_ms"],
@@ -995,7 +1001,8 @@ class BeaconAccelHoming:
             count_g = self.session_scale["scale"] / 1000.0
             reference = QuietReference(axis, cutoff, self.baseline_time,
                                        self._reference_noise_limit(axis) / count_g,
-                                       threshold_g=self.threshold_g[axis])
+                                       threshold_g=self.threshold_g[axis],
+                                       require_quiet=not self.workflows.calibration_reference(axis))
             with self.lock:
                 self.recent.clear()
                 self.tail = None
@@ -1047,6 +1054,7 @@ class BeaconAccelHoming:
             proof_noise = self._reference_motion_noise(reference, bases, axis)
             self.baseline_status = {
                 "axis": axis, "phase": phase, "result": result,
+                "quiet_range_enforced": reference is None or reference.require_quiet,
                 "motion_proof_noise_bound_g": None if proof_noise is None else mapped(proof_noise),
                 "quiet_samples": 0 if reference is None else reference.count,
                 "quiet_span_ms": round(span * 1000.0, 3),
@@ -1076,9 +1084,11 @@ class BeaconAccelHoming:
         self._remember_reference(reference, sensor_now, phase, result, axis)
         detail = describe_reference(self.baseline_status)
         logging.info("accel_homing: %s", detail)
+        message = (FAILURES["no_baseline"] if reference is None or reference.require_quiet else
+                   "no fresh accelerometer reference before the move")
         return self.printer.command_error("accel_homing: %s; %s. Inspect stationary"
                                           " sensor readings and delivery timing; see ACCEL_HOMING_STATUS"
-                                          % (FAILURES["no_baseline"], detail))
+                                          % (message, detail))
 
     def _reference_noise_limit(self, axis):
         original = BASELINE_NOISE_RATIO * self.threshold_g[axis]
@@ -1087,12 +1097,15 @@ class BeaconAccelHoming:
         return max(original, floor)
 
     def _reference_motion_noise(self, reference, bases, axis):
-        """Observed envelope for references a noise floor newly admits."""
+        """Measured envelope for calibration and expanded quiet references."""
         if reference is None or bases is None:
             return None
         original = BASELINE_NOISE_RATIO * self.threshold_g[axis] / (self.session_scale["scale"] / 1000.0)
-        if not any(high - low > original for low, high in zip(reference.low, reference.high)):
+        if reference.require_quiet and not any(
+                high - low > original for low, high in zip(reference.low, reference.high)):
             return None
+        # Calibration omits the quiet-range gate, so its measured uncertainty
+        # remains active even if a later impact candidate exceeds that range.
         # The mean need not lie at the midpoint, so half the range is unsafe.
         return tuple(max(abs(low - base), abs(high - base))
                      for low, high, base in zip(reference.low, reference.high, bases))
@@ -1240,6 +1253,8 @@ class BeaconAccelHoming:
             reference = self.preparation
             bases = reference.baseline() if reference is not None and reference.axis == axis else None
             result = ("missing_before_arm" if reference is None else
+                      "calibration_reference_outside_trial" if not reference.require_quiet
+                      and not self.workflows.calibration_reference(axis) else
                       "quiet_window_invalidated_before_arm" if bases is None else
                       "expired_before_arm" if reference.last is None
                       or not -0.005 <= now - reference.last <= self._reference_max_age() else "ready")
@@ -2346,6 +2361,10 @@ class BeaconAccelHoming:
         kind = "beacon_raw" if self.backend is None else self.backend.kind
         gcmd.respond_info("accel_homing: sensor %s, backend %s, X %.12g g, Y %.12g g"
                           % (self.sensor_name, kind, self.threshold_g["x"], self.threshold_g["y"]))
+        gcmd.respond_info("accel_homing: baseline policy: ordinary homing requires quiet XYZ;"
+                          " calibration requires a fresh %.2f ms / %d sample reference"
+                          " without a quiet-range limit; measured noise bounds remain active"
+                          % (self.baseline_time * 1000.0, BASELINE_MIN_SAMPLES))
         if self.backend is not None:
             gcmd.respond_info("accel_homing: requested report interval %.4f s, sample-age limit"
                               " %.4f s, observed rate %s Hz, report-age speed ceiling %s;"

@@ -58,8 +58,11 @@ with the correct `axes_map`. Workflows require Cartesian/CoreXY, independent Z
 and stock `G28` (standard `safe_z_home` or `homing_override` is supported);
 see [compatibility](docs/COMPATIBILITY.md).
 
-By default, calibration starts at 0.5 g and needs ten validation homes after
-discovery, with travel spread below 1.5 mm.
+By default, calibration starts at **1.0 g** and increases by **0.25 g** after
+an early trigger. It needs ten validation homes after discovery, with travel
+spread below 1.5 mm. Calibration skips the stationary peak-to-peak quietness
+gate, while still collecting a fresh resting offset and enforcing sensor-data
+and motion checks.
 
 1. Keep the printer idle and unpaused. **Center XY by hand and leave both
    axes unhomed in Klipper.** Keep Z supported and ensure nozzle/bed clearance:
@@ -67,7 +70,7 @@ discovery, with travel spread below 1.5 mm.
 2. In the **printer console**, run:
 
    ```gcode
-   ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
+   ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
    ```
 
    **`CENTERED=1` authorizes movement without another confirmation.**
@@ -76,10 +79,13 @@ discovery, with travel spread below 1.5 mm.
 4. After restart, repeat step 1, then calibrate Y:
 
    ```gcode
-   ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1
+   ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1 START_THRESHOLD=1 STEP=0.25
    ```
 
 If asked to recenter, repeat the preparation and the **same command** to resume.
+The explicit start and step above override older configuration values and
+skip any stored noise-derived starting candidate. A resumed run keeps its
+current candidate; repeating `START_THRESHOLD=1` does not reset it to 1 g.
 After physically validating both axes, use the printer's normal homing controls.
 
 ## Mainsail / Fluidd console commands

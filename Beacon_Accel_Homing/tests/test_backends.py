@@ -699,6 +699,204 @@ class RaisedBaselineFloorTest(unittest.TestCase):
                 self.assertEqual(endstop.trigger_log.messages, [])
 
 
+class CalibrationReferenceTest(unittest.TestCase):
+    """Only active calibration omits the quiet-range requirement."""
+
+    def context(self, obj, axis="x"):
+        obj.workflows.session = {"mode": "calibration", "state": "running", "axis": axis}
+        obj.workflows.in_home, obj.workflows.home_axis = True, axis
+
+    def machine(self, threshold=1.0, axis="x", legacy=False):
+        obj, endstop = RaisedBaselineFloorTest().machine(
+            threshold=threshold, axis=axis, legacy=legacy, spreads=(1.313, 0.604, 0.281))
+        self.context(obj, axis)
+        return obj, endstop
+
+    def prepare_arm(self, obj, endstop):
+        obj._prepare_reference()
+        reference = obj.preparation
+        self.assertFalse(reference.require_quiet)
+        self.assertGreaterEqual(reference.count, 321)
+        self.assertGreaterEqual(reference.last - reference.first + 1e-9, 0.1)
+        retained = [row for row in obj.fixture_reference_rows
+                    if reference.first - 1e-6 <= row[0] <= reference.last + 1e-6]
+        self.assertEqual(len(retained), reference.count)
+        means = tuple(sum(row[index + 1] / G for row in retained) / len(retained)
+                      for index in range(3))
+        envelope = tuple(max(abs(row[index + 1] / G - means[index]) for row in retained)
+                         for index in range(3))
+        when = obj.backend.last_sample_time + 16 / 3200.0
+        endstop.get_steppers = lambda: [RampStepper(when, 5000.0, 50.0)]
+        attempt = obj.prepare(endstop, when)
+        obj.arm(attempt)
+        for index in range(3):
+            self.assertAlmostEqual(attempt.bases[index] * attempt.count_g, means[index])
+            self.assertAlmostEqual(attempt.proof_noise[index] * attempt.count_g, envelope[index])
+        return attempt
+
+    def test_noisy_calibration_retains_full_reference_and_envelope_at_each_candidate(self):
+        for threshold in (1.0, 1.25, 8.0):
+            for axis in ("x", "y"):
+                for legacy in (False, True):
+                    with self.subTest(threshold=threshold, axis=axis, legacy=legacy):
+                        obj, endstop = self.machine(threshold, axis, legacy)
+                        attempt = self.prepare_arm(obj, endstop)
+                        diagnostic = obj.baseline_status
+                        self.assertFalse(diagnostic["quiet_range_enforced"])
+                        self.assertEqual(diagnostic["quiet_resets"], 0)
+                        self.assertEqual(diagnostic["result"], "ready")
+                        self.assertAlmostEqual(diagnostic["impact_threshold_g"], threshold)
+                        self.assertAlmostEqual(attempt.limit_raw * attempt.count_g, threshold)
+                        for name, spread in zip("xyz", (1.313, 0.604, 0.281)):
+                            self.assertAlmostEqual(diagnostic["best_quiet_peak_to_peak_g"][name], spread)
+                        detail = plugin.describe_reference(diagnostic)
+                        self.assertIn("best reference", detail)
+                        self.assertIn("quiet range not required for calibration", detail)
+                        self.assertNotIn("best quiet", detail)
+                        self.assertEqual(endstop.trigger_log.messages, [])
+                        self.assertEqual(obj.toolhead.moves, [])
+
+    def test_ordinary_and_other_workflow_contexts_still_require_quiet_xyz(self):
+        for mode in ("ordinary", "test", "charts", "accuracy", "waiting",
+                     "wrong_session_axis", "wrong_home_axis", "not_in_home"):
+            with self.subTest(mode=mode):
+                obj, endstop = self.machine()
+                if mode == "ordinary":
+                    obj.workflows.session = None
+                elif mode in ("test", "charts", "accuracy"):
+                    obj.workflows.session["mode"] = mode
+                elif mode == "waiting":
+                    obj.workflows.session["state"] = "waiting"
+                elif mode == "wrong_session_axis":
+                    obj.workflows.session["axis"] = "y"
+                elif mode == "wrong_home_axis":
+                    obj.workflows.home_axis = "y"
+                else:
+                    obj.workflows.in_home = False
+                with self.assertRaisesRegex(CommandError, "acquisition timeout"):
+                    obj._prepare_reference()
+                self.assertTrue(obj.baseline_status["quiet_range_enforced"])
+                self.assertIsNone(obj.attempt)
+                self.assertFalse(obj.homing_active)
+                self.assertEqual(endstop.trigger_log.messages, [])
+
+    def test_calibration_reference_cannot_be_armed_after_scope_exit_or_expiry(self):
+        for mode in ("scope_exit", "waiting", "expiry"):
+            with self.subTest(mode=mode):
+                obj, endstop = self.machine()
+                obj._prepare_reference()
+                if mode == "scope_exit":
+                    obj.workflows.session = None
+                    obj.workflows.in_home, obj.workflows.home_axis = False, None
+                elif mode == "waiting":
+                    obj.workflows.session["state"] = "waiting"
+                else:
+                    obj.reactor.now += 0.040
+                with self.assertRaisesRegex(CommandError, "fresh accelerometer reference"):
+                    obj.prepare(endstop, obj.reactor.now + 0.010)
+                self.assertEqual(obj.baseline_status["result"],
+                                 "expired_before_arm" if mode == "expiry"
+                                 else "calibration_reference_outside_trial")
+                self.assertFalse(obj.homing_active)
+                self.assertIsNone(obj.preparation)
+                self.assertEqual(endstop.trigger_log.messages, [])
+
+    def test_noisy_calibration_cannot_turn_stationary_noise_or_bias_into_motion(self):
+        for threshold in (1.0, 8.0):
+            for bias in (0.0, 0.8):
+                with self.subTest(threshold=threshold, bias=bias):
+                    obj, endstop = self.machine(threshold)
+                    attempt = self.prepare_arm(obj, endstop)
+                    number = 0
+                    while number < 512 and not attempt.done:
+                        first = obj.backend.last_sample_time + 1 / 3200.0
+                        rows = []
+                        for offset in range(16):
+                            sign = 1 if (number + offset) % 2 else -1
+                            deltas = [bias * bound * attempt.count_g + sign * 0.0001
+                                      for bound in attempt.proof_noise]
+                            if bias == 0.0:
+                                deltas = [sign * spread / 2.0 for spread in (1.313, 0.604, 0.281)]
+                            values = [(base * attempt.count_g + delta) * G
+                                      for base, delta in zip(attempt.bases, deltas)]
+                            rows.append((first + offset / 3200.0,) + tuple(values))
+                        feed(obj, rows)
+                        obj._watchdog(obj.reactor.now)
+                        number += 16
+                    self.assertFalse(attempt.motion_seen)
+                    self.assertFalse(attempt.moving)
+                    self.assertEqual(attempt.auto_direction, 0)
+                    self.assertEqual(attempt.reason, "no_motion")
+                    self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_first_raw_contact_uses_selected_one_and_one_quarter_g_candidates(self):
+        for threshold in (1.0, 1.25):
+            for axis in ("x", "y"):
+                for direction in (-1, 1):
+                    with self.subTest(threshold=threshold, axis=axis, direction=direction):
+                        obj, endstop = self.machine(threshold, axis)
+                        attempt = self.prepare_arm(obj, endstop)
+                        bases = [value * attempt.count_g for value in attempt.bases]
+                        first = obj.backend.last_sample_time + 1 / 3200.0
+                        rows = samples(first, size=32, x=bases[0], y=bases[1], z=bases[2])
+                        post = next(index for index, row in enumerate(rows) if row[0] >= attempt.arm_time)
+                        row = list(rows[post])
+                        row[attempt.index + 1] += direction * (threshold - 0.01) * G
+                        rows[post] = tuple(row)
+                        feed(obj, rows)
+                        self.assertIsNone(attempt.reason)
+                        rows = samples(obj.backend.last_sample_time + 1 / 3200.0,
+                                       x=bases[0], y=bases[1], z=bases[2])
+                        row = list(rows[0])
+                        row[attempt.index + 1] += direction * (threshold + 0.01) * G
+                        rows[0] = tuple(row)
+                        feed(obj, rows)
+                        self.assertEqual(attempt.reason, "impact")
+                        self.assertEqual(endstop.trigger_log.messages, [[HIT]])
+                        self.assertAlmostEqual(obj.onset_time(attempt), rows[0][0], delta=1e-6)
+
+    def test_calibration_data_faults_and_capacity_still_abort_before_dispatch(self):
+        for mode in ("stale", "future", "duplicate", "gap", "saturated", "nonfinite",
+                     "errors", "overflows", "capacity"):
+            with self.subTest(mode=mode):
+                obj, endstop = GenericPreparationTest().session()
+                obj.threshold_g["x"] = 1.0
+                self.context(obj)
+                number, last = [0], []
+                def flow():
+                    number[0] += 1
+                    start = obj.reactor.now - 0.001 - 15 / 3200.0
+                    x, fields = 0.65 if number[0] % 2 else -0.65, {}
+                    if mode == "stale":
+                        obj.reactor.now += 0.1
+                    elif mode == "future":
+                        start += 0.020
+                    elif mode == "duplicate" and last:
+                        start = last[0]
+                    elif mode == "gap" and last:
+                        start += 0.020
+                        obj.reactor.now += 0.020
+                    elif mode == "saturated":
+                        x = 16.0
+                    elif mode == "nonfinite":
+                        x = float("nan")
+                    elif mode in ("errors", "overflows"):
+                        fields[mode] = 1
+                    last.append(start)
+                    obj.backend.helper.emit({"data": samples(start, x=x), **fields})
+                obj.reactor.on_pause = flow
+                capacity = 50 if mode == "capacity" else plugin.BASELINE_MAX_SAMPLES
+                with mock.patch.object(plugin, "BASELINE_MAX_SAMPLES", capacity):
+                    with self.assertRaises(CommandError):
+                        obj._prepare_reference()
+                self.assertFalse(obj.baseline_status["quiet_range_enforced"])
+                self.assertEqual(obj.baseline_status["result"], obj.sensor_fault)
+                self.assertEqual(endstop._dispatch.started, [])
+                self.assertEqual(endstop.get_mcu().log, [])
+                self.assertEqual(obj.toolhead.moves, [])
+                self.assertFalse(obj.homing_active)
+
+
 class BatchHelper:
     """The real bulk_sensor callback/False-unsubscribe contract."""
     def __init__(self):

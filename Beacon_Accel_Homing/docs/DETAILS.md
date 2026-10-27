@@ -211,7 +211,8 @@ measurement failure.
 For each X/Y axis, the largest absolute peak from all three windows receives
 the greater of a **20% or 0.1 g** margin, then rounds upward on the configured
 `calibration_start_threshold + n * calibration_step` grid. For example, a
-2 g X peak gives a 2.5 g initial candidate with the default 0.5 g start/step.
+2 g X peak gives a 2.5 g initial candidate with the default 1 g start and
+0.25 g step.
 This is an **initial candidate, NOT a calibrated impact threshold**. A candidate
 above the calibration/sensor ceiling is unavailable; it is never reduced to
 fit. An unknown sensor range also leaves candidates unavailable. Complete
@@ -223,10 +224,11 @@ available X candidate; Y is independent. A restart or changed sensor/calibration
 context discards unused candidates. Existing manual thresholds, saved models
 and ordinary homing thresholds are unchanged by noise measurement. Stationary
 vibration does not measure motor-enable/first-step transients, guarantee noise
-filtering or qualify contact detection. The existing quiet-reference checks
-still apply; high peak-to-peak vibration can still fail `no_baseline` even with
-a higher candidate. Calibration still needs its normal geometry and ten-home
-repeatability qualification.
+filtering or qualify contact detection. Calibration skips the peak-to-peak
+quietness gate but still requires fresh valid offset samples, movement proof,
+normal geometry and ten-home repeatability qualification. An explicit
+`START_THRESHOLD` or `STEP` on CALIBRATE skips automatic seed selection for
+that run, so a measured candidate cannot replace the requested grid.
 
 `homing_retract_dist: 0` keeps one touch per home. The separate plugin setting
 `back_off_dist` defaults to 5 mm (0 disables; finite 0–20 mm) and controls the
@@ -269,13 +271,24 @@ retain their existing behavior. Dual carriages, shared XY/Z enables,
 G28 macros and nested/unknown wrapper chains remain rejected. See
 [the source contract and limits](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
-Calibration defaults: start at 0.5 g, increase by 0.5 g for early triggers, stop
+Calibration defaults: start at 1.0 g, increase by 0.25 g for early triggers, stop
 at 12 g or 80% of sensor range, allow at most 40 homing attempts and wait up to
 300 seconds for manual recentering. `calibration_start_threshold` is configurable
-with a minimum of 0.5 g. Existing models at 1 g and 2 g remain valid. Starting
-at 0.5 g applies when `calibration_start_threshold` is absent or set to 0.5;
-an explicit existing value is preserved. Updating does not replace a saved
-model's threshold; recalibrate to produce a new model. Starting or resuming
+with a minimum of 0.5 g. Existing explicit start/step settings are preserved.
+To select this grid for one run, use:
+
+```gcode
+ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
+```
+
+Use `AXIS=Y` to calibrate Y instead. These parameters override the configured
+start/step and skip a stored noise seed. They are snapshotted for the run:
+after manually recentering, repeat the same command or omit the grid parameters
+to continue at the current candidate. A different start or step on resume is
+rejected. The attempt limit remains independent of the finer grid and includes
+discovery and validation; a high candidate may exhaust it before ten validations.
+Updating does not replace a saved model's threshold; recalibrate to produce a
+new model. Starting or resuming
 calibration requires both XY axes to be unhomed; it never marks manually
 centered coordinates as homed.
 Qualification requires over 10 mm of commanded travel and agreement within
@@ -296,8 +309,24 @@ applies and may release all motors.
 
 ## Stationary preparation and diagnostics
 
-`no fresh quiet accelerometer baseline before the move` means the pass could
-not obtain or retain the required stationary reference before arming.
+Ordinary homing, TEST, CHARTS and ACCURACY require a quiet reference.
+`ACCEL_HOMING_CALIBRATE` skips only that peak-to-peak quietness gate for the
+selected axis while its trial is actually running. It still collects at least
+50 fresh contiguous samples spanning `baseline_time` (100 ms by default),
+computes the resting offset from every retained sample, and keeps the real XYZ
+noise envelope for movement proof at every candidate threshold. Missing,
+stale, future, irregular, invalid or saturated data still aborts. Broad noise
+can still prevent proof of movement and produce `no_motion`; that fault does
+not advance the candidate. No post-arm impact is filtered or ignored.
+
+The bypass does not apply while waiting for manual centering, after cancellation
+or cleanup, to another axis, or to a different workflow. `ACCEL_HOMING_STATUS`
+reports the calibration policy before movement, and a retained baseline summary
+includes `quiet_range_enforced`. A calibration reference is labelled as a fresh
+reference rather than as having passed the quiet-range limit.
+
+`no fresh quiet accelerometer baseline before the move` means an ordinary pass
+could not obtain or retain its required stationary reference before arming.
 After the error, run `ACCEL_HOMING_STATUS`. It retains the baseline result and
 phase, quiet-window sample count and duration, X/Y/Z peak-to-peak variation and
 quiet limit, plus sample/batch ages and the allowed sample age. Fresh samples
@@ -307,22 +336,24 @@ discarding an old prefix; it no longer means the whole candidate was cleared.
 The retained `impact_threshold_g` identifies the threshold used for that
 reference. A failed calibration restores the ordinary homing thresholds, so
 the current X/Y thresholds can differ from the trial recorded in the baseline
-summary. For example, a 0.5 g generic calibration trial has a default 0.7 g
-quiet limit even if cleanup subsequently restores an ordinary threshold of 8 g.
+summary. A calibration summary retains the configured quiet limit as context
+but marks it as unenforced; cleanup can subsequently restore an ordinary
+threshold of 8 g without changing that diagnostic.
 Review duration, reset count, variation and sample ages together; the error
 alone does not prove excessive sensor noise. Include the status output and
 matching Klipper log when reporting a failure.
 
-The same check protects ordinary homing and supervised workflows, including
-already enabled motors and second touches. It enables the motors needed for
+The same data preparation precedes ordinary homing and supervised workflows,
+including already enabled motors and second touches. It enables the motors needed for
 the axis (both drives for CoreXY), waits for queued setup/backoff/retract and
 any settling delay after enabling motors, then collects a new sensor reference.
 `enable_settle_time` defaults to 0.25 s and accepts finite values from 0 to 2 s;
 setting it to zero keeps the quiet-data check.
 
 The reference needs at least 50 fresh contiguous samples spanning
-`baseline_time` (0.1 s by default). Its rolling collector retains useful recent
-samples when an older extreme makes the accumulated range too wide. It removes
+`baseline_time` (0.1 s by default). When quietness is required, its rolling
+collector retains useful recent samples when an older extreme makes the
+accumulated range too wide. It removes
 only the oldest prefix needed to satisfy the range limit, then keeps enough
 history to span the full duration. Every retained sample participates in the
 XYZ extrema, mean and motion-proof envelope; no in-window outlier is filtered.
@@ -331,37 +362,37 @@ capacity fails with `baseline_overflow` if exceeded.
 
 Native Beacon permits peak-to-peak
 variation on every sensor axis up to
-`max(0.20 * threshold, min(0.5 g, threshold))`. The 0.5 g floor allows a 0.5 g
-calibration candidate to acquire its reference; lower manual thresholds also
-cap that floor. It is not a configuration option and does not raise the
+`max(0.20 * threshold, min(0.5 g, threshold))` outside calibration. The 0.5 g
+floor permits that much variation at a 0.5 g homing threshold; lower manual
+thresholds also cap that floor. It is not a configuration option and does not raise the
 impact threshold.
 Configured generic accelerometers, including Cartographer's separate ADXL/LIS
 sensor, use `max(0.20 * threshold, baseline_noise_floor)`.
 `baseline_noise_floor` defaults to **0.7 g** and accepts finite values from
 **0 to 0.7 g**; zero restores the previous 20% rule. With a 0.5 g or 1 g
-calibration candidate, the default quiet limit is 0.7 g while the actual
-impact threshold remains the selected candidate. Existing explicit floor
-settings remain active; set `baseline_noise_floor: 0.7` to use the wider
+homing threshold, the default quiet limit is 0.7 g while the actual
+impact threshold remains selected. Calibration does not enforce this limit.
+Existing explicit floor settings remain active; set `baseline_noise_floor: 0.7` to use the wider
 allowance when an older value is configured. This setting does not affect
 native Beacon.
 
-For generic references admitted above the original 20% limit, movement proof
-still discounts each axis's maximum observed deviation from the accepted
+For generic calibration references and other references admitted above the
+original 20% limit, movement proof still discounts each axis's maximum observed deviation from the accepted
 mean. A wider baseline can therefore qualify for preparation while later
 movement remains unproven and aborts with `no_motion`. Raw impact detection
 still compares against the actual trial threshold from the first eligible
 sample; the wider quiet allowance does not suppress those triggers.
 
-When a native Beacon reference exceeds the original 20% limit, movement
-proof discounts the observed stationary-noise envelope. An additional bounded
+For native Beacon calibration, or when another reference exceeds the original
+20% limit, movement proof discounts the observed stationary-noise envelope. An additional bounded
 sample interval around the first commanded step in recorded history excludes
 earlier queued stationary samples from that interval. It must still prove
 enough motion before the original startup deadline; raw impacts remain
 eligible throughout. Already-pressed
 detection uses the current upper velocity bound; ambiguous evidence fails
 with `no_motion` by a calculated startup deadline. It does not count as a
-successful pressed start. References within the old limit retain the legacy
-path. Neither path changes raw impact detection or introduces a blind
+successful pressed start. Non-calibration references within the old limit
+retain the legacy path. Neither path changes raw impact detection or introduces a blind
 interval. These policies have synthetic validation only; they do not prove
 physical contact or stopping distance. See
 [native Beacon motion checks](COMPATIBILITY.md#native-beacon-with-an-expanded-reference).
@@ -371,8 +402,8 @@ affected axis's last result. Include it with the baseline summary when
 reporting a problem; neither summary measures physical motor travel.
 
 Acquisition is limited to `baseline_time + 0.5 s` after setup completes.
-Earlier buffered data cannot qualify. Data faults abort; persistent noise or
-no data produces `no_baseline`
+Earlier buffered data cannot qualify. Data faults abort; no data produces
+`no_baseline`. Persistent noise can also prevent a reference outside calibration
 before the pass starts. The validated reference is frozen before arming;
 there is no interval or minimum travel that ignores an early real impact.
 See [the preparation contract](COMPATIBILITY.md#pre-motion-stationary-preparation).
@@ -428,7 +459,7 @@ deadline or fail with `no_motion`; this does not establish an origin. Ordinary
 `G28` can finish on a fresh impact before motion proof; workflows also check
 motion and travel.
 
-When an accepted generic reference exceeds the original 20% quiet limit,
+During calibration, or when another generic reference exceeds the original 20% quiet limit,
 movement proof subtracts an allowance for its observed noise. Each sensor
 axis uses the larger deviation from the accepted mean to either observed
 extreme; status reports the applied `motion-proof noise bound XYZ` in g.
@@ -458,7 +489,7 @@ See [the exact calculation](COMPATIBILITY.md#generic-startup-motion-policy).
 
 Commanded/firmware step distances are not encoder measurements. Ten repeats
 cannot prove contact with the correct stop or absence of skipped steps.
-Starting calibration at 0.5 g does not establish that either problem is fixed.
+Changing the starting threshold does not establish that either problem is fixed.
 A softer impact at lower speed may also be undetectable. Mounting and actual
 physical behavior need operator validation.
 

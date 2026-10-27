@@ -1,5 +1,6 @@
 """Synthetic final-coordinate lifecycle and stationary-noise contracts only."""
 import contextlib
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
@@ -478,8 +479,8 @@ class NoiseWorkflowTests(unittest.TestCase):
             result = rig.workflow.last_result
             self.assertEqual(result["result"], "complete")
             self.assertEqual(rig.noise_calls, ["start", 1, 2, 3, "stop"])
-            self.assertEqual(result["recommendation"]["start_threshold_g"], {"x": 2.5, "y": 0.5})
-            self.assertEqual(rig.workflow.noise_seeds, {"x": 2.5, "y": 0.5})
+            self.assertEqual(result["recommendation"]["start_threshold_g"], {"x": 2.5, "y": 1.0})
+            self.assertEqual(rig.workflow.noise_seeds, {"x": 2.5, "y": 1.0})
             self.assertEqual(rig.scripts, [])
             self.assertEqual(rig.toolhead.moves, [])
             self.assertEqual(rig.toolhead.dwells, [])
@@ -499,7 +500,26 @@ class NoiseWorkflowTests(unittest.TestCase):
             rig.calibrate(save=0)
             self.assertEqual([call["threshold"] for call in rig.home_calls], [2.5] * 11)
             self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
-            self.assertEqual(rig.workflow.noise_seeds, {"y": 0.5})
+            self.assertEqual(rig.workflow.noise_seeds, {"y": 1.0})
+
+    def test_either_explicit_grid_parameter_bypasses_noise_seed(self):
+        for parameters, expected_start, expected_step in (
+                ({"START_THRESHOLD": 1, "STEP": .25}, 1.0, .25),
+                ({"START_THRESHOLD": 1}, 1.0, .5),
+                ({"STEP": .25}, .5, .25)):
+            with self.subTest(parameters=parameters), tempfile.TemporaryDirectory() as temp:
+                rig = NoiseRig({"charts_directory": temp, "calibration_start_threshold": .5,
+                                "calibration_step": .5})
+                rig.workflow.cmd_NOISE(GCmd())
+                seeds = dict(rig.workflow.noise_seeds)
+                self.assertGreater(seeds["x"], expected_start)
+                rig.calibrate(save=0, **parameters)
+                self.assertEqual([call["threshold"] for call in rig.home_calls], [expected_start] * 11)
+                self.assertEqual(rig.workflow.last_result["start_threshold_g"], expected_start)
+                self.assertEqual(rig.workflow.last_result["threshold_step_g"], expected_step)
+                self.assertEqual(rig.workflow.noise_seeds, seeds)
+                metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
+                self.assertNotIn("stationary_noise_seed", metadata)
 
     def test_idle_queue_preflight_rejects_even_fifty_ms_flushed_motion_and_no_stock_g28_needed(self):
         for busy in ((10.05, 10.0, True), (10.0, 10.0, False)):
@@ -548,14 +568,14 @@ class NoiseWorkflowTests(unittest.TestCase):
             rig.workflow.cmd_NOISE(GCmd())
             rig.owner.rails_by_axis["x"].info.speed = 80.0
             rig.calibrate(save=0)
-            self.assertEqual(rig.home_calls[0]["threshold"], 0.5)
+            self.assertEqual(rig.home_calls[0]["threshold"], 1.0)
             self.assertEqual(rig.workflow.noise_seeds, {})
         with tempfile.TemporaryDirectory() as temp:
             rig = NoiseRig({"charts_directory": temp, "calibration_max_threshold": 2.0})
             rig.workflow.cmd_NOISE(GCmd())
             self.assertEqual(rig.workflow.last_result["result"], "complete")
             self.assertIsNone(rig.workflow.last_result["recommendation"]["start_threshold_g"]["x"])
-            self.assertEqual(rig.workflow.noise_seeds, {"y": 0.5})
+            self.assertEqual(rig.workflow.noise_seeds, {"y": 1.0})
         for unknown_range in (False, True):
             with self.subTest(unknown_range=unknown_range), tempfile.TemporaryDirectory() as temp:
                 rig = NoiseRig({"charts_directory": temp, "calibration_max_threshold": 2.0},

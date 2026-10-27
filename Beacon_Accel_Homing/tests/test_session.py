@@ -356,6 +356,17 @@ class TravelCheckTest(unittest.TestCase):
             self._home(obj, endstop, 2, 2.0)
 
 class StatusTest(unittest.TestCase):
+    def test_calibration_reference_policy_is_visible_before_any_home(self):
+        obj = make_homing()
+        self.assertIsNone(obj.baseline_status)
+        messages = []
+        obj.cmd_STATUS(types.SimpleNamespace(respond_info=messages.append))
+        policy = next(message for message in messages if "baseline policy" in message)
+        self.assertIn("ordinary homing requires quiet XYZ", policy)
+        self.assertIn("fresh 100.00 ms / 50 sample reference", policy)
+        self.assertIn("without a quiet-range limit", policy)
+        self.assertIn("measured noise bounds remain active", policy)
+
     def test_status_is_a_copy(self):
         obj = make_homing()
         self.assertIsNone(obj.get_status(0.0)["sample_timing_fault"])
@@ -562,6 +573,86 @@ class EnablePreparationTest(unittest.TestCase):
                         with self.assertRaisesRegex(CommandError, "fresh quiet"):
                             self.begin(obj, endstop)
                         self.assert_unarmed_cleanup(obj, endstop)
+
+    def test_native_calibration_keeps_noisy_reference_envelope_and_first_raw_contact(self):
+        from test_single_touch import RampStepper
+        for threshold in (1.0, 8.0):
+            for axis in range(3):
+                with self.subTest(threshold=threshold, noisy_axis=axis):
+                    obj, endstop, _log, _lines = self.session()
+                    obj.threshold_g["x"] = threshold
+                    obj.workflows.session = {"mode": "calibration", "state": "running", "axis": "x"}
+                    obj.workflows.in_home, obj.workflows.home_axis = True, "x"
+                    plain, number = obj.reactor.on_pause, [0]
+                    def flow():
+                        if obj.preparation is None:
+                            plain()
+                            return
+                        number[0] += 1
+                        values = [0, 0, counts(1)]
+                        values[axis] += counts(0.7 if number[0] % 2 else -0.7)
+                        obj._inspect(batch(round(obj.reactor.now * 1000) - 4,
+                                           [values] * 5, delta_clock=4,
+                                           receive_time=obj.reactor.now))
+                    obj.reactor.on_pause = flow
+                    self.begin(obj, endstop)
+                    reference = obj.preparation
+                    self.assertFalse(reference.require_quiet)
+                    self.assertGreaterEqual(reference.last - reference.first + 1e-9, 0.1)
+                    self.assertGreaterEqual(reference.count, 50)
+                    self.assertAlmostEqual((reference.high[axis] - reference.low[axis])
+                                           * obj.session_scale["scale"] / 1000.0, 1.40625)
+                    means = reference.baseline()
+                    envelope = tuple(max(abs(low - mean), abs(high - mean))
+                                     for low, high, mean in zip(reference.low, reference.high, means))
+                    when = round(obj.reactor.now * 1000.0) / 1000.0 + 0.005
+                    endstop.get_steppers = lambda: [RampStepper(when, 5000.0, 100.0)]
+                    attempt = obj.prepare(endstop, when)
+                    self.assertEqual(attempt.bases, means)
+                    self.assertEqual(attempt.proof_noise, envelope)
+                    self.assertAlmostEqual(attempt.limit_raw * attempt.count_g, threshold)
+                    self.assertFalse(obj.baseline_status["quiet_range_enforced"])
+                    self.assertEqual(endstop._dispatch.started, [])
+                    self.assertEqual(endstop.get_mcu().log, [])
+                    obj.arm(attempt)
+                    obj.reactor.now = when + 0.004
+                    obj._inspect(batch(round(when * 1000),
+                                       [(counts(-threshold - 0.1), 0, counts(1))]
+                                       + [(0, 0, counts(1))] * 4,
+                                       delta_clock=4, receive_time=obj.reactor.now))
+                    self.assertEqual(attempt.reason, "impact")
+                    self.assertAlmostEqual(obj.onset_time(attempt), when, places=6)
+                    self.assertEqual(endstop.get_mcu().log, [("mcu", [7, HIT])])
+
+    def test_native_calibration_still_rejects_clipped_changed_scale_and_bad_timestamps(self):
+        for mode in ("clip", "scale", "stale", "future"):
+            with self.subTest(mode=mode):
+                obj, endstop, _log, _lines = self.session()
+                obj.workflows.session = {"mode": "calibration", "state": "running", "axis": "x"}
+                obj.workflows.in_home, obj.workflows.home_axis = True, "x"
+                plain = obj.reactor.on_pause
+                def flow():
+                    if obj.preparation is None:
+                        plain()
+                        return
+                    start = round(obj.reactor.now * 1000) - 4
+                    if mode == "scale":
+                        obj.helper._stream_en = 1
+                        obj.helper._scale = dict(obj.helper._scale, id=99)
+                    elif mode == "stale":
+                        obj.reactor.now += 0.1
+                    elif mode == "future":
+                        start += 20
+                    values = (0, plugin.CLIPPED if mode == "clip" else 0, counts(1))
+                    obj._batch_hook(batch(start, [values] * 5, delta_clock=4,
+                                          receive_time=obj.reactor.now))
+                obj.reactor.on_pause = flow
+                with self.assertRaises(CommandError):
+                    self.begin(obj, endstop)
+                self.assert_unarmed_cleanup(obj, endstop)
+                self.assertFalse(obj.baseline_status["quiet_range_enforced"])
+                self.assertEqual(obj.sensor_fault, {"clip": "invalid_data", "scale": "scale",
+                                                    "stale": "stale_data", "future": "stale_data"}[mode])
 
     def test_old_delivered_peak_is_excluded_then_ringdown_must_be_quiet(self):
         obj, endstop, _log, _lines = self.session()

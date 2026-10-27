@@ -115,6 +115,15 @@ class GCmd:
             raise CommandError("invalid " + name)
         return value
 
+    def get_float(self, name, default=None, minval=None, maxval=None):
+        try:
+            value = float(self.get(name, default))
+        except (TypeError, ValueError):
+            raise CommandError("invalid " + name)
+        if (minval is not None and value < minval) or (maxval is not None and value > maxval):
+            raise CommandError("invalid " + name)
+        return value
+
     def respond_info(self, message):
         self.responses.append(message)
 
@@ -1113,7 +1122,7 @@ class CalibrationTests(unittest.TestCase):
         rig.toolhead.position[:2] = [12.0, 19.0]
         rig.calibrate(save=0)
         first = rig.home_calls[0]
-        self.assertEqual(first["threshold"], 0.5)
+        self.assertEqual(first["threshold"], 1.0)
         self.assertEqual(first["homed_axes"], "z")
         self.assertEqual(first["position"], [12.0, 19.0, 40.0, 6.0])
         self.assertEqual(first["attempt"], 1)
@@ -1132,7 +1141,7 @@ class CalibrationTests(unittest.TestCase):
         for axis in "XY":
             rig = Rig()
             rig.calibrate(axis)
-            self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 11)
+            self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 11)
             self.assertEqual(rig.scripts, ["G28 " + axis] * 11 + ["SAVE_CONFIG"])
             self.assertEqual(len(rig.toolhead.moves), 11)
             index = "XY".index(axis)
@@ -1167,8 +1176,8 @@ class CalibrationTests(unittest.TestCase):
             run = session["run_id"]
             self.assertEqual(rig.toolhead.moves, [])
             self.assertEqual(rig.scripts, ["G28 X"])
-            self.assertEqual(rig.home_calls[0]["threshold"], 0.5)
-            self.assertEqual(session["candidate"], 1.0)
+            self.assertEqual(rig.home_calls[0]["threshold"], 1.0)
+            self.assertEqual(session["candidate"], 1.25)
             self.assertEqual(session["successes"], 0)
             self.assertEqual(session["attempts"], 1)
             self.assertEqual(session["state"], "waiting")
@@ -1183,12 +1192,12 @@ class CalibrationTests(unittest.TestCase):
             self.assertFalse(any("ACCEL_HOMING_CONFIRM" in text or "TOKEN" in text
                                  for text in rig.output))
             rig.calibrate()
-            self.assertEqual(rig.home_calls[1]["threshold"], 1.0)
+            self.assertEqual(rig.home_calls[1]["threshold"], 1.25)
             self.assertEqual(rig.home_calls[1]["attempt"], 2)
             self.assertEqual(rig.home_calls[1]["homed_axes"], "z")
             self.assertEqual(rig.scripts, ["G28 X"] * 12 + ["SAVE_CONFIG"])
             self.assertEqual(rig.workflow.last_result["run_id"], run)
-            self.assertEqual(rig.workflow.last_result["threshold_g"], 1.0)
+            self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
 
     def test_pressed_result_is_never_a_success_even_with_apparent_step_travel(self):
         rig = Rig()
@@ -1196,7 +1205,7 @@ class CalibrationTests(unittest.TestCase):
         rig.calibrate()
         self.assertEqual(rig.workflow.session["successes"], 0)
         self.assertEqual(rig.toolhead.moves, [])
-        self.assertEqual(rig.workflow.session["candidate"], 1.0)
+        self.assertEqual(rig.workflow.session["candidate"], 1.25)
 
     def test_success_count_resets_after_threshold_changes(self):
         rig = Rig()
@@ -1208,7 +1217,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(rig.workflow.session["attempts"], 3)
         rig.calibrate()
         self.assertEqual(rig.workflow.last_result["successes"], 10)
-        self.assertEqual(rig.workflow.last_result["threshold_g"], 1.0)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
         self.assertEqual(len(rig.scripts), 15)
 
     def test_suspicious_long_travel_or_no_motion_abort_without_threshold_escalation(self):
@@ -1226,7 +1235,8 @@ class CalibrationTests(unittest.TestCase):
 
     def test_threshold_ceiling_and_attempt_ceiling_abort(self):
         for ceiling in ("threshold", "sensor_scale", "attempts"):
-            rig = Rig({"calibration_max_threshold": 0.5} if ceiling == "threshold" else {})
+            rig = Rig({"calibration_start_threshold": 0.5, "calibration_max_threshold": 0.5}
+                      if ceiling == "threshold" else {})
             if ceiling == "sensor_scale":
                 rig.owner.full_scale_g = 0.625
             if ceiling == "attempts":
@@ -1317,6 +1327,136 @@ class CalibrationTests(unittest.TestCase):
         self.assertFalse(rig.capture_active)
 
 
+class CalibrationGridTests(unittest.TestCase):
+    def test_default_grid_and_explicit_configuration_apply_only_to_requested_axis(self):
+        for axis in ("X", "Y"):
+            for options, start, step in (({}, 1.0, .25),
+                    ({"calibration_start_threshold": .5, "calibration_step": .5}, .5, .5)):
+                with self.subTest(axis=axis, options=options):
+                    rig = Rig(options)
+                    rig.home_results.append({"travel_mm": 2.0})
+                    rig.calibrate(axis, save=0)
+                    self.assertEqual(rig.scripts, ["G28 " + axis])
+                    self.assertEqual(rig.home_calls[0]["threshold"], start)
+                    self.assertEqual(rig.workflow.session["candidate"], start + step)
+                    self.assertEqual(rig.toolhead.moves, [])
+                    status = rig.workflow.get_status(0)["active"]
+                    self.assertEqual(status["start_threshold_g"], start)
+                    self.assertEqual(status["threshold_step_g"], step)
+                    self.assertEqual(status["attempt_limit"], 40)
+                    self.assertFalse(status["quiet_range_enforced"])
+                    self.assertFalse(status["explicit_calibration_grid"])
+                    self.assertFalse(rig.workflow.calibration_reference(axis.lower()))
+
+    def test_explicit_grid_survives_resume_and_does_not_change_configuration(self):
+        for axis in ("X", "Y"):
+            with self.subTest(axis=axis):
+                rig = Rig({"calibration_start_threshold": .5, "calibration_step": .5})
+                rig.home_results.extend([{"travel_mm": 2.0}, {"travel_mm": 2.0}])
+                contexts = []
+                def observe(current):
+                    contexts.append((rig.workflow.calibration_reference(current),
+                                     rig.workflow.calibration_reference("y" if current == "x" else "x")))
+                rig.on_home = observe
+                rig.calibrate(axis, save=0, START_THRESHOLD=1, STEP=.25)
+                self.assertEqual(rig.workflow.session["candidate"], 1.25)
+                self.assertTrue(rig.workflow.get_status(0)["active"]["explicit_calibration_grid"])
+                rig.calibrate(axis)
+                self.assertEqual(rig.workflow.session["candidate"], 1.5)
+                rig.calibrate(axis, START_THRESHOLD=1, STEP=.25)
+                self.assertEqual([call["threshold"] for call in rig.home_calls],
+                                 [1.0, 1.25] + [1.5] * 11)
+                self.assertEqual(rig.scripts, ["G28 " + axis] * 13)
+                self.assertEqual(contexts, [(True, False)] * 13)
+                self.assertEqual(rig.workflow.start_threshold, .5)
+                self.assertEqual(rig.workflow.threshold_step, .5)
+                self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                self.assertFalse(rig.workflow.calibration_reference(axis.lower()))
+                other = "y" if axis == "X" else "x"
+                self.assertNotIn(("accel_homing_model default", other + "_threshold"), rig.configfile.saved)
+                for coordinates, _speed in rig.toolhead.moves:
+                    self.assertIsNone(coordinates["xy".index(other)])
+                    self.assertIsNone(coordinates[2])
+                result = rig.workflow.last_result
+                self.assertEqual(result["start_threshold_g"], 1.0)
+                self.assertEqual(result["threshold_step_g"], .25)
+                self.assertFalse(result["quiet_range_enforced"])
+                metadata = json.loads(rig.configfile.saved[("accel_homing_model default", axis.lower() + "_metadata")])
+                self.assertEqual(metadata["calibration_start_threshold_g"], 1.0)
+                self.assertEqual(metadata["calibration_step_g"], .25)
+                self.assertFalse(metadata["calibration_quiet_range_enforced"])
+
+    def test_invalid_grid_is_rejected_before_preflight_or_workflow_effects(self):
+        bad = [{"START_THRESHOLD": value} for value in (.499, 0, -1, 12.1, 16, "nan", "inf", "bad")]
+        bad += [{"STEP": value} for value in (.099, 0, -1, 3.01, "nan", "inf", "bad")]
+        for parameters in bad:
+            with self.subTest(parameters=parameters):
+                rig = Rig()
+                before = rig.effects()
+                with mock.patch.object(rig.workflow, "_preflight") as preflight, self.assertRaises(CommandError):
+                    rig.calibrate(save=0, **parameters)
+                preflight.assert_not_called()
+                self.assertEqual(rig.effects(), before)
+                self.assertIsNone(rig.workflow.session)
+                self.assertFalse(rig.capture_active)
+        rig = Rig()
+        rig.owner.full_scale_g = 2.0
+        with self.assertRaisesRegex(CommandError, "ceiling"):
+            rig.calibrate(save=0, START_THRESHOLD=1.7)
+        self.assertIsNone(rig.workflow.session)
+        self.assertEqual(rig.scripts, [])
+
+    def test_resume_cannot_change_original_grid_even_to_current_candidate(self):
+        rig = Rig()
+        rig.home_results.append({"travel_mm": 2.0})
+        rig.calibrate(save=0, START_THRESHOLD=1, STEP=.25)
+        session = rig.workflow.session
+        for parameters, message in (({"START_THRESHOLD": 1.25}, "START_THRESHOLD cannot change"),
+                                    ({"STEP": .5}, "STEP cannot change")):
+            before = rig.effects()
+            with self.assertRaisesRegex(CommandError, message):
+                rig.calibrate(**parameters)
+            self.assertEqual(rig.effects(), before)
+            self.assertIs(rig.workflow.session, session)
+        rig.calibrate(START_THRESHOLD=1, STEP=.25)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
+
+    def test_calibration_reference_requires_every_trial_context_condition(self):
+        rig = Rig()
+        workflow = rig.workflow
+        valid = {"mode": "calibration", "state": "running", "axis": "x"}
+        workflow.session, workflow.in_home, workflow.home_axis = dict(valid), True, "x"
+        self.assertIs(workflow.calibration_reference("x"), True)
+        for key, values in (("mode", ("test", "charts", "accuracy", "noise")),
+                            ("state", ("starting", "waiting")), ("axis", ("y", None))):
+            for value in values:
+                workflow.session = dict(valid, **{key: value})
+                self.assertIs(workflow.calibration_reference("x"), False)
+        workflow.session = dict(valid)
+        for in_home, home_axis in ((False, "x"), (1, "x"), (True, "y"), (True, None)):
+            workflow.in_home, workflow.home_axis = in_home, home_axis
+            self.assertIs(workflow.calibration_reference("x"), False)
+        workflow.in_home, workflow.home_axis, workflow.session = True, "x", None
+        self.assertIs(workflow.calibration_reference("x"), False)
+
+    def test_failed_trial_clears_bypass_and_reports_chosen_grid(self):
+        rig = Rig()
+        error = CommandError("synthetic valid-data failure")
+        rig.home_results.append(error)
+        rig.on_home = lambda axis: self.assertTrue(rig.workflow.calibration_reference(axis))
+        with self.assertRaises(CommandError) as caught:
+            rig.calibrate("Y", save=0, START_THRESHOLD=1, STEP=.25)
+        self.assertIs(caught.exception, error)
+        self.assertFalse(rig.workflow.calibration_reference("y"))
+        self.assertIsNone(rig.workflow.session)
+        self.assertEqual(rig.workflow.last_result["result"], "aborted")
+        self.assertEqual(rig.workflow.last_result["start_threshold_g"], 1.0)
+        self.assertEqual(rig.workflow.last_result["threshold_step_g"], .25)
+        self.assertFalse(rig.workflow.last_result["quiet_range_enforced"])
+        self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+        self.assertEqual(rig.configfile.saved, {})
+
+
 class RepeatabilityCalibrationTests(unittest.TestCase):
     def test_exact_one_point_five_range_is_rejected_including_decimal_endpoints(self):
         for axis, low, high in (("X", 150.0, 151.5), ("X", 150.1, 151.6),
@@ -1328,7 +1468,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                     rig.calibrate(axis)
                 self.assertEqual(rig.scripts, ["G28 " + axis] * 11)
                 self.assertEqual(len(rig.toolhead.moves), 10)
-                self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 11)
+                self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 11)
                 self.assertEqual(rig.configfile.saved, {})
                 self.assertEqual(rig.workflow.last_result["result"], "aborted")
                 self.assertIsNone(rig.workflow.session)
@@ -1370,7 +1510,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                         rig.calibrate(axis)
                     self.assertEqual(rig.scripts, ["G28 " + axis] * 3)
                     self.assertEqual(len(rig.toolhead.moves), 2)
-                    self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 3)
+                    self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 3)
                     self.assertEqual(rig.configfile.saved, {})
                     self.assertIsNone(rig.workflow.session)
                     self.assertEqual(rig.workflow.last_result["result"], "aborted")
@@ -1444,7 +1584,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 rig.home_results.extend([{}, {"travel_mm": 151.0}, {"travel_mm": early}])
                 rig.calibrate(save=0)
                 session = rig.workflow.session
-                self.assertEqual(session["candidate"], 1.0)
+                self.assertEqual(session["candidate"], 1.25)
                 self.assertEqual(session["state"], "waiting")
                 self.assertEqual(session["successes"], 0)
                 self.assertEqual(session["validation_records"], [])
@@ -1462,8 +1602,8 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 self.assertEqual(metadata["min_commanded_travel_mm"], 148.0)
                 self.assertEqual(metadata["max_commanded_travel_mm"], 148.0)
                 self.assertEqual(metadata["repeatability_spread_mm"], 0.0)
-                self.assertEqual(rig.workflow.last_result["threshold_g"], 1.0)
-                self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 3 + [1.0] * 11)
+                self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
+                self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 3 + [1.25] * 11)
 
     def test_repeatability_failure_after_retry_still_cannot_stage_or_raise_threshold(self):
         rig = Rig()
@@ -1472,7 +1612,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
         rig.home_results.extend([{}, {"travel_mm": 150.0}, {"travel_mm": 151.5}])
         with self.assertRaisesRegex(CommandError, "repeatability"):
             rig.calibrate()
-        self.assertEqual([call["threshold"] for call in rig.home_calls], [0.5] * 3 + [1.0] * 3)
+        self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 3 + [1.25] * 3)
         self.assertEqual(rig.configfile.saved, {})
         self.assertEqual(rig.scripts, ["G28 X"] * 6)
         self.assertEqual(len(rig.toolhead.moves), 4)
@@ -1501,7 +1641,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
             "missing discovery": lambda w: w.session.update(candidate_attempt=None),
             "unqualified discovery": lambda w: w.session.update(candidate_qualified=False),
             "wrong axis": lambda w: w.session["validation_records"][-1].update(axis="y"),
-            "wrong candidate": lambda w: w.session["validation_records"][-1].update(workflow_threshold_g=1.0),
+            "wrong candidate": lambda w: w.session["validation_records"][-1].update(workflow_threshold_g=2.0),
             "wrong run": lambda w: w.session["validation_records"][-1].update(run_id="other-run"),
             "discovery counted": lambda w: w.session["validation_records"][-1].update(workflow_phase="discovery"),
             "repeated attempt": lambda w: w.session["validation_records"][-1].update(workflow_attempt=2),
@@ -1818,10 +1958,10 @@ class ModelTests(unittest.TestCase):
                     calibrated.calibrate(axis.upper())
                     if early:
                         calibrated.calibrate(axis.upper())
-                    threshold = 1.0 if early else 0.5
-                    self.assertEqual(calibrated.home_calls[0]["threshold"], 0.5)
+                    threshold = 1.25 if early else 1.0
+                    self.assertEqual(calibrated.home_calls[0]["threshold"], 1.0)
                     if early:
-                        self.assertEqual(calibrated.home_calls[1]["threshold"], 1.0)
+                        self.assertEqual(calibrated.home_calls[1]["threshold"], 1.25)
                     self.assertEqual(calibrated.scripts[-1], "SAVE_CONFIG")
                     options = {key: value for (section, key), value
                                in calibrated.configfile.saved.items()}

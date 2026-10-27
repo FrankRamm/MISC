@@ -423,16 +423,22 @@ assign coordinates to mark either axis homed.
 Then run in the printer console:
 
 ```gcode
-ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
+ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
 ```
 
 `CENTERED=1` states that the toolhead is already physically centered and
-authorizes the first candidate home, starting at 0.5 g by default. It does not
+authorizes the first candidate home, starting at 1.0 g by default. It does not
 measure the manual position. After an early trigger, XY is released and made
 unhomed; center it manually again and reissue the same calibration command to
-resume, keeping the same `AXIS` and optional `SAVE_CONFIG` value. The console
+resume, keeping the same `AXIS`, start/step and optional `SAVE_CONFIG` value. The console
 reports manual-recentering instructions; the pending calibration retains its
-configured timeout. The default 0.5 g step makes the first retry 1.0 g.
+configured timeout. The default 0.25 g step makes the first retry 1.25 g.
+The explicit start/step parameters override older configuration and skip a
+stored noise seed. Repeating them on resume continues at the current candidate;
+it does not restart the grid. Use `AXIS=Y` to calibrate only Y instead.
+Calibration skips the stationary peak-to-peak quietness gate, while retaining
+fresh offset samples, data fault checks and movement proof. Other workflows
+and ordinary homing still enforce their quietness requirement.
 One geometry-qualified discovery must be followed by ten additional consecutive
 geometry-qualified homes at the same candidate. Their commanded-travel range
 (`max - min`) must be **strictly less than 1.5 mm**; exactly 1.5 mm fails.
@@ -453,9 +459,9 @@ When the sensor range is known, the effective value must be at most 80% of it
 checked again before arming. Native Beacon without known clip/range data keeps
 its existing behavior, and the derived raw trigger limit must remain finite
 and positive. Installation and updates preserve existing manual values.
-An explicit existing
-`calibration_start_threshold` is preserved; set it to `0.5` or leave it absent
-to use the new default. Updating does not replace a saved model's threshold;
+Explicit existing `calibration_start_threshold` and `calibration_step` values
+are preserved. Set them to `1.0` and `0.25`, leave both absent for the new
+defaults, or use the per-command parameters above. Updating does not replace a saved model's threshold;
 run calibration to create a new one. Previous models remain loadable, but
 updating does not qualify their historical distances under the new 1.5 mm rule.
 

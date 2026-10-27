@@ -142,8 +142,10 @@ nozzle/bed clearance for XY travel because the safe Z hop will not run.
 
 Motor enable and current setup can produce an acceleration transient that
 resembles a stop impact. Both Beacon and generic paths therefore acquire a
-new quiet reference before every homing pass, including normal `G28`, workflow
-homes, already enabled motors and second touches.
+new fresh reference before every homing pass, including normal `G28`, workflow
+homes, already enabled motors and second touches. Ordinary homing, TEST,
+CHARTS and ACCURACY additionally require its peak-to-peak range to be quiet.
+Active calibration trials skip that range requirement as described below.
 
 The preparation order is:
 
@@ -159,10 +161,12 @@ The preparation order is:
    samples from before the cutoff and require at least 50 fresh,
    contiguous samples spanning `baseline_time` (default 0.1 s). For native
    Beacon, peak-to-peak variation on each of the three sensor axes must not
-   exceed `max(0.20 * impact_threshold, min(0.5 g, impact_threshold))`, including
-   a calibration candidate. The floor is bounded by 0.5 g and the actual
+   exceed `max(0.20 * impact_threshold, min(0.5 g, impact_threshold))` when
+   quietness is required. The floor is bounded by 0.5 g and the actual
    threshold; it is not a user setting. Configured generic accelerometers use
    `max(0.20 * impact_threshold, baseline_noise_floor)` on each sensor axis.
+   Calibration still requires the full fresh interval but does not reject it
+   for exceeding either range rule.
 4. Freeze the validated reference before `home_start` arms trigger dispatch.
    The first valid impact at or after arming remains eligible, including
    samples delivered in the batch that crosses the arming boundary. There is
@@ -171,25 +175,37 @@ The preparation order is:
 `baseline_noise_floor` is in g, defaults to 0.7, and accepts finite values
 from 0 to 0.7 inclusive. Zero restores the previous 20% limit. It affects only
 configured generic accelerometers, including Cartographer's separately
-configured ADXL/LIS object. At a 0.5 g or 1 g calibration candidate, the default
-stationary variation limit is 0.7 g; the impact threshold stays at the selected
-candidate. An explicit older `baseline_noise_floor` still takes precedence;
+configured ADXL/LIS object outside calibration. At a 0.5 g or 1 g homing
+threshold, the default stationary variation limit is 0.7 g; the impact
+threshold stays selected. An explicit older `baseline_noise_floor` still takes precedence;
 set it to 0.7 to use this allowance on an existing configuration. The required
 reference duration, sample count and timestamp limits remain unchanged.
 Generic references above the original 20% limit retain the measured-noise
 envelope in movement proof, which can still fail closed with `no_motion`.
-Native Beacon independently uses its bounded 0.5 g floor. At a 0.5 g candidate
+Native Beacon independently uses its bounded 0.5 g floor outside calibration. At a 0.5 g threshold
 its stationary variation limit is 0.5 g and its raw impact threshold remains
 0.5 g. Manual thresholds below 0.5 g cap the floor at the actual threshold;
 they remain finite-positive settings without a new minimum. Native thresholds
 at least 2.5 g retain their previous quiet limit.
 References admitted only by the wider limit use the motion checks below.
 
+The calibration exception is derived from the current workflow context:
+mode `calibration`, state `running`, the matching selected axis, and an active
+`_home` call for that same axis. It is not a global switch and is not active
+while awaiting manual centering or after cleanup. The reference retains the
+actual XYZ minimum, maximum and mean over all samples in its full rolling
+duration. It always supplies the measured maximum deviations to movement proof,
+even if a later, higher impact threshold would otherwise disable that envelope.
+High noise can still produce `no_motion`; it cannot establish motion or justify
+another threshold increment by itself. The `quiet_range_enforced` status field
+and diagnostic text distinguish this fresh reference from a quiet-qualified one.
+
 Acquisition has a `baseline_time + 0.5 s` deadline measured after queued setup
-and settling finish. Persistent vibration or no sample flow fails with
-`no_baseline` before trigger dispatch is armed. Stale, future, nonmonotonic,
+and settling finish. No sample flow fails with `no_baseline` before trigger
+dispatch is armed. Persistent vibration can also cause that failure outside
+calibration. Stale, future, nonmonotonic,
 gapped, clipped, saturated or scale-changed data also aborts preparation.
-The reference uses a bounded rolling interval. A range violation removes only
+The reference uses a bounded rolling interval. When quietness is required, a range violation removes only
 the oldest prefix needed to leave a contiguous suffix within the XYZ limits.
 Older samples are otherwise removed only when the remaining samples still
 span the complete duration and include at least 50 samples. The sample at or
@@ -366,7 +382,7 @@ For each X/Y axis, let `peak` be its largest absolute mean-removed deviation
 across all three windows. The initial candidate is the smallest configured
 `calibration_start_threshold + n * calibration_step` value at least
 `max(calibration_start_threshold, 1.2 * peak, peak + 0.1 g)`. Thus a 2 g peak
-gives 2.5 g with the default 0.5 g start/step. Exact measured peaks and the
+gives 2.5 g with the default 1 g start and 0.25 g step. Exact measured peaks and the
 upward-rounded candidates remain separate fields. The candidate must not
 exceed `min(calibration_max_threshold, 15 g, 0.8 * sensor_full_scale_g)`.
 An over-ceiling candidate is unavailable rather than clamped downward.
@@ -374,8 +390,10 @@ An unknown physical sensor range also prevents a candidate; either case still
 exports all three valid measured windows and their statistics.
 
 These are **initial calibration candidates, NOT calibrated impact thresholds**.
-Only a later separate `ACCEL_HOMING_CALIBRATE` command consumes the matching
-axis's candidate, leaving ordinary/manual thresholds and saved models alone.
+Only a later separate `ACCEL_HOMING_CALIBRATE` command without explicit
+`START_THRESHOLD` or `STEP` consumes the matching axis's candidate, leaving
+ordinary/manual thresholds and saved models alone. Either explicit grid
+parameter skips automatic seed selection for that run.
 Unused candidates last until restart and are discarded when sensor or
 calibration context changes; a new run, cancellation, shutdown or manual
 threshold change also clears them. Saving X normally restarts Klipper, so
@@ -385,11 +403,11 @@ strict ten-home range qualification remain in force.
 
 Stationary vibration in the current motor/fan state does not predict motor
 enable, hold-to-run-current or first-step transients. It does not certify
-contact detection or guarantee that noise will be filtered. Homing still
-requires its fresh quiet reference: high peak-to-peak variation can fail
-`no_baseline` even when the heuristic supplies a higher candidate. Motion
-proof, raw impact eligibility, freshness/fault gates and timing policies are
-unchanged.
+contact detection or guarantee that noise will be filtered. Calibration still
+requires a fresh offset reference and proof of movement, while skipping its
+quiet-range gate. Ordinary homing and the other workflows retain quietness
+qualification. Raw impact eligibility, freshness/fault gates and timing limits
+remain active.
 
 ## Centered calibration
 
@@ -402,11 +420,15 @@ measurement. The workflow does not assign a center coordinate or mark either
 axis homed before the actual home. No further confirmation is requested; the
 first homing pass starts after stationary preparation succeeds.
 
-The first home tests the candidate threshold, starting at 0.5 g by default or
-at the available transient candidate from stationary noise measurement below.
+The first home tests the candidate threshold, starting at 1.0 g by default or
+at an available transient candidate from stationary noise measurement.
 Calibration and saved models accept finite thresholds from 0.5 to 15 g, with
 the configured calibration ceiling and sensor-range limit still applied.
-The default step stays 0.5 g, so the first early-trigger retry uses 1.0 g.
+The default step is 0.25 g, so the first early-trigger retry uses 1.25 g.
+`START_THRESHOLD=1 STEP=0.25` selects those values explicitly for a run and
+skips any stored noise seed. Parameters are validated before workflow effects,
+stored in the session, and cannot change on resume. Repeating the initial
+start parameter while resuming does not reset the current candidate.
 Previous models at 1 g and 2 g remain valid. Manual `threshold`, `x_threshold`
 and `y_threshold` settings in either section, and both `SET_ACCEL_HOMING` and
 `SET_BEACON_ACCEL_HOMING`, accept any finite value greater than 0 g. They have
@@ -418,9 +440,12 @@ Beacon stream already in use. Native Beacon without known clip/range data
 retains the existing behavior without an invented upper limit. A derived raw
 trigger limit must also remain finite and positive before arming. These manual
 settings do not change the separate 0.5–15 g calibration/model bounds.
-An explicit existing `calibration_start_threshold` is preserved. The 0.5 g
-default applies when that setting is absent or set to 0.5; updating does not
-replace any saved model threshold.
+Explicit existing `calibration_start_threshold` and `calibration_step` settings
+are preserved unless a command overrides them for that run. Updating does not
+replace any saved model threshold. The independent default 40-attempt cap
+includes discovery and ten validation homes. A finer grid can exhaust that
+cap before reaching the configured threshold ceiling or completing validation;
+this change does not add automatic attempts.
 One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
 Each accepted home must exceed 10 mm of commanded travel and fall within the
@@ -468,9 +493,9 @@ successful calibration records the new range qualification.
 
 ## Native Beacon with an expanded reference
 
-A native reference whose accepted peak-to-peak variation exceeds 20% of the
-active impact threshold carries an observed noise envelope. Each sensor axis
-uses `max(abs(low - mean), abs(high - mean))`; a reference within the previous
+A native calibration reference, or another reference whose accepted peak-to-peak
+variation exceeds 20% of the active impact threshold, carries an observed noise
+envelope. Each sensor axis uses `max(abs(low - mean), abs(high - mean))`; a non-calibration reference within the previous
 limit keeps the legacy native motion and already-pressed path.
 
 For an expanded reference, motion proof uses a lower velocity bound after
@@ -556,8 +581,8 @@ the calibration/test/chart workflows separately reject suspect motion/travel.
 A separate `motion_seen` proof allows slow workflow homes without changing
 Beacon's historical already-pressed cutoff.
 
-If any axis of an accepted generic reference exceeds the original 20% quiet
-limit, movement proof subtracts an allowance for observed stationary noise.
+During calibration, or if any axis of another generic reference exceeds the
+original 20% quiet limit, movement proof subtracts an allowance for observed stationary noise.
 For each sensor axis `i`, the accepted window supplies its low, high and mean:
 
 ```text
@@ -673,6 +698,6 @@ Distance qualification uses commanded/firmware step positions, not encoder
 measurements. An accelerometer plus step counts cannot distinguish every jam,
 skipped step or wrong physical stop from valid motion. A qualifying discovery,
 ten validation repeats and a saved model are tuning evidence, not independent
-physical metrology or safe stopping certification. Starting at 0.5 g allows a
-lower candidate to be evaluated; it does not prove that skipped steps or
-inconsistent physical homing are fixed.
+physical metrology or safe stopping certification. Choosing a different start
+or step does not prove that skipped steps or inconsistent physical homing are
+fixed.

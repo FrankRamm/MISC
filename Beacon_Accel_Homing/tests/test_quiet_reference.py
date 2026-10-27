@@ -4,7 +4,7 @@ import types
 import unittest
 from unittest import mock
 
-from harness import CommandError, plugin, stationary_stream
+from harness import CommandError, make_homing, plugin, stationary_stream
 from test_backends import G, feed, generic, samples
 from test_session import FakeRail, info, with_endstops
 
@@ -184,6 +184,56 @@ class QuietReferenceTest(unittest.TestCase):
             self.assertEqual(reference.count, 50)
             self.assertFalse(reference.overflow)
             self.assertIsNotNone(reference.baseline())
+
+    def test_calibration_reference_keeps_all_noisy_rows_and_full_count_duration_and_capacity(self):
+        reference = plugin.QuietReference("x", -1.0, 0.1, 700.0, require_quiet=False)
+        rows = []
+        for number in range(641):
+            sign = -1 if number % 4 == 0 else 1
+            rows.append((number / 3200.0, (sign * 900, sign * 1100, 1000 + sign * 1300)))
+            self.assertIsNone(reference.add(*rows[-1]))
+            if number < 320:
+                self.assertIsNone(reference.baseline())
+        self.assert_window(reference, rows[-321:])
+        self.assertEqual(reference.resets, 0)
+        self.assertTrue(all(high - low > reference.limit
+                            for low, high in zip(reference.low, reference.high)))
+        sparse = plugin.QuietReference("x", -1.0, 0.1, 700.0, require_quiet=False)
+        for number in range(49):
+            sparse.add(number / 480.0, (number * 900, 0, 1000))
+        self.assertIsNone(sparse.baseline())
+        with mock.patch.object(plugin, "BASELINE_MAX_SAMPLES", 50):
+            bounded = plugin.QuietReference("x", -1.0, 0.1, 700.0, require_quiet=False)
+            for number in range(50):
+                self.assertIsNone(bounded.add(number / 3200.0, (number * 900, 0, 1000)))
+            self.assertEqual(bounded.add(50 / 3200.0, (0, 0, 1000)), "baseline_overflow")
+            self.assertTrue(bounded.overflow)
+            self.assertIsNone(bounded.baseline())
+
+    def test_calibration_keeps_measured_envelope_when_threshold_exceeds_reference_range(self):
+        for factory in (make_homing, generic):
+            for require_quiet in (False, True):
+                with self.subTest(backend=factory.__name__, require_quiet=require_quiet):
+                    obj = factory()
+                    count_g = obj.session_scale["scale"] / 1000.0
+                    reference = plugin.QuietReference("x", -1.0, 0.1, 2.0 / count_g,
+                                                      require_quiet=require_quiet)
+                    for number in range(321):
+                        sign = -1 if number % 4 == 0 else 1
+                        reference.add(number / 3200.0,
+                                      tuple(value / count_g for value in
+                                            (sign * 0.65, sign * 0.3, 1.0 + sign * 0.14)))
+                    means = reference.baseline()
+                    expected = tuple(max(abs(low - mean), abs(high - mean))
+                                     for low, high, mean in zip(reference.low, reference.high, means))
+                    for threshold in (1.0, 1.25, 8.0):
+                        obj.threshold_g["x"] = threshold
+                        envelope = obj._reference_motion_noise(reference, means, "x")
+                        if require_quiet and threshold == 8.0:
+                            self.assertIsNone(envelope)
+                        else:
+                            self.assertEqual(envelope, expected)
+                    self.assertGreater(expected[0], (reference.high[0] - reference.low[0]) / 2.0)
 
 
 class RollingReferenceIntegrationTest(unittest.TestCase):

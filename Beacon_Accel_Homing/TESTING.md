@@ -1,5 +1,39 @@
 # Offline verification
 
+## Calibration references and selected threshold grids — 2026-10-27
+
+The package passed **665 tests** with:
+
+```bash
+python -B -m unittest discover -s Beacon_Accel_Homing/tests -v
+```
+
+The integrated run completed in 9.653 seconds with no failures, errors or
+skips. `git diff --check` also passed. No printer or printer service was
+accessed. Earlier sections describe their historical revisions and defaults.
+
+Calibration now skips only the peak-to-peak quietness gate during an active
+trial for the selected axis. Synthetic generic traces with XYZ ranges of
+1.313/0.604/0.281 g retain a complete 100 ms reference, its actual mean and
+maximum-deviation envelope. The envelope remains active at higher candidates;
+stationary noise or bounded bias cannot become proof of movement merely by
+raising the impact threshold. Native and generic first-sample contact tests
+retain raw threshold detection without a blanking interval.
+
+New regressions cover full duration/count and capacity limits; missing, stale,
+future, duplicated, gapped, invalid, clipped, saturated and scale-changed data;
+other workflow and ordinary-homing quietness; and rejection of an expired or
+out-of-scope calibration reference before arming. Status distinguishes a fresh
+calibration reference from a quiet-qualified reference.
+
+Workflow defaults are 1.0 g start and 0.25 g step. Selected-axis fixtures check
+1.0 → 1.25 → 1.5 g progression, unchanged configuration, explicit command-grid
+precedence over noise seeds, immutable resume parameters, value/ceiling checks
+before effects, and cleanup on failure. The existing 40-attempt limit,
+threshold ceilings and ten-home qualification are unchanged. These tests
+verify software behavior; they do not establish physical homing success on
+the user's printer.
+
 ## Rolling quiet references and warmup continuity — 2026-10-27
 
 The package passed **647 tests** with:

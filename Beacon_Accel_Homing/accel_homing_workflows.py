@@ -182,9 +182,9 @@ class AccelHomingWorkflows:
             for axis, threshold in self.model.thresholds.items():
                 if axis not in self.manual_axes:
                     owner.threshold_g[axis] = threshold
-        self.start_threshold = config.getfloat("calibration_start_threshold", 0.5,
+        self.start_threshold = config.getfloat("calibration_start_threshold", 1.0,
                                                minval=0.5, maxval=15.0)
-        self.threshold_step = config.getfloat("calibration_step", 0.5,
+        self.threshold_step = config.getfloat("calibration_step", 0.25,
                                               minval=0.1, maxval=3.0)
         self.max_threshold = config.getfloat("calibration_max_threshold", 12.0,
                                              minval=self.start_threshold, maxval=15.0)
@@ -562,6 +562,9 @@ class AccelHomingWorkflows:
             session["finish_interrupted"] = result.get("reason", "workflow interrupted during PNG export")
             return
         if session is not None:
+            if session["mode"] == "calibration":
+                result = dict(result, **{key: session[key] for key in (
+                    "start_threshold_g", "threshold_step_g", "quiet_range_enforced")})
             session["finishing"] = True
             session["finish_result"] = result.get("result")
         try:
@@ -638,9 +641,37 @@ class AccelHomingWorkflows:
             raise self._error("workflow requires both X and Y unhomed; release XY and "
                               "manually center the toolhead before running with CENTERED=1")
 
-    def _begin(self, gcmd, mode, axis=None, axes=None):
+    def calibration_reference(self, axis):
+        """Permit amplitude-independent reference acquisition only inside this trial."""
+        session = self.session
+        return bool(axis in AXES and isinstance(session, dict)
+                    and session.get("mode") == "calibration" and session.get("state") == "running"
+                    and session.get("axis") == axis and self.in_home is True and self.home_axis == axis)
+
+    def _calibration_grid(self, gcmd, session=None):
+        defaults = session or {"start_threshold_g": self.start_threshold,
+                               "threshold_step_g": self.threshold_step}
+        grid = {}
+        for parameter, key, minimum, maximum in (
+                ("START_THRESHOLD", "start_threshold_g", 0.5, 15.0),
+                ("STEP", "threshold_step_g", 0.1, 3.0)):
+            value = gcmd.get_float(parameter, defaults[key], minval=minimum, maxval=maximum)
+            if not math.isfinite(value):
+                raise gcmd.error("%s must be finite" % parameter)
+            if session is not None and value != session[key]:
+                raise gcmd.error("%s cannot change while resuming calibration" % parameter)
+            grid[key] = value
+        if grid["start_threshold_g"] > self._threshold_limit():
+            raise gcmd.error("START_THRESHOLD exceeds the safe calibration threshold ceiling")
+        grid["explicit_calibration_grid"] = any(gcmd.get(key, None) is not None
+                                                for key in ("START_THRESHOLD", "STEP"))
+        return grid
+
+    def _begin(self, gcmd, mode, axis=None, axes=None, calibration_grid=None):
         if self.session is not None:
             raise gcmd.error("A workflow is already active; use ACCEL_HOMING_CANCEL first")
+        if mode == "calibration" and calibration_grid is None:
+            calibration_grid = self._calibration_grid(gcmd)
         axes = axes if axes is not None else [axis] if axis else ["x", "y"]
         self._preflight(axes)
         self._require_unhomed_xy()
@@ -656,11 +687,17 @@ class AccelHomingWorkflows:
                         "save_config": (mode == "calibration" and bool(gcmd.get_int(
                             "SAVE_CONFIG", 1, minval=0, maxval=1)))}
         if mode == "calibration":
-            seed = self._consume_noise_seed(axis)
+            self.session.update(calibration_grid, candidate=calibration_grid["start_threshold_g"],
+                                quiet_range_enforced=False)
+            seed = None if calibration_grid["explicit_calibration_grid"] else self._consume_noise_seed(axis)
             if seed is not None:
                 self.session["candidate"] = seed
                 self.session["noise_seed"] = {"run_id": self.noise_recommendation["run_id"],
                                                "start_threshold_g": seed}
+            self._info("%s calibration starts at %.6g g with %.6g g steps; stationary peak-to-peak "
+                       "quietness check disabled for these trials; fresh valid reference samples "
+                       "and ten-home qualification remain required" % (
+                           axis.upper(), self.session["candidate"], self.session["threshold_step_g"]))
 
     def _wait_center(self, reason):
         self._restore()
@@ -706,8 +743,8 @@ class AccelHomingWorkflows:
         seed = self.noise_seeds.pop(axis, None)
         if seed is not None:
             self._info("%s calibration starts at %.6g g from stationary noise run %s. "
-                       "This is an initial candidate; the quiet-baseline gate and ten-home "
-                       "qualification are unchanged" % (
+                       "This is an initial candidate; fresh-sample checks and ten-home "
+                       "qualification remain required" % (
                            axis.upper(), seed, self.noise_recommendation["run_id"]))
         return seed
 
@@ -907,7 +944,7 @@ class AccelHomingWorkflows:
                                 if value is not None}
             self._info("Noise measurement complete. Next calibration candidates: %s. Ordinary homing "
                        "thresholds are unchanged. These seeds do not filter noise or model startup "
-                       "disturbances; the existing quiet-baseline gate can still reject calibration" %
+                       "disturbances; calibration still requires fresh valid samples and ten qualified homes" %
                        ", ".join("%s=%s" % (axis.upper(), "unavailable above the safe ceiling" if value is None
                                              else "%.6g g" % value)
                                  for axis, value in session["recommendation"]["start_threshold_g"].items()))
@@ -1190,7 +1227,7 @@ class AccelHomingWorkflows:
                 session["candidate_attempt"] = None
                 session["validation_records"] = []
                 session["repeatability_spread_mm"] = None
-                candidate = round(session["candidate"] + self.threshold_step, 6)
+                candidate = round(session["candidate"] + session["threshold_step_g"], 6)
                 if candidate > self._threshold_limit() or session["attempts"] >= self.max_attempts:
                     raise self._error(reason + "; calibration threshold/attempt ceiling reached")
                 session["candidate"] = candidate
@@ -1287,6 +1324,9 @@ class AccelHomingWorkflows:
                     "repeatability_limit_mm": REPEATABILITY_LIMIT_MM,
                     "onset_g": [r.get("onset_g") for r in qualified],
                     "impact_peak_g": [r.get("impact_peak_g") for r in qualified],
+                    "calibration_start_threshold_g": session["start_threshold_g"],
+                    "calibration_step_g": session["threshold_step_g"],
+                    "calibration_quiet_range_enforced": session["quiet_range_enforced"],
                     "physical_position_verified": False}
         if session.get("noise_seed") is not None:
             metadata["stationary_noise_seed"] = dict(session["noise_seed"])
@@ -1333,9 +1373,11 @@ class AccelHomingWorkflows:
             if gcmd.get("SAVE_CONFIG", None) is not None and bool(gcmd.get_int(
                     "SAVE_CONFIG", minval=0, maxval=1)) != session["save_config"]:
                 raise gcmd.error("SAVE_CONFIG cannot change while resuming calibration")
+            self._calibration_grid(gcmd, session)
             self._continue_calibration()
             return
-        self._begin(gcmd, "calibration", axis)
+        grid = self._calibration_grid(gcmd)
+        self._begin(gcmd, "calibration", axis, calibration_grid=grid)
         try:
             self.session["state"] = "running"
             self._calibrate_trials()
@@ -1602,6 +1644,10 @@ class AccelHomingWorkflows:
                       "duration_per_iteration_s": NOISE_DURATION}
         elif active is not None:
             active["repeatability_limit_mm"] = REPEATABILITY_LIMIT_MM
+            if session["mode"] == "calibration":
+                active.update({key: session[key] for key in (
+                    "start_threshold_g", "threshold_step_g", "explicit_calibration_grid", "quiet_range_enforced")})
+                active["attempt_limit"] = self.max_attempts
         return {"model": self.model_name, "manual_threshold_overrides": sorted(self.manual_axes),
                 "active": active, "last_result": self.last_result,
                 "noise_recommendation": self.noise_recommendation,
