@@ -1,12 +1,12 @@
 {
-  "stage": "completed reviewed offline validation for short bootstrap and native Moonraker updates",
-  "timestamp_utc": "2026-10-27T00:24:07.696644+00:00",
-  "source_base_commit": "51fdf99f7d2b03602a4251ff60bfc25ea5cf2453",
+  "stage": "completed reviewed offline validation for flat atomic PNG publication and delayed directory watches",
+  "timestamp_utc": "2026-10-27T01:14:24.567475+00:00",
+  "source_base_commit": "65731b4f70786dd38402a5a28ee2b20c644a10f3",
   "final_validation": true,
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
-  "tests_run": 549,
-  "passed": 548,
+  "tests_run": 558,
+  "passed": 557,
   "failures": 0,
   "errors": 0,
   "skipped": [
@@ -15,15 +15,15 @@
       "reason": "Host does not allow symlink creation"
     }
   ],
-  "elapsed_seconds": 13.669,
-  "subprocess_wall_seconds": 13.934577499996522,
+  "elapsed_seconds": 14.285,
+  "subprocess_wall_seconds": 14.561367300004349,
   "test_returncode": 0,
   "command": "python -B -m unittest discover -s tests -v",
   "command_working_directory": "Beacon_Accel_Homing",
   "log": "tests.txt",
   "combined_final_suite_runs": 1,
   "module_tests": {
-    "test_accuracy_charts": 18,
+    "test_accuracy_charts": 27,
     "test_accuracy_workflow": 18,
     "test_backends": 65,
     "test_bootstrap_short": 9,
@@ -41,7 +41,7 @@
   "fixture_tests": {
     "test_accuracy_charts.AccuracyPNGTests": 5,
     "test_accuracy_charts.NoisePNGTests": 4,
-    "test_accuracy_charts.PortablePNGTests": 9,
+    "test_accuracy_charts.PortablePNGTests": 18,
     "test_accuracy_workflow.AccuracyWorkflowTests": 15,
     "test_accuracy_workflow.DetectorCaptureProvenanceTests": 3,
     "test_backends.BaselineFloorTest": 13,
@@ -106,7 +106,7 @@
   "installer_tests": 133,
   "workflow_tests": 75,
   "accuracy_workflow_tests": 18,
-  "accuracy_chart_tests": 18,
+  "accuracy_chart_tests": 27,
   "automatic_restart_fixture_tests": 15,
   "repeatability_fixture_tests": 12,
   "release_and_noise_fixture_tests": {
@@ -116,19 +116,19 @@
     "test_retract_noise.NoiseWorkflowTests": 5,
     "test_retract_noise.PNGIntegrationTests": 7
   },
-  "suite_started_utc": "2026-10-27T00:21:23.354387+00:00",
-  "suite_completed_utc": "2026-10-27T00:21:37.288979+00:00",
+  "suite_started_utc": "2026-10-27T01:13:59.866361+00:00",
+  "suite_completed_utc": "2026-10-27T01:14:14.427742+00:00",
   "suite_timestamps_source": "UTC timestamps immediately before/after the subprocess; wall time measured with perf_counter.",
-  "test_log_sha256": "736508759f15f92e93b749b3cda5896b7976373f35ce207ca7f5a935852cd2a0",
-  "test_log_bytes": 93664,
+  "test_log_sha256": "902a68e1de774dcccf0fd04bef26310e21a472a2c5ef55302142a3ab3954c255",
+  "test_log_bytes": 95452,
   "test_log_encoding": "UTF-8",
-  "test_log_crlf_count": 554,
-  "test_log_lf_count": 554,
+  "test_log_crlf_count": 563,
+  "test_log_lf_count": 563,
   "test_log_line_endings": "Exact merged stdout/stderr bytes retained without decoding or newline conversion.",
   "validated_python_sha256": {
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
     "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
-    "accel_homing_charts.py": "8a83bc75e3169c389cb2c3bb4bcbe611bba31ebda4d05648aa8d1b9e0c4213fa",
+    "accel_homing_charts.py": "8d7edd71afb69bfff421bd4ec6a22dfc385ecc75a4d4ae68324e62da8d81c273",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_updater.py": "9abf6b636a8d559d33e8d431d7390bfe8842b544112b268686c943460729430c",
     "accel_homing_workflows.py": "21c851a430b3f2db2063c07876bd438863ee377b192b562b4d4816bedfbed706",
@@ -136,7 +136,7 @@
     "bootstrap.py": "fd1a1c6c4b3943767c1e2ed4d360e29b2d1ec76e4f8315d020efccf7e125c998",
     "installer.py": "042bfcafad7ec8fade1d7e4ebc8f784f7ceeedd82f4eeb61bfe5d1dfb6f32889",
     "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
-    "tests/test_accuracy_charts.py": "ee982057f27f8310a0737ca164da19f5699b63417a2ab2a8f2edad30f9d700c7",
+    "tests/test_accuracy_charts.py": "559a4b03e5f73cced0fbf0a9b4855ece396d820fbfa8004cc90efdbddd61783c",
     "tests/test_accuracy_workflow.py": "d74ece85ea330639291f2692865d572f962ccd0d0c7fbc1f3ec23df1233ecb62",
     "tests/test_backends.py": "d8817d1df2fa7d00c6d87969e7f7a3fb2d113d9283e7a45b5bff07775e5c3149",
     "tests/test_bootstrap_short.py": "6fdb85976d9036a3b9776883430d5c657d43cb8a987e794be6741981aaa62ab4",
@@ -155,7 +155,7 @@
   "python_sha256_before_suite": {
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
     "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
-    "accel_homing_charts.py": "8a83bc75e3169c389cb2c3bb4bcbe611bba31ebda4d05648aa8d1b9e0c4213fa",
+    "accel_homing_charts.py": "8d7edd71afb69bfff421bd4ec6a22dfc385ecc75a4d4ae68324e62da8d81c273",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_updater.py": "9abf6b636a8d559d33e8d431d7390bfe8842b544112b268686c943460729430c",
     "accel_homing_workflows.py": "21c851a430b3f2db2063c07876bd438863ee377b192b562b4d4816bedfbed706",
@@ -163,7 +163,7 @@
     "bootstrap.py": "fd1a1c6c4b3943767c1e2ed4d360e29b2d1ec76e4f8315d020efccf7e125c998",
     "installer.py": "042bfcafad7ec8fade1d7e4ebc8f784f7ceeedd82f4eeb61bfe5d1dfb6f32889",
     "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
-    "tests/test_accuracy_charts.py": "ee982057f27f8310a0737ca164da19f5699b63417a2ab2a8f2edad30f9d700c7",
+    "tests/test_accuracy_charts.py": "559a4b03e5f73cced0fbf0a9b4855ece396d820fbfa8004cc90efdbddd61783c",
     "tests/test_accuracy_workflow.py": "d74ece85ea330639291f2692865d572f962ccd0d0c7fbc1f3ec23df1233ecb62",
     "tests/test_backends.py": "d8817d1df2fa7d00c6d87969e7f7a3fb2d113d9283e7a45b5bff07775e5c3149",
     "tests/test_bootstrap_short.py": "6fdb85976d9036a3b9776883430d5c657d43cb8a987e794be6741981aaa62ab4",
@@ -182,7 +182,7 @@
   "python_sha256_after_suite": {
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
     "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
-    "accel_homing_charts.py": "8a83bc75e3169c389cb2c3bb4bcbe611bba31ebda4d05648aa8d1b9e0c4213fa",
+    "accel_homing_charts.py": "8d7edd71afb69bfff421bd4ec6a22dfc385ecc75a4d4ae68324e62da8d81c273",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_updater.py": "9abf6b636a8d559d33e8d431d7390bfe8842b544112b268686c943460729430c",
     "accel_homing_workflows.py": "21c851a430b3f2db2063c07876bd438863ee377b192b562b4d4816bedfbed706",
@@ -190,7 +190,7 @@
     "bootstrap.py": "fd1a1c6c4b3943767c1e2ed4d360e29b2d1ec76e4f8315d020efccf7e125c998",
     "installer.py": "042bfcafad7ec8fade1d7e4ebc8f784f7ceeedd82f4eeb61bfe5d1dfb6f32889",
     "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
-    "tests/test_accuracy_charts.py": "ee982057f27f8310a0737ca164da19f5699b63417a2ab2a8f2edad30f9d700c7",
+    "tests/test_accuracy_charts.py": "559a4b03e5f73cced0fbf0a9b4855ece396d820fbfa8004cc90efdbddd61783c",
     "tests/test_accuracy_workflow.py": "d74ece85ea330639291f2692865d572f962ccd0d0c7fbc1f3ec23df1233ecb62",
     "tests/test_backends.py": "d8817d1df2fa7d00c6d87969e7f7a3fb2d113d9283e7a45b5bff07775e5c3149",
     "tests/test_bootstrap_short.py": "6fdb85976d9036a3b9776883430d5c657d43cb8a987e794be6741981aaa62ab4",
@@ -206,15 +206,15 @@
     "tests/test_workflows.py": "fafe05265accf089f84a384da36260a50c2c281c19dccc62bf1c7e74cf164906",
     "uninstaller.py": "250332eabdbb7b167a632c05203ed5e496429466cf4b8068d0d1d8395de61e95"
   },
-  "python_hashes_before_suite_utc": "2026-10-27T00:21:23.153585+00:00",
-  "python_hashes_after_suite_utc": "2026-10-27T00:21:37.296582+00:00",
+  "python_hashes_before_suite_utc": "2026-10-27T01:13:59.661388+00:00",
+  "python_hashes_after_suite_utc": "2026-10-27T01:14:14.434960+00:00",
   "python_sources_unchanged_during_suite": true,
   "package_sha256_before_suite": {
     ".gitattributes": "5877d335e7b9427a29f0567ca198a2737aea900ac31104eb79764f11425a7375",
     ".gitignore": "74bfb514d0fe09028f67ecb8338fd81cf307c9e66796203a3cc2793b11885d58",
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
     "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
-    "accel_homing_charts.py": "8a83bc75e3169c389cb2c3bb4bcbe611bba31ebda4d05648aa8d1b9e0c4213fa",
+    "accel_homing_charts.py": "8d7edd71afb69bfff421bd4ec6a22dfc385ecc75a4d4ae68324e62da8d81c273",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_updater.py": "9abf6b636a8d559d33e8d431d7390bfe8842b544112b268686c943460729430c",
     "accel_homing_workflows.py": "21c851a430b3f2db2063c07876bd438863ee377b192b562b4d4816bedfbed706",
@@ -222,7 +222,7 @@
     "bootstrap.py": "fd1a1c6c4b3943767c1e2ed4d360e29b2d1ec76e4f8315d020efccf7e125c998",
     "bootstrap.sh": "ff777e78bc855695635f53e18d025ca40596b2d6f116ce450b01efdb64fb713d",
     "docs/COMPATIBILITY.md": "fb99b20b04fd50689273fec875c0d89044818ce9dd005b853a63b441de16c5bf",
-    "docs/INSTALLATION.md": "0181ba58d2fd0ead0a512a6a247ed9f8ff786ffb1e1edb1a7ecc2aed29f2f32f",
+    "docs/INSTALLATION.md": "e224ec504984237779dd12ff7b9bcef2307f18f8f649b8a941882507c38caddd",
     "examples/accel_homing.cfg": "6b340fb9f99f7cc027e3705aede83709a51740a3c71479479bdf30bb38841687",
     "examples/beacon_accel_homing.cfg": "b6dd01883396e0be0f827c0911e1e4a0c79cbcd6db7ca4be97542fe37607553f",
     "install.sh": "29a0f52e3c89deb0102bd5275f8aaa5b66dcb5af14f52405f20f1622fb914bc3",
@@ -230,9 +230,9 @@
     "LICENSE": "230184f60bae2feaf244f10a8bac053c8ff33a183bcc365b4d8b876d2b7f4809",
     "NOTICE": "7db06ea80c2c2c6d4531663e2a1ef1453246eb95781a3b28021716849025aea1",
     "README.md": "8ea9dcc661b8d96f9fb52afee3fabd481caa00e200aa65a5c0f8f9749f054bfb",
-    "TESTING.md": "eb4bdff2763a0cd73ed5a972dd4a74ab4da845e71ddb66fdf8ca59c978eb72a5",
+    "TESTING.md": "0c880926f81912651f678935356c321b7276c2c5ad25e65797a56791577e6772",
     "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
-    "tests/test_accuracy_charts.py": "ee982057f27f8310a0737ca164da19f5699b63417a2ab2a8f2edad30f9d700c7",
+    "tests/test_accuracy_charts.py": "559a4b03e5f73cced0fbf0a9b4855ece396d820fbfa8004cc90efdbddd61783c",
     "tests/test_accuracy_workflow.py": "d74ece85ea330639291f2692865d572f962ccd0d0c7fbc1f3ec23df1233ecb62",
     "tests/test_backends.py": "d8817d1df2fa7d00c6d87969e7f7a3fb2d113d9283e7a45b5bff07775e5c3149",
     "tests/test_bootstrap_short.py": "6fdb85976d9036a3b9776883430d5c657d43cb8a987e794be6741981aaa62ab4",
@@ -248,15 +248,15 @@
     "tests/test_workflows.py": "fafe05265accf089f84a384da36260a50c2c281c19dccc62bf1c7e74cf164906",
     "uninstall.sh": "8e4695af7cb8bf35c8d5b89fa239b69622699d5f2b4a219fa3f59fde0e0f2fbe",
     "uninstaller.py": "250332eabdbb7b167a632c05203ed5e496429466cf4b8068d0d1d8395de61e95",
-    "validation/tests.txt": "cbeab212d8a1576fb24ad06685f67a3925fb30d55499560cd6988a0b476829a4",
-    "validation/VALIDATION.json": "cc27069d00847764ef08e6334a1371d35eaa0bd50648c291579e83ed464be9db"
+    "validation/tests.txt": "736508759f15f92e93b749b3cda5896b7976373f35ce207ca7f5a935852cd2a0",
+    "validation/VALIDATION.json": "755ce21053829d68090d5e95523e5b4501fdafa7a283cbbf97b8f2066fb8face"
   },
   "package_sha256_after_suite": {
     ".gitattributes": "5877d335e7b9427a29f0567ca198a2737aea900ac31104eb79764f11425a7375",
     ".gitignore": "74bfb514d0fe09028f67ecb8338fd81cf307c9e66796203a3cc2793b11885d58",
     "accel_homing.py": "fdd2297ff62c2c92357ba091d478cb7636816790a53d2d13aa2b7a0f0f90828f",
     "accel_homing_backends.py": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002",
-    "accel_homing_charts.py": "8a83bc75e3169c389cb2c3bb4bcbe611bba31ebda4d05648aa8d1b9e0c4213fa",
+    "accel_homing_charts.py": "8d7edd71afb69bfff421bd4ec6a22dfc385ecc75a4d4ae68324e62da8d81c273",
     "accel_homing_model.py": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
     "accel_homing_updater.py": "9abf6b636a8d559d33e8d431d7390bfe8842b544112b268686c943460729430c",
     "accel_homing_workflows.py": "21c851a430b3f2db2063c07876bd438863ee377b192b562b4d4816bedfbed706",
@@ -264,7 +264,7 @@
     "bootstrap.py": "fd1a1c6c4b3943767c1e2ed4d360e29b2d1ec76e4f8315d020efccf7e125c998",
     "bootstrap.sh": "ff777e78bc855695635f53e18d025ca40596b2d6f116ce450b01efdb64fb713d",
     "docs/COMPATIBILITY.md": "fb99b20b04fd50689273fec875c0d89044818ce9dd005b853a63b441de16c5bf",
-    "docs/INSTALLATION.md": "0181ba58d2fd0ead0a512a6a247ed9f8ff786ffb1e1edb1a7ecc2aed29f2f32f",
+    "docs/INSTALLATION.md": "e224ec504984237779dd12ff7b9bcef2307f18f8f649b8a941882507c38caddd",
     "examples/accel_homing.cfg": "6b340fb9f99f7cc027e3705aede83709a51740a3c71479479bdf30bb38841687",
     "examples/beacon_accel_homing.cfg": "b6dd01883396e0be0f827c0911e1e4a0c79cbcd6db7ca4be97542fe37607553f",
     "install.sh": "29a0f52e3c89deb0102bd5275f8aaa5b66dcb5af14f52405f20f1622fb914bc3",
@@ -272,9 +272,9 @@
     "LICENSE": "230184f60bae2feaf244f10a8bac053c8ff33a183bcc365b4d8b876d2b7f4809",
     "NOTICE": "7db06ea80c2c2c6d4531663e2a1ef1453246eb95781a3b28021716849025aea1",
     "README.md": "8ea9dcc661b8d96f9fb52afee3fabd481caa00e200aa65a5c0f8f9749f054bfb",
-    "TESTING.md": "eb4bdff2763a0cd73ed5a972dd4a74ab4da845e71ddb66fdf8ca59c978eb72a5",
+    "TESTING.md": "0c880926f81912651f678935356c321b7276c2c5ad25e65797a56791577e6772",
     "tests/harness.py": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
-    "tests/test_accuracy_charts.py": "ee982057f27f8310a0737ca164da19f5699b63417a2ab2a8f2edad30f9d700c7",
+    "tests/test_accuracy_charts.py": "559a4b03e5f73cced0fbf0a9b4855ece396d820fbfa8004cc90efdbddd61783c",
     "tests/test_accuracy_workflow.py": "d74ece85ea330639291f2692865d572f962ccd0d0c7fbc1f3ec23df1233ecb62",
     "tests/test_backends.py": "d8817d1df2fa7d00c6d87969e7f7a3fb2d113d9283e7a45b5bff07775e5c3149",
     "tests/test_bootstrap_short.py": "6fdb85976d9036a3b9776883430d5c657d43cb8a987e794be6741981aaa62ab4",
@@ -290,8 +290,8 @@
     "tests/test_workflows.py": "fafe05265accf089f84a384da36260a50c2c281c19dccc62bf1c7e74cf164906",
     "uninstall.sh": "8e4695af7cb8bf35c8d5b89fa239b69622699d5f2b4a219fa3f59fde0e0f2fbe",
     "uninstaller.py": "250332eabdbb7b167a632c05203ed5e496429466cf4b8068d0d1d8395de61e95",
-    "validation/tests.txt": "cbeab212d8a1576fb24ad06685f67a3925fb30d55499560cd6988a0b476829a4",
-    "validation/VALIDATION.json": "cc27069d00847764ef08e6334a1371d35eaa0bd50648c291579e83ed464be9db"
+    "validation/tests.txt": "736508759f15f92e93b749b3cda5896b7976373f35ce207ca7f5a935852cd2a0",
+    "validation/VALIDATION.json": "755ce21053829d68090d5e95523e5b4501fdafa7a283cbbf97b8f2066fb8face"
   },
   "package_sources_unchanged_during_suite": true,
   "source_hash_verification_scope": "All 40 package files and 25 Python files were hashed before/after one approved suite; snapshots match. The exact log, numeric TESTING summary and validation report were written afterward. Final Python bytes are rechecked and final package bytes have a separate release manifest.",
@@ -299,7 +299,7 @@
   "git_index_sha256_after_suite": "ea9f38fd54035beaa4301181035c5ab6f720cdd16f2496ae58b87bce5e465b56",
   "git_index_unchanged_during_suite": true,
   "git_index_matches_root_backup": true,
-  "git_diff_check_base": "51fdf99f7d2b03602a4251ff60bfc25ea5cf2453",
+  "git_diff_check_base": "65731b4f70786dd38402a5a28ee2b20c644a10f3",
   "git_diff_check_returncode": 0,
   "git_cached_diff_check_returncode": 0,
   "python_38_grammar_checks": {
@@ -357,15 +357,15 @@
       "executed": false
     }
   ],
-  "shell_syntax_checks_note": "All three shell entry points parsed with bash -n without executing their code; bootstrap.sh changed in this release.",
+  "shell_syntax_checks_note": "All three unchanged shell entry points parsed with bash -n without execution.",
   "shell_file_content_checks": [
     {
       "file": "bootstrap.sh",
-      "matches_source_base": false,
-      "normalized_text_matches_source_base": false,
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "ff777e78bc855695635f53e18d025ca40596b2d6f116ce450b01efdb64fb713d",
-      "source_base_sha256": "df7e8cfacea26b5ab10a905a2499123fc70e86756840a7dcc1a175d92a2ca170"
+      "source_base_sha256": "ff777e78bc855695635f53e18d025ca40596b2d6f116ce450b01efdb64fb713d"
     },
     {
       "file": "install.sh",
@@ -402,20 +402,20 @@
       "source_base_sha256": "36c28cca0682a57e1748cc99242ff3a207735a2c49e59ff16fe0b9c219c5e002"
     },
     {
-      "file": "accel_homing_charts.py",
-      "matches_source_base": true,
-      "normalized_text_matches_source_base": true,
-      "line_endings_normalized": false,
-      "sha256": "8a83bc75e3169c389cb2c3bb4bcbe611bba31ebda4d05648aa8d1b9e0c4213fa",
-      "source_base_sha256": "8a83bc75e3169c389cb2c3bb4bcbe611bba31ebda4d05648aa8d1b9e0c4213fa"
-    },
-    {
       "file": "accel_homing_model.py",
       "matches_source_base": true,
       "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092",
       "source_base_sha256": "05e579813fe63a5f09d4e13461f229866ccb62a1a7a87c1e2981aefb1ebc3092"
+    },
+    {
+      "file": "accel_homing_updater.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "9abf6b636a8d559d33e8d431d7390bfe8842b544112b268686c943460729430c",
+      "source_base_sha256": "9abf6b636a8d559d33e8d431d7390bfe8842b544112b268686c943460729430c"
     },
     {
       "file": "accel_homing_workflows.py",
@@ -434,20 +434,28 @@
       "source_base_sha256": "cad1e58beec6ccb0390593aee0f977a60c636584b44bc758df3a8e9ae9e01009"
     },
     {
+      "file": "bootstrap.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "fd1a1c6c4b3943767c1e2ed4d360e29b2d1ec76e4f8315d020efccf7e125c998",
+      "source_base_sha256": "fd1a1c6c4b3943767c1e2ed4d360e29b2d1ec76e4f8315d020efccf7e125c998"
+    },
+    {
+      "file": "installer.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "042bfcafad7ec8fade1d7e4ebc8f784f7ceeedd82f4eeb61bfe5d1dfb6f32889",
+      "source_base_sha256": "042bfcafad7ec8fade1d7e4ebc8f784f7ceeedd82f4eeb61bfe5d1dfb6f32889"
+    },
+    {
       "file": "tests/harness.py",
       "matches_source_base": true,
       "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70",
       "source_base_sha256": "d31437f11418e3a664cbabf04e450f059493a99d21e506b7994e7483e1bb9b70"
-    },
-    {
-      "file": "tests/test_accuracy_charts.py",
-      "matches_source_base": true,
-      "normalized_text_matches_source_base": true,
-      "line_endings_normalized": false,
-      "sha256": "ee982057f27f8310a0737ca164da19f5699b63417a2ab2a8f2edad30f9d700c7",
-      "source_base_sha256": "ee982057f27f8310a0737ca164da19f5699b63417a2ab2a8f2edad30f9d700c7"
     },
     {
       "file": "tests/test_accuracy_workflow.py",
@@ -466,6 +474,22 @@
       "source_base_sha256": "d8817d1df2fa7d00c6d87969e7f7a3fb2d113d9283e7a45b5bff07775e5c3149"
     },
     {
+      "file": "tests/test_bootstrap_short.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "6fdb85976d9036a3b9776883430d5c657d43cb8a987e794be6741981aaa62ab4",
+      "source_base_sha256": "6fdb85976d9036a3b9776883430d5c657d43cb8a987e794be6741981aaa62ab4"
+    },
+    {
+      "file": "tests/test_installer.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "6be8692820c96293f01eff83e379649d854a62d52d6eec2dd0627bba2e6f0aba",
+      "source_base_sha256": "6be8692820c96293f01eff83e379649d854a62d52d6eec2dd0627bba2e6f0aba"
+    },
+    {
       "file": "tests/test_manual_thresholds.py",
       "matches_source_base": true,
       "normalized_text_matches_source_base": true,
@@ -480,6 +504,14 @@
       "line_endings_normalized": false,
       "sha256": "b8a1bd20f63c5df14f0ca433d1c9efe5d4ab9ac1ca6866c40a2ee6e955e10a88",
       "source_base_sha256": "b8a1bd20f63c5df14f0ca433d1c9efe5d4ab9ac1ca6866c40a2ee6e955e10a88"
+    },
+    {
+      "file": "tests/test_plotting_setup.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "8a8fdfa0dc7e96e70aa0769cca05dc98507353dda30313f9b4eaa9d18e9a7a4c",
+      "source_base_sha256": "8a8fdfa0dc7e96e70aa0769cca05dc98507353dda30313f9b4eaa9d18e9a7a4c"
     },
     {
       "file": "tests/test_retract_noise.py",
@@ -498,62 +530,46 @@
       "source_base_sha256": "e917bb021267ad5a69e43491331dc2be38a1ad8b330d6bc22649b685d729f325"
     },
     {
+      "file": "tests/test_updater.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "15b9f7d06cec82dc23beede4b5826ac1ee460a41685fb9b6cd8ae554cb0fc0d0",
+      "source_base_sha256": "15b9f7d06cec82dc23beede4b5826ac1ee460a41685fb9b6cd8ae554cb0fc0d0"
+    },
+    {
       "file": "tests/test_workflows.py",
       "matches_source_base": true,
       "normalized_text_matches_source_base": true,
       "line_endings_normalized": false,
       "sha256": "fafe05265accf089f84a384da36260a50c2c281c19dccc62bf1c7e74cf164906",
       "source_base_sha256": "fafe05265accf089f84a384da36260a50c2c281c19dccc62bf1c7e74cf164906"
+    },
+    {
+      "file": "uninstaller.py",
+      "matches_source_base": true,
+      "normalized_text_matches_source_base": true,
+      "line_endings_normalized": false,
+      "sha256": "250332eabdbb7b167a632c05203ed5e496429466cf4b8068d0d1d8395de61e95",
+      "source_base_sha256": "250332eabdbb7b167a632c05203ed5e496429466cf4b8068d0d1d8395de61e95"
     }
   ],
   "additional_changed_file_content_checks": [
     {
-      "file": "accel_homing_updater.py",
+      "file": "accel_homing_charts.py",
       "matches_source_base": false,
       "normalized_text_matches_source_base": false,
       "line_endings_normalized": false,
-      "sha256": "9abf6b636a8d559d33e8d431d7390bfe8842b544112b268686c943460729430c",
-      "source_base_sha256": null
+      "sha256": "8d7edd71afb69bfff421bd4ec6a22dfc385ecc75a4d4ae68324e62da8d81c273",
+      "source_base_sha256": "8a83bc75e3169c389cb2c3bb4bcbe611bba31ebda4d05648aa8d1b9e0c4213fa"
     },
     {
-      "file": "bootstrap.py",
+      "file": "tests/test_accuracy_charts.py",
       "matches_source_base": false,
       "normalized_text_matches_source_base": false,
       "line_endings_normalized": false,
-      "sha256": "fd1a1c6c4b3943767c1e2ed4d360e29b2d1ec76e4f8315d020efccf7e125c998",
-      "source_base_sha256": "1352b68c1731959d720e583b1b53cc571e221e3eb3b67db0740bb78752adc80b"
-    },
-    {
-      "file": "installer.py",
-      "matches_source_base": false,
-      "normalized_text_matches_source_base": false,
-      "line_endings_normalized": false,
-      "sha256": "042bfcafad7ec8fade1d7e4ebc8f784f7ceeedd82f4eeb61bfe5d1dfb6f32889",
-      "source_base_sha256": "91aaf9221538c9f9ea5b54c289030dd65b6b7ad29662c8a4d9805077f644918b"
-    },
-    {
-      "file": "tests/test_bootstrap_short.py",
-      "matches_source_base": false,
-      "normalized_text_matches_source_base": false,
-      "line_endings_normalized": false,
-      "sha256": "6fdb85976d9036a3b9776883430d5c657d43cb8a987e794be6741981aaa62ab4",
-      "source_base_sha256": null
-    },
-    {
-      "file": "tests/test_installer.py",
-      "matches_source_base": false,
-      "normalized_text_matches_source_base": false,
-      "line_endings_normalized": false,
-      "sha256": "6be8692820c96293f01eff83e379649d854a62d52d6eec2dd0627bba2e6f0aba",
-      "source_base_sha256": "1cc4714174d8e056ba9cd1bebcc652981bdf1357a72efb02c66b958ee0fa57b5"
-    },
-    {
-      "file": "tests/test_plotting_setup.py",
-      "matches_source_base": false,
-      "normalized_text_matches_source_base": false,
-      "line_endings_normalized": false,
-      "sha256": "8a8fdfa0dc7e96e70aa0769cca05dc98507353dda30313f9b4eaa9d18e9a7a4c",
-      "source_base_sha256": "00454d66531456e2806848fe55f1870dae9bfd99b7cc989925befa983a7fc96c"
+      "sha256": "559a4b03e5f73cced0fbf0a9b4855ece396d820fbfa8004cc90efdbddd61783c",
+      "source_base_sha256": "ee982057f27f8310a0737ca164da19f5699b63417a2ab2a8f2edad30f9d700c7"
     },
     {
       "file": "tests/test_single_touch.py",
@@ -570,22 +586,6 @@
       "line_endings_normalized": false,
       "sha256": "582f9100900f087acfb0bc05bd1bfabab3bc7133082fd3ad0436801db5d03e9e",
       "source_base_sha256": "4cb0c0fac5b5a0aeb3b7d93c42a6b98e0b4472b5a6af3b2f23c335a33ef2c093"
-    },
-    {
-      "file": "tests/test_updater.py",
-      "matches_source_base": false,
-      "normalized_text_matches_source_base": false,
-      "line_endings_normalized": false,
-      "sha256": "15b9f7d06cec82dc23beede4b5826ac1ee460a41685fb9b6cd8ae554cb0fc0d0",
-      "source_base_sha256": null
-    },
-    {
-      "file": "uninstaller.py",
-      "matches_source_base": false,
-      "normalized_text_matches_source_base": false,
-      "line_endings_normalized": false,
-      "sha256": "250332eabdbb7b167a632c05203ed5e496429466cf4b8068d0d1d8395de61e95",
-      "source_base_sha256": "9e3f25f3d06dd3d93da1424f0e837b5e2f25b60bb7894aa1b8416a8591518525"
     }
   ],
   "package_file_count": 40,
@@ -658,41 +658,20 @@
     "validation/VALIDATION.json",
     "validation/tests.txt"
   ],
-  "source_added_paths": [
-    "accel_homing_updater.py",
-    "tests/test_bootstrap_short.py",
-    "tests/test_updater.py"
-  ],
+  "source_added_paths": [],
   "source_modified_paths": [
-    "README.md",
     "TESTING.md",
-    "bootstrap.py",
-    "bootstrap.sh",
-    "docs/COMPATIBILITY.md",
+    "accel_homing_charts.py",
     "docs/INSTALLATION.md",
-    "examples/accel_homing.cfg",
-    "installer.py",
-    "tests/test_installer.py",
-    "tests/test_plotting_setup.py",
-    "uninstaller.py",
+    "tests/test_accuracy_charts.py",
     "validation/VALIDATION.json",
     "validation/tests.txt"
   ],
   "source_semantic_changed_paths": [
-    "README.md",
     "TESTING.md",
-    "accel_homing_updater.py",
-    "bootstrap.py",
-    "bootstrap.sh",
-    "docs/COMPATIBILITY.md",
+    "accel_homing_charts.py",
     "docs/INSTALLATION.md",
-    "examples/accel_homing.cfg",
-    "installer.py",
-    "tests/test_bootstrap_short.py",
-    "tests/test_installer.py",
-    "tests/test_plotting_setup.py",
-    "tests/test_updater.py",
-    "uninstaller.py",
+    "tests/test_accuracy_charts.py",
     "validation/VALIDATION.json",
     "validation/tests.txt"
   ],
@@ -706,47 +685,47 @@
     ".gitattributes",
     ".gitignore",
     "NOTICE",
+    "README.md",
     "accel_homing.py",
     "accel_homing_backends.py",
-    "accel_homing_charts.py",
     "accel_homing_model.py",
+    "accel_homing_updater.py",
     "accel_homing_workflows.py",
     "beacon_accel_homing.py",
+    "bootstrap.py",
+    "bootstrap.sh",
+    "docs/COMPATIBILITY.md",
+    "examples/accel_homing.cfg",
     "examples/beacon_accel_homing.cfg",
     "install.sh",
+    "installer.py",
     "tests/harness.py",
-    "tests/test_accuracy_charts.py",
     "tests/test_accuracy_workflow.py",
     "tests/test_backends.py",
+    "tests/test_bootstrap_short.py",
+    "tests/test_installer.py",
     "tests/test_manual_thresholds.py",
     "tests/test_motion_policy.py",
+    "tests/test_plotting_setup.py",
     "tests/test_retract_noise.py",
     "tests/test_session.py",
+    "tests/test_updater.py",
     "tests/test_workflows.py",
-    "uninstall.sh"
+    "uninstall.sh",
+    "uninstaller.py"
   ],
   "repository_source_semantic_changed_paths": [
-    "Beacon_Accel_Homing/README.md",
     "Beacon_Accel_Homing/TESTING.md",
-    "Beacon_Accel_Homing/accel_homing_updater.py",
-    "Beacon_Accel_Homing/bootstrap.py",
-    "Beacon_Accel_Homing/bootstrap.sh",
-    "Beacon_Accel_Homing/docs/COMPATIBILITY.md",
+    "Beacon_Accel_Homing/accel_homing_charts.py",
     "Beacon_Accel_Homing/docs/INSTALLATION.md",
-    "Beacon_Accel_Homing/examples/accel_homing.cfg",
-    "Beacon_Accel_Homing/installer.py",
-    "Beacon_Accel_Homing/tests/test_bootstrap_short.py",
-    "Beacon_Accel_Homing/tests/test_installer.py",
-    "Beacon_Accel_Homing/tests/test_plotting_setup.py",
-    "Beacon_Accel_Homing/tests/test_updater.py",
-    "Beacon_Accel_Homing/uninstaller.py",
+    "Beacon_Accel_Homing/tests/test_accuracy_charts.py",
     "Beacon_Accel_Homing/validation/VALIDATION.json",
     "Beacon_Accel_Homing/validation/tests.txt"
   ],
   "repository_root_readme_sha256": "a8a2d08f7683e1d441d08163fdf3e96a53207eaba1dc7bcf91633c8e6486378d",
   "repository_root_readme_semantically_changed": false,
   "readme_sha256": "8ea9dcc661b8d96f9fb52afee3fabd481caa00e200aa65a5c0f8f9749f054bfb",
-  "testing_md_sha256": "0c880926f81912651f678935356c321b7276c2c5ad25e65797a56791577e6772",
+  "testing_md_sha256": "584b6055d89d08c8204dbc24d64eaf305afe88ecd5d1b005e7da29ce33249632",
   "ordinary_successful_home_release": {
     "option": "back_off_dist",
     "default_mm": 5.0,
@@ -828,12 +807,16 @@
     "private_dependencies_keyed_by_venv_and_abi": true,
     "dependency_failure_before_printer_transaction": true,
     "inline_preview": "Verified same-origin ordinary browser GET only; no embedded tokens. Header-token-only or remote frontend may need its file browser.",
-    "mainsail_formatted_console_required": true
+    "mainsail_formatted_console_required": true,
+    "flat_completed_png_files": true,
+    "per_output_directories": false,
+    "same_directory_regular_file_staging": true,
+    "atomic_no_overwrite_hard_link_publication": true
   },
   "visual_review": {
     "performed_this_release": false,
     "data_source": "SIMULATED - NOT PRINTER MEASUREMENT",
-    "scope": "Previously root/reviewer-approved capture/accuracy/noise PNG pixels retained; chart source bytes are unchanged and matched. No new visual or hardware test claimed.",
+    "scope": "Previous root/reviewer-approved simulated PNG pixels retained. Rendering/downsampling functions match source base by AST; only publication layout/path validation changed. No new visual or hardware check claimed.",
     "example_noise_peak_xyz_g": [
       2.0,
       1.0,
@@ -855,7 +838,7 @@
     },
     "artifact_in_published_package": false,
     "hardware_measurement": false,
-    "inherited_from_public_commit": "51fdf99f7d2b03602a4251ff60bfc25ea5cf2453"
+    "inherited_from_public_commit": "65731b4f70786dd38402a5a28ee2b20c644a10f3"
   },
   "printer_connections": false,
   "hardware_testing": false,
@@ -871,7 +854,8 @@
     "A noise candidate is a transient initial calibration heuristic, not a measured impact threshold or saved model. Existing geometry and strict ten-home range qualification remain required.",
     "Commanded travel and bounded release targets are firmware quantities, not physical stop accuracy or stopping-distance guarantees.",
     "The Windows host skips one real POSIX symlink fixture; Linux host/service integration and Python 3.8 runtime were not tested.",
-    "The native updater was verified through offline source/activation fixtures and disposable local Git only; no live Moonraker/frontend update or real installation/restart was executed."
+    "The native updater was verified through offline source/activation fixtures and disposable local Git only; no live Moonraker/frontend update or real installation/restart was executed.",
+    "The reported Moonraker warning's original errno was not observed; this removes transient chart directories but does not prove every possible watch error is eliminated. No real Moonraker restart was performed."
   ],
   "short_bootstrap": {
     "command": "installer=$(curl -fsSL https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh) && bash -c \"$installer\"",
@@ -923,5 +907,50 @@
     "temporary_synthetic_repositories_only": true,
     "public_network": false,
     "target_workspace_git_or_index_mutated": false
+  },
+  "git_state_before_suite": {
+    "head": "f5d97db465bc5499fb6ac4b7cc85698ef7a60cd4",
+    "refs_sha256": "1d0ed7ac66e7448f256b9725cf1e4eb2d9c23509fc40967ea9fbfaa43eef60ad",
+    "status_sha256": "8a3d669b597a062c98e65cdb5f5ff8c404059807c4cf8959012d5666f538334f"
+  },
+  "git_state_after_suite": {
+    "head": "f5d97db465bc5499fb6ac4b7cc85698ef7a60cd4",
+    "refs_sha256": "1d0ed7ac66e7448f256b9725cf1e4eb2d9c23509fc40967ea9fbfaa43eef60ad",
+    "status_sha256": "8a3d669b597a062c98e65cdb5f5ff8c404059807c4cf8959012d5666f538334f"
+  },
+  "git_head_refs_status_unchanged_during_suite": true,
+  "rendering_functions_unchanged_vs_source_base": [
+    "_envelope",
+    "_worker_main",
+    "_title",
+    "_axes_style",
+    "_traces",
+    "_threshold",
+    "_plot_capture",
+    "_plot_accuracy",
+    "_plot_noise"
+  ],
+  "chart_publication": {
+    "output_layout": "flat PNG files directly under configured chart directory",
+    "publisher_creates_transient_directories_under_chart_root": false,
+    "durable_output_root_only": true,
+    "worker_private_os_scratch_unchanged": true,
+    "staging": "same-directory regular file closed before atomic hard-link publication",
+    "atomic_no_overwrite": true,
+    "temporary_file_cleaned_on_success_and_failure": true,
+    "requires_hard_link_support": true,
+    "unsupported_filesystem_fails_without_fallback": true,
+    "bounded_filename_collisions": 100,
+    "post_publication_cancel_retains_completed_png": true,
+    "final_name_close_write_before_post_publication_cancel": true,
+    "completion_open_noncreating_nontruncating_and_inode_verified": true,
+    "completion_failure_removes_only_owned_link": true,
+    "foreign_final_replacement_preserved": true,
+    "delayed_watcher_regressions": 9,
+    "live_moonraker_watcher_tested": false,
+    "historical_reported_prefix": ".accel_homing_",
+    "current_staging_prefix": ".accel_homing_png_",
+    "reported_warning_errno_observed": false,
+    "old_warning_recovery": "Operator restarts matching Moonraker while idle if warning remains after update; inspect log exception if it recurs"
   }
 }
