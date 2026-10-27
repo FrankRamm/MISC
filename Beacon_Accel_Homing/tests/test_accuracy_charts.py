@@ -1,6 +1,7 @@
 """Offline PNG tests. Every accelerometer sample is SIMULATED."""
 import base64
 import copy
+import datetime
 import errno
 import hashlib
 import json
@@ -127,12 +128,13 @@ class PortablePNGTests(unittest.TestCase):
             self.assertTrue(image.is_file())
             self.assertEqual(image.parent, Path(temp).resolve())
             self.assertEqual(charts._check_png(image.read_bytes()), (24, 16))
-            self.assertRegex(image.name, r"accel_homing_x_home_\d{8}_\d{6}_\d{6}UTC\.png")
+            self.assertRegex(image.name, r"Accel Homing X - \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.png")
             self.assertNotIn("UUID", image.name)
             self.assertEqual([path.suffix for path in Path(temp).rglob("*") if path.is_file()], [".png"])
             payload = renderer.payloads[0]
             self.assertEqual(payload["record"]["threshold_g"], .001)
-            self.assertIn("UTC", payload["timestamp"])
+            self.assertRegex(payload["timestamp"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+            self.assertRegex(payload["timezone"], r"^UTC[+-]\d{2}:\d{2}$")
             self.assertTrue(payload["created_utc"].endswith("+00:00"))
             self.assertIn(payload["filename_time"], image.name)
             self.assertEqual(paths.receipt.png_sha256, hashlib.sha256(image.read_bytes()).hexdigest())
@@ -163,15 +165,42 @@ class PortablePNGTests(unittest.TestCase):
 
     def test_frozen_clock_collisions_never_overwrite_completed_png(self):
         clock = {"created_utc": "2026-10-26T23:00:00.123456+00:00",
-                 "timestamp": "2026-10-26 23:00:00.123456 UTC",
-                 "filename_time": "20261026_230000_123456UTC"}
+                 "created_local": "2026-10-26T20:00:00.123456-03:00",
+                 "timestamp": "2026-10-26 20:00:00", "timezone": "UTC-03:00",
+                 "filename_time": "2026-10-26 20-00-00"}
         capture = {"samples": [(0., 0., 0., 1.), (.1, .1, 0., 1.)], "baseline_g": (0., 0., 1.)}
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(charts, "_clock", return_value=clock):
             images = [charts.write_capture(temp, "same", "x", capture, {}, renderer=RecordingRenderer())["png"]
                       for _index in range(3)]
             self.assertEqual(len(set(images)), 3)
+            self.assertEqual([Path(image).name for image in images], [
+                "Accel Homing X - 2026-10-26 20-00-00.png",
+                "Accel Homing X - 2026-10-26 20-00-00_01.png",
+                "Accel Homing X - 2026-10-26 20-00-00_02.png"])
             self.assertTrue(all(Path(image).read_bytes() == png_bytes() for image in images))
             self.assertEqual(len([path for path in Path(temp).rglob("*") if path.is_file()]), 3)
+
+    def test_local_display_and_portable_filename_share_one_instant_with_utc_provenance(self):
+        local = datetime.datetime(2026, 10, 27, 23, 59, 42, 987654,
+                                  tzinfo=datetime.timezone(datetime.timedelta(hours=-3)))
+        instant = mock.Mock()
+        instant.isoformat.return_value = "2026-10-28T02:59:42.987654+00:00"
+        instant.astimezone.return_value = local
+        with mock.patch.object(charts.datetime, "datetime") as clock:
+            clock.now.return_value = instant
+            value = charts._clock()
+            clock.now.assert_called_once_with(datetime.timezone.utc)
+        self.assertEqual(value["timestamp"], "2026-10-27 23:59:42")
+        self.assertEqual(value["filename_time"], "2026-10-27 23-59-42")
+        self.assertEqual(value["timezone"], "UTC-03:00")
+        self.assertEqual(value["created_local"], local.isoformat())
+        self.assertEqual(value["created_utc"], "2026-10-28T02:59:42.987654+00:00")
+
+    def test_compact_threshold_legend_preserves_small_signed_limits_and_exact_positions(self):
+        axis = mock.Mock()
+        charts._threshold(axis, {"threshold_g": .001, "direction": 0})
+        self.assertEqual([call.args[0] for call in axis.axhline.call_args_list], [-.001, .001])
+        self.assertEqual([call.kwargs["label"] for call in axis.axhline.call_args_list], ["Trigger ±0.001 g", None])
 
     def test_faults_nonfinite_baselines_and_unserializable_records_leave_no_chart(self):
         original = {"samples": [(1., 0., 0., 1.), (1.1, .2, .1, 1.)], "baseline_g": (0., 0., 1.)}
@@ -203,7 +232,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(list(Path(temp).iterdir()), [])
 
     def test_publication_queues_only_a_durable_root_for_delayed_directory_watches(self):
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / "config/accel_homing_charts"
             destination.parent.mkdir()
@@ -241,7 +270,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertTrue(all(path.is_file() and path.suffix == ".png" for path in destination.iterdir()))
 
     def test_atomic_link_exposes_completed_bytes_and_never_clobbers_a_racing_filename(self):
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         image, existing = png_bytes(), png_bytes(width=12)
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp)
@@ -267,7 +296,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(set(destination.iterdir()), set(observed))
 
     def test_cancel_after_staging_cleans_the_file_without_a_transient_directory(self):
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         with tempfile.TemporaryDirectory() as temp:
             destination, calls = Path(temp), []
             def cancel():
@@ -285,7 +314,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(list(destination.iterdir()), [])
 
     def test_unsupported_atomic_links_fail_clearly_and_leave_no_temporary_artifacts(self):
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         with tempfile.TemporaryDirectory() as temp:
             with mock.patch.object(charts.os, "link", side_effect=OSError(errno.EPERM, "hard links unsupported")), \
                     mock.patch.object(charts.os, "rename") as rename:
@@ -295,7 +324,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(list(Path(temp).iterdir()), [])
 
     def test_cancel_after_atomic_link_keeps_completed_png_and_cleans_only_its_staging_file(self):
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         with tempfile.TemporaryDirectory() as temp:
             destination, calls = Path(temp), []
             def cancel():
@@ -313,7 +342,7 @@ class PortablePNGTests(unittest.TestCase):
     def test_final_name_create_close_write_pipeline_completes_before_late_cancellation(self):
         # Model Moonraker schedule_file_event(CREATE) and complete_file_write
         # (CLOSE_WRITE). No native inotify or printer/frontend is contacted.
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         for cancelled in (False, True):
             with self.subTest(cancelled=cancelled), tempfile.TemporaryDirectory() as temp:
                 root, pending, notifications, events, descriptors = Path(temp), {}, [], [], {}
@@ -366,7 +395,7 @@ class PortablePNGTests(unittest.TestCase):
                 self.assertEqual(set(root.iterdir()), {notifications[0][1]})
 
     def test_final_name_completion_failure_raises_and_cleans_owned_png_and_staging(self):
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         with tempfile.TemporaryDirectory() as temp:
             open_file, created = charts.os.open, []
             def denied(path, flags, *args, **kwargs):
@@ -383,7 +412,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(list(Path(temp).iterdir()), [])
 
     def test_completion_identity_mismatch_preserves_a_foreign_final_replacement(self):
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         foreign = png_bytes(width=12)
         with tempfile.TemporaryDirectory() as temp:
             link, replaced = charts.os.link, []
@@ -401,11 +430,11 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(replaced[0].read_bytes(), foreign)
 
     def test_collision_exhaustion_preserves_existing_pngs_and_cleans_staging(self):
-        clock = {"filename_time": "20261027_010000_123456UTC"}
+        clock = {"filename_time": "2026-10-27 01-00-00"}
         with tempfile.TemporaryDirectory() as temp:
             root, previous = Path(temp), {}
             for collision in range(100):
-                name = "accel_homing_x_home_" + clock["filename_time"]
+                name = "accel_homing_x_home - " + clock["filename_time"]
                 name += "_%02d" % collision if collision else ""
                 path = root / (name + ".png")
                 path.write_bytes(png_bytes(width=12))

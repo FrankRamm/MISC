@@ -1226,16 +1226,20 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
 class GuardTests(unittest.TestCase):
     def test_runtime_policy_refusal_precedes_workflow_effects_with_stock_or_safe_z(self):
         for safe in (False, True):
-            for command, axes in (("cmd_CALIBRATE", ("x",)), ("cmd_TEST", ("x", "y")),
-                                  ("cmd_CHARTS", ("x", "y"))):
-                with self.subTest(safe=safe, command=command):
+            for command, requested, axes in (("cmd_CALIBRATE", "X", ("x",)),
+                                             ("cmd_TEST", "X", ("x", "y")),
+                                             ("cmd_CHARTS", None, ("x", "y")),
+                                             ("cmd_CHARTS", "X", ("x",)),
+                                             ("cmd_CHARTS", "Y", ("y",))):
+                with self.subTest(safe=safe, command=command, requested=requested):
                     rig = Rig()
                     if safe:
                         rig.use_safe_z_home()
                     rig.policy_error = "synthetic unsafe runtime homing policy"
                     before = rig.effects()
+                    params = {} if requested is None else {"AXIS": requested}
                     with self.assertRaisesRegex(CommandError, "unsafe runtime homing policy"):
-                        getattr(rig.workflow, command)(GCmd(AXIS="X", CENTERED=1))
+                        getattr(rig.workflow, command)(GCmd(CENTERED=1, **params))
                     self.assertEqual(rig.policy_checks, [axes])
                     self.assertEqual(rig.effects(), before)
 
@@ -1572,6 +1576,125 @@ class ModelTests(unittest.TestCase):
 
 
 class TestAndChartWorkflowTests(unittest.TestCase):
+    def test_chart_axis_is_validated_before_preflight_or_waiting_session_mutation(self):
+        for waiting in (False, True):
+            for requested in ("", " ", "Z", "XY", "YX", "X,Y", "X Y", "XX", "1"):
+                with self.subTest(waiting=waiting, requested=requested):
+                    rig = Rig()
+                    if waiting:
+                        rig.home_results.append({"travel_mm": 2.0})
+                        rig.calibrate(save=0)
+                    before = rig.effects()
+                    with mock.patch.object(rig.workflow, "_require_centered") as centered, \
+                            mock.patch.object(rig.workflow, "_chart_preflight") as preflight, \
+                            mock.patch.object(rig.workflow, "_begin") as begin:
+                        with self.assertRaisesRegex(CommandError, "AXIS must be X or Y"):
+                            rig.workflow.cmd_CHARTS(GCmd(AXIS=requested))
+                        centered.assert_not_called()
+                        preflight.assert_not_called()
+                        begin.assert_not_called()
+                    self.assertEqual(rig.effects(), before)
+
+    def test_single_axis_charts_home_capture_and_release_only_the_requested_axis(self):
+        for requested, axis in (("X", "x"), ("Y", "y"), (" x ", "x"), ("y", "y")):
+            for safe in (False, True):
+                with self.subTest(requested=requested, safe=safe), tempfile.TemporaryDirectory() as temp:
+                    rig = Rig({"charts_directory": temp})
+                    rig.toolhead.position[:2] = [12.0, 19.0]
+                    other = "y" if axis == "x" else "x"
+                    previous = {"axis": other, "result": "preexisting"}
+                    rig.owner.last[other] = previous
+                    wrapper = rig.use_safe_z_home() if safe else None
+                    with mock.patch.object(rig.workflow, "_release_terminal_home",
+                                           wraps=rig.workflow._release_terminal_home) as release:
+                        rig.workflow.cmd_CHARTS(GCmd(AXIS=requested, CENTERED=1))
+                        result = rig.workflow.last_result
+                        release.assert_called_once_with(axis, result["records"][0])
+                    self.assertEqual(rig.scripts, ["G28 " + axis.upper()])
+                    self.assertEqual([call["axis"] for call in rig.home_calls], [axis])
+                    self.assertEqual(rig.policy_checks, [(axis,)])
+                    target = [None, None, None]
+                    target["xy".index(axis)] = 5.0
+                    self.assertEqual(rig.toolhead.moves, [(target, 100.0)])
+                    self.assertEqual(rig.toolhead.position["xy".index(other)],
+                                     19.0 if other == "y" else 12.0)
+                    self.assertEqual(rig.toolhead.position[2:], [40.0, 6.0])
+                    self.assertFalse(rig.owner._homed(other))
+                    self.assertIs(rig.owner.last[other], previous)
+                    self.assertEqual(result["result"], "complete")
+                    self.assertEqual([item["axis"] for item in result["paths"]], [axis])
+                    payloads = [item for item in rig.workflow.renderer.calls if item["kind"] == "capture"]
+                    self.assertEqual(len(payloads), 1)
+                    self.assertEqual(payloads[0]["axis"], axis)
+                    self.assertEqual(payloads[0]["record"]["axis"], axis)
+                    self.assertEqual(payloads[0]["record"]["run_id"], result["run_id"])
+                    self.assertEqual(payloads[0]["record"]["workflow_attempt"], 1)
+                    self.assertTrue(Path(result["paths"][0]["png"]).is_file())
+                    self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                    self.assertEqual(rig.owner.back_off_dist, 5.0)
+                    self.assertEqual(rig.configfile.saved, {})
+                    self.assertEqual(rig.disabled, [])
+                    self.assertIsNone(rig.workflow.session)
+                    if wrapper is not None:
+                        self.assertEqual(wrapper.calls, [])
+
+    def test_single_axis_charts_do_not_require_an_accelerometer_endstop_on_the_other_axis(self):
+        for axis in "xy":
+            with self.subTest(axis=axis), tempfile.TemporaryDirectory() as temp:
+                rig = Rig({"charts_directory": temp})
+                other = "y" if axis == "x" else "x"
+                del rig.owner.endstops[other]
+                del rig.owner.rails_by_axis[other]
+                rig.workflow.cmd_CHARTS(GCmd(AXIS=axis.upper(), CENTERED=1))
+                self.assertEqual(rig.scripts, ["G28 " + axis.upper()])
+                self.assertEqual(rig.workflow.last_result["result"], "complete")
+
+    def test_single_axis_charts_still_require_manual_xy_preparation_and_both_axes_unhomed(self):
+        for axis in "xy":
+            for centered in (None, 0, "invalid"):
+                with self.subTest(axis=axis, centered=centered):
+                    rig = Rig()
+                    before = rig.effects()
+                    params = {} if centered is None else {"CENTERED": centered}
+                    with self.assertRaisesRegex(CommandError, "CENTERED=1"):
+                        rig.workflow.cmd_CHARTS(GCmd(AXIS=axis.upper(), **params))
+                    self.assertEqual(rig.effects(), before)
+            for homed in ("x", "y", "xy"):
+                with self.subTest(axis=axis, homed=homed):
+                    rig = Rig()
+                    rig.toolhead.kin.limits = [(0.0, 300.0) if item in homed else (1.0, -1.0)
+                                               for item in "xyz"]
+                    before = rig.effects()
+                    with self.assertRaisesRegex(CommandError, "both X and Y unhomed"):
+                        rig.workflow.cmd_CHARTS(GCmd(AXIS=axis.upper(), CENTERED=1))
+                    self.assertEqual(rig.effects(), before)
+
+    def test_single_axis_chart_rejection_or_export_failure_never_releases_or_homes_another_axis(self):
+        for axis in "xy":
+            for failure in ("suspect", "export"):
+                with self.subTest(axis=axis, failure=failure), tempfile.TemporaryDirectory() as temp:
+                    rig = Rig({"charts_directory": temp})
+                    if failure == "suspect":
+                        rig.home_results.append({"travel_mm": 15.0})
+                    context = mock.patch.object(workflow_module, "write_capture",
+                                                side_effect=OSError("synthetic export error")) \
+                        if failure == "export" else contextlib.nullcontext()
+                    with context, mock.patch.object(rig.workflow, "_release_terminal_home") as release:
+                        error = OSError if failure == "export" else CommandError
+                        message = "synthetic export error" if failure == "export" else "no automatic move"
+                        with self.assertRaisesRegex(error, message):
+                            rig.workflow.cmd_CHARTS(GCmd(AXIS=axis.upper(), CENTERED=1))
+                        release.assert_not_called()
+                    self.assertEqual(rig.scripts, ["G28 " + axis.upper()])
+                    self.assertEqual(rig.toolhead.moves, [])
+                    self.assertEqual(rig.workflow.last_result["result"],
+                                     "aborted" if failure == "export" else "rejected")
+                    self.assertEqual(rig.configfile.saved, {})
+                    self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
+                    self.assertEqual(rig.owner.back_off_dist, 5.0)
+                    self.assertFalse(rig.capture_active)
+                    self.assertIsNone(rig.workflow.session)
+
     def test_missing_zero_or_malformed_centered_cannot_start_or_mutate_a_waiting_session(self):
         for callback in ("cmd_TEST", "cmd_CHARTS"):
             for waiting in (False, True):
