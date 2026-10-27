@@ -37,8 +37,14 @@ except ImportError:
     # fail closed until the installed stock classes can be established.
     _PrinterHoming = _SafeZHoming = None
 
+try:
+    from .homing_override import HomingOverride as _HomingOverride
+except ImportError:
+    _HomingOverride = None
+
 _PRINTER_G28 = _PrinterHoming.cmd_G28 if _PrinterHoming is not None else None
 _SAFE_Z_G28 = _SafeZHoming.cmd_G28 if _SafeZHoming is not None else None
+_OVERRIDE_G28 = _HomingOverride.cmd_G28 if _HomingOverride is not None else None
 
 AXES = {"x": 0, "y": 1}
 REQUIRED_SUCCESSES = 10
@@ -289,9 +295,7 @@ class AccelHomingWorkflows:
                 and handler.__func__ is function)
 
     def _stock_g28(self):
-        """Resolve only stock G28 or one verified built-in safe_z_home wrapper."""
-        if self.printer.lookup_object("homing_override", None) is not None:
-            raise self._error("workflows require stock G28; remove homing_override first")
+        """Resolve stock G28 directly or beneath one verified built-in wrapper."""
         if self.printer.lookup_object("gcode_macro G28", None) is not None:
             raise self._error("workflows require stock G28; a G28 macro is configured")
         normal = self.printer.lookup_object("homing", None)
@@ -306,7 +310,24 @@ class AccelHomingWorkflows:
                for handlers in registries):
             raise self._error("cannot verify the active and ready G28 handlers")
         safe = self.printer.lookup_object("safe_z_home", None)
-        if safe is None:
+        override = self.printer.lookup_object("homing_override", None)
+        if safe is not None and override is not None:
+            raise self._error("workflows cannot combine safe_z_home and homing_override G28 wrappers")
+        if override is not None:
+            if (_HomingOverride is None or type(override) is not _HomingOverride
+                    or getattr(override, "printer", None) is not self.printer
+                    or getattr(override, "gcode", None) is not self.gcode
+                    or not self._bound_handler(getattr(override, "cmd_G28", None),
+                                               override, _OVERRIDE_G28)
+                    or not all(self._bound_handler(handlers["G28"], override, _OVERRIDE_G28)
+                               for handlers in registries)
+                    or not self._bound_handler(getattr(override, "prev_G28", None),
+                                               normal, _PRINTER_G28)):
+                raise self._error("workflows require built-in homing_override with an unmodified "
+                                  "stock G28 predecessor; custom or nested wrappers are unsupported")
+            if getattr(override, "in_script", None) is not False:
+                raise self._error("workflows cannot run from an active or unverifiable homing_override G28 script")
+        elif safe is None:
             if not all(self._bound_handler(handlers["G28"], normal, _PRINTER_G28)
                        for handlers in registries):
                 raise self._error("workflows require the unmodified stock G28 handler")
@@ -870,9 +891,10 @@ class AccelHomingWorkflows:
                 capture_started = True
                 letter = axis.upper()
                 gcmd = self.gcode.create_gcode_command("G28", "G28 " + letter, {letter: ""})
-                # safe_z_home can hop Z even for G28 X/Y. Invoke only its verified
-                # stock predecessor for this trial, retaining the public wrapper
-                # and all normal homing events. Recheck after capture setup yields.
+                # Public wrappers may hop Z, force coordinates, run SYNC_MOTORS
+                # or execute arbitrary homing G-code. Invoke only verified stock
+                # X/Y here, retaining public handlers and normal homing events.
+                # Recheck after capture setup and command creation can yield.
                 self._check_running(session)
                 self._stock_g28()(gcmd)
                 self.owner.toolhead.wait_moves()

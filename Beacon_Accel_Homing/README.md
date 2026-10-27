@@ -33,14 +33,15 @@ while idle.
 
 Use an already working, firmly mounted sensor that moves with the tested axis,
 with the correct `axes_map`. Workflows require Cartesian/CoreXY, independent Z
-and stock `G28` (`safe_z_home` is supported); see [compatibility](docs/COMPATIBILITY.md).
+and stock `G28` (standard `safe_z_home` or `homing_override` is supported);
+see [compatibility](docs/COMPATIBILITY.md).
 
 By default, calibration starts at 0.5 g and needs ten validation homes after
 discovery, with travel spread below 1.5 mm.
 
 1. Keep the printer idle and unpaused. **Center XY by hand and leave both
    axes unhomed in Klipper.** Keep Z supported and ensure nozzle/bed clearance:
-   these workflows do not perform a Z hop.
+   workflows skip Z hops and override G-code. Prepare suitable XY currents/enables separately.
 2. In the **printer console**, run:
 
    ```gcode

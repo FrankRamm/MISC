@@ -16,6 +16,14 @@ Four unexecuted regression methods cover path precedence/defaults, bounded
 environment filtering, socket/instance identity and loaded-service path reuse.
 The changed modules were not imported, compiled or run for this source review.
 
+Standard `[homing_override]` installation/workflow support and its added or
+adjusted regression source were reviewed without execution. Installer fixtures
+cover preserving the complete section/script without acknowledgement, refusing
+duplicate/conflicting built-in sections and retaining custom G28 safeguards.
+Workflow fixtures cover the verified built-in-to-stock path and its refusal
+guards. No tests, imports, compilation, plugin execution or printer actions
+were performed for this revision. The historical 558-test run does not validate it.
+
 The subsequent zero-match discovery correction is also source-reviewed only.
 Its unexecuted regression source covers Moonraker's omitted `/tmp/klippy_uds`
 default, explicit empty/relative socket paths, literal `{data_path}` expansion,
@@ -166,12 +174,12 @@ machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
 [`validation/tests.txt`](validation/tests.txt).
 
-Installer fixtures cover main/include discovery, stopped/running/multiple
-instances, process command and service parsing, configured sensor selection,
+Historical executed installer fixtures cover main/include discovery,
+stopped/running/multiple instances, process command and service parsing, configured sensor selection,
 mixed-case names, generic speed limits, legacy Beacon settings, wildcard include
 deduplication, unchanged saved blocks/macros, required-file conflicts, custom
-G28/homing_override refusal, standard safe_z_home preservation, read-only dry
-run, wrong-socket identity, printing refusal, immutable-ref downloads, pinned
+G28 safeguards and the former blanket homing_override refusal, standard
+safe_z_home preservation, read-only dry run, wrong-socket identity, printing refusal, immutable-ref downloads, pinned
 Git blob integrity, valid-Python-prefix
 truncation, shell invocation truncation, cache integrity, and aborted downloads.
 Publication fixtures also execute both bootstrap entry points with mocked
@@ -214,12 +222,14 @@ models, explicit `CENTERED=1` consent, verified stock G28 requirements,
 suspect travel without automatic returns, and measured chart export. Synthetic
 chart fixtures are explicitly marked as simulated.
 
-Safe Z compatibility fixtures verify the recognized built-in handler over
+Historical safe Z compatibility fixtures verify the recognized built-in handler over
 stock `G28`, including a nonzero configured `z_hop`. CALIBRATE, TEST, CHARTS and ACCURACY
 use only the verified stock X/Y handler, with no safe Z hop or change to the
 public `G28` registration. Handler validation repeats before each trial.
-Unknown/custom wrappers, nested handler chains, mismatched registrations,
-`homing_override` and G28 macros remain refused. These synthetic checks do not
+Unknown/custom wrappers, nested handler chains, mismatched registrations and
+G28 macros remain refused. That historical revision also refused `homing_override`;
+the current built-in override support is source-reviewed only, as noted above.
+These synthetic checks do not
 validate nozzle clearance, Cartographer probing or physical homing behavior.
 
 Centered-calibration fixtures check `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`

@@ -514,12 +514,17 @@ def make_plan(source, selected, args):
             raise InstallError("Incomplete package: missing %s in %s" % (module, source))
     graph = ConfigGraph(selected["config"])
     safe_z_home = graph.one("safe_z_home", False)
-    overrides = [name for name in graph.sections if re.match(r"^(homing_override|gcode_macro\s+g28)$", name, re.I)]
-    if overrides and not args.acknowledge_homing_override:
-        raise InstallError("Custom homing path: %s. No files changed. Review/adapt its G28, current "
-                           "changes and moves; only then use --acknowledge-homing-override. The "
-                           "installer cannot validate macro behavior, and calibration/test/chart "
-                           "workflows require a verified stock G28 path even after this acknowledgement." % ", ".join(overrides))
+    homing_override = graph.one("homing_override", False)
+    if safe_z_home is not None and homing_override is not None:
+        raise InstallError("[safe_z_home] and [homing_override] cannot be used together. "
+                           "Resolve the conflicting built-in homing sections. No files changed.")
+    custom_g28 = [name for name in graph.sections if re.match(r"^gcode_macro\s+g28$", name, re.I)]
+    if custom_g28 and not args.acknowledge_homing_override:
+        raise InstallError("Custom homing path: %s. No files changed. Review/adapt its G28 sequence, "
+                           "motor current and enable setup, and moves; only then use --acknowledge-homing-override "
+                           "to acknowledge installation. The installer cannot validate custom G28 "
+                           "macro behavior, and supervised workflows still reject that macro path."
+                           % ", ".join(custom_g28))
     plugins = [graph.one(name, False) for name in ("accel_homing", "beacon_accel_homing")]
     plugins = [section for section in plugins if section]
     if len(plugins) > 1:
@@ -537,6 +542,11 @@ def make_plan(source, selected, args):
     if safe_z_home is not None:
         messages.append("Preserved [safe_z_home]. Supervised X/Y workflows verify its stock G28 "
                         "predecessor and omit the wrapper's z_hop; ordinary G28 remains unchanged.")
+    if homing_override is not None:
+        messages.append("Preserved [homing_override] and its normal G28 sequence. Supervised X/Y "
+                        "workflows require its verified stock G28 predecessor and bypass all override "
+                        "G-code, including current/enable setup, SYNC_MOTORS and Z/Beacon actions. "
+                        "Prepare suitable test currents/enables and nozzle clearance independently.")
     prefix = "beacon_accel" if existing and existing.name.lower() == "beacon_accel_homing" else "accel_homing"
     overrides = {name: repr(getattr(args, name)) for name in
                  ("max_report_travel", "max_startup_travel")
@@ -1131,7 +1141,9 @@ def arguments(argv=None):
                         help="opt into generic max_report_travel in mm (finite 0.1..2); otherwise preserve an explicit configured limit or leave disabled")
     parser.add_argument("--max-startup-travel", type=float,
                         help="opt into generic max_startup_travel in mm (finite 0.1..5); otherwise preserve an explicit configured limit or leave disabled")
-    parser.add_argument("--acknowledge-homing-override", action="store_true", help="you reviewed custom G28/homing_override behavior")
+    parser.add_argument("--acknowledge-homing-override", action="store_true",
+                        help="acknowledge reviewed gcode_macro G28 behavior for installation only; "
+                        "not needed for built-in homing_override/safe_z_home and does not enable workflows")
     parser.add_argument("--replace-existing-links", action="store_true", help="back up/replace plugin links from another source")
     parser.add_argument("--no-restart", action="store_true", help="install/update without automatic host-service restart; activate manually")
     parser.add_argument("--dry-run", action="store_true", help="validate/print plan, no writes")
