@@ -279,6 +279,13 @@ copied plain path dictionaries cannot establish provenance. Per-axis overview
 dimensions remain fixed for the maximum 100 measured homes. No raw data is
 reconstructed from image pixels or a sidecar file.
 
+Impact capture validation additionally requires exact original trigger-packet
+and sample-index provenance identifying one retained onset row. The copied
+report uses that row's exact timestamp and preserves the original trigger time
+separately. Missing, altered or ambiguous proof rejects the capture with bounded
+numeric diagnostics; no time tolerance or synthetic row is used to make it pass.
+This correction and its regression source were reviewed without execution.
+
 Matplotlib/NumPy/Pillow are loaded only by an isolated worker using the selected
 Klipper Python and a private dependency target keyed by Python ABI and venv
 prefix. The installer verifies or prepares that target without changing global
@@ -297,8 +304,26 @@ same-origin Moonraker route accessible to an ordinary browser request, such
 as a trusted LAN or session-cookie route; it does not inherit JavaScript
 Authorization headers. Remote frontends or header-token-only authentication
 may require the frontend file browser. No tokens are embedded in image links.
-Otherwise the console/STATUS provides the PNG path.
+Otherwise the console/STATUS provides the saved PNG path; this preview advisory
+does not itself abort ACCURACY or invalidate captures.
 Formatted console support varies; Mainsail raw-output mode displays plain text.
+
+Runtime discovery follows Moonraker's
+[path defaults](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/server.py):
+explicit data/config arguments override `MOONRAKER_DATA_PATH` and
+`MOONRAKER_CONFIG_PATH`; absent/empty data uses the process's `~/printer_data`.
+Home expansion uses its `HOME` or same-UID passwd home, and relative data/config
+arguments use its working directory. Missing config uses `data/config/moonraker.conf`.
+An omitted `klippy_uds_address` uses Moonraker's
+[`/tmp/klippy_uds` default](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/components/klippy_connection.py), never a guessed
+`data/comms` socket. Only the three allowlisted path environment values are
+retained after UID/entrypoint checks, with bounded reads. A mandatory `[server]`,
+exact Klippy socket and one matching process establish `data/config` as the root;
+two matching PIDs are ambiguous even if their roots agree. Unresolved includes,
+templates, relative socket values and unsupported compact/abbreviated path
+arguments remain unmapped. Main `printer.cfg`
+containment does not establish the root. This correction has source review only;
+the affected host's warning cause and current preview route were not verified.
 
 For each X/Y axis, let `peak` be its largest absolute mean-removed deviation
 across all three windows. The initial candidate is the smallest configured

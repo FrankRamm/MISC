@@ -461,6 +461,12 @@ detected onset and measured peak. ACCURACY also creates one overview PNG per
 tested axis with commanded travel/statistics and the accepted XYZ traces.
 Overview dimensions and stored traces stay bounded for up to 100 measured homes.
 
+An accepted impact capture must identify exactly one retained sample from the
+original trigger packet and sample index. Its copied report uses that row's
+exact onset time and retains the original trigger time separately. Missing or
+ambiguous provenance aborts capture validation; no nearby row or synthetic
+sample is substituted. This correction was reviewed without executing tests.
+
 The console reports acceleration at impact detection, its measured peak in g
 and commanded travel. Charts show X/Y/Z acceleration relative to the stationary
 baseline, configured trigger threshold and detected onset marker when available.
@@ -491,6 +497,14 @@ direct preview needs a same-origin Moonraker route accessible to an ordinary
 browser GET, such as a trusted LAN or session-cookie route. Remote frontends
 or header-token-only authentication may require opening the PNG through the
 frontend file browser. No tokens are embedded in chart links.
+
+PNG-root discovery accepts a same-user Moonraker launched with path arguments
+or `MOONRAKER_DATA_PATH`/`MOONRAKER_CONFIG_PATH`, using its own home/defaults.
+It requires exactly one process matching this Klippy socket. Unresolved
+includes/templates, relative socket paths or ambiguous matches keep the saved
+PNG path available without an inline URL. That advisory does not itself abort
+ACCURACY or invalidate its measurements. This discovery correction was reviewed
+as source only; no host's current route or browser preview was verified.
 
 `SET_ACCEL_HOMING AXIS=X THRESHOLD=0.5` changes X temporarily until restart;
 use `AXIS=Y` for Y. It does not save a calibration model. For manual configuration,
