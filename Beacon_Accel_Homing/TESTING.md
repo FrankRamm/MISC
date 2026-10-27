@@ -1,5 +1,12 @@
 # Offline verification
 
+**Current migration fix: source review only.** The separation of automatic
+link ownership validation from uninstall restoration, and its added regression
+source, were reviewed without executing tests, installers or printer actions.
+The **558-test executed run recorded below predates this fix**. Its log and
+source digests remain historical evidence; they do not certify the changed
+migration implementation. No current test pass is claimed.
+
 All recorded verification uses synthetic Klipper objects, fake sensor
 batches, temporary config files and mocked status/download responses. No
 printer connection, SSH session, deployment, service restart, physical home,

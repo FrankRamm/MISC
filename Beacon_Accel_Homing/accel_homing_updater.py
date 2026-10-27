@@ -225,18 +225,11 @@ def migration_args(selected, args, api):
     result = copy.copy(args)
     if args.replace_existing_links:
         return result
-    _records, active, _receipt = api.load_uninstaller().history(selected["config"], api.uninstall_api())
-    owned = {}
-    for record in active:
-        for entry in record["manifest"]["changes"]:
-            path = Path(entry["path"])
-            if path.parent == selected["repo"] / "klippy/extras" and path.name in api.MODULES:
-                owned[path] = entry["after"]
-    links = [selected["repo"] / "klippy/extras" / name for name in api.MODULES]
-    if owned and all(not (path.exists() or path.is_symlink()) or
-                     (path in owned and api.state_matches(path, owned[path])) for path in links):
-        # Validate the complete journal, not just caller-supplied symlink text.
-        api.load_uninstaller().make_plan(selected, api.uninstall_api())
+    expected = api.load_uninstaller().validate_migration(selected, api.uninstall_api())
+    if expected:
+        # Archive ownership and exact current states authorize only these links;
+        # current user configuration need not be invertible as an uninstall.
+        result._migration_expected = expected
         result.replace_existing_links = True
     return result
 

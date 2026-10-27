@@ -366,26 +366,13 @@ def _restore_active_models(baseline, current, path, api):
     return "".join(replacements.get(i, line) for i, line in enumerate(live.lines))
 
 
-def make_plan(selected, api):
-    """Return encoded before/after entries and history refs, without writes."""
+def validate_installation_history(selected, api):
+    """Validate every archived transaction without trying to restore live config."""
     config, repo = selected["config"], selected["repo"]
     records, active, receipt = history(config, api)
     if not active:
-        if receipt:
-            for entry in receipt["manifest"]["changes"]:
-                if entry["after"]["kind"] != "file" and not api.state_matches(Path(entry["path"]), entry["after"]):
-                    _fail(api, "Restored path changed after uninstall: %s" % entry["path"], receipt["directory"])
-            return dict(entries=[], history=[], records=[item["ref"] for item in records], config=config, repo=repo)
-        # With no history, absence of activation is an ordinary idempotent no-op.
-        graph = api.ConfigGraph(config)
-        links = [repo / "klippy/extras" / name for name in api.MODULES]
-        evidence = [str(p) for p in links if p.exists() or p.is_symlink()]
-        evidence += [str(p) for p, document in graph.documents.items()
-                     if "# accel_homing previous:" in document.text
-                     or any(section.name.lower() in ("accel_homing", "beacon_accel_homing") for section in document.sections)]
-        if evidence:
-            _fail(api, "No complete installation history for existing plugin state: %s. Recover the original .accel_homing_backups directory" % ", ".join(evidence))
-        return dict(entries=[], history=[], records=[item["ref"] for item in records], config=config, repo=repo)
+        return dict(records=records, active=active, receipt=receipt, validated=[],
+                    baseline=None, updater_context=None, updater_paths=set())
     extras, exclude = repo / "klippy/extras", repo / ".git/info/exclude"
     validated, baseline = [], None
     updater_context, updater_paths = None, set()
@@ -461,6 +448,62 @@ def make_plan(selected, api):
             if before["kind"] == "file" and (b"# accel_homing previous:" in _bytes(before)
                     or b"[include accel_homing.cfg]" in _bytes(before)):
                 _fail(api, "Ambiguous/gapped legacy history; earliest snapshot is already managed", first["directory"])
+    return dict(records=records, active=active, receipt=receipt, validated=validated,
+                baseline=baseline, updater_context=updater_context, updater_paths=updater_paths)
+
+
+def validate_migration(selected, api):
+    """Prove current module ownership without inverse-merging user configuration."""
+    checked = validate_installation_history(selected, api)
+    validated = checked["validated"]
+    owned_links = {Path(entry["path"]) for entry, kind, _ in validated if kind == "link"}
+    if not owned_links:
+        return {}
+    modules = {selected["repo"] / "klippy/extras" / name for name in api.MODULES}
+    owned_files = {Path(entry["path"]) for entry, kind, _ in validated
+                   if kind in ("moon_generated", "updater_receipt")}
+    initial = {path: api.snapshot(path) for path in modules | owned_files}
+    for path in modules - owned_links:
+        if initial[path]["kind"] != "absent":
+            _fail(api, "Unowned module link cannot be migrated automatically: %s" % path)
+    virtual = {path: dict(state) for path, state in initial.items()}
+    for entry, kind, directory in reversed(validated):
+        if kind not in ("link", "moon_generated", "updater_receipt"):
+            continue
+        path = Path(entry["path"])
+        if not _same(virtual[path], entry["after"]):
+            message = ("Managed link changed/missing: %s" if kind == "link"
+                       else "Owned updater file changed/missing: %s")
+            _fail(api, message % path, directory)
+        virtual[path] = entry["before"]
+    return initial
+
+
+def make_plan(selected, api):
+    """Return encoded before/after entries and history refs, without writes."""
+    config, repo = selected["config"], selected["repo"]
+    checked = validate_installation_history(selected, api)
+    records, active, receipt = checked["records"], checked["active"], checked["receipt"]
+    if not active:
+        if receipt:
+            for entry in receipt["manifest"]["changes"]:
+                if entry["after"]["kind"] != "file" and not api.state_matches(Path(entry["path"]), entry["after"]):
+                    _fail(api, "Restored path changed after uninstall: %s" % entry["path"], receipt["directory"])
+            return dict(entries=[], history=[], records=[item["ref"] for item in records], config=config, repo=repo)
+        # With no history, absence of activation is an ordinary idempotent no-op.
+        graph = api.ConfigGraph(config)
+        links = [repo / "klippy/extras" / name for name in api.MODULES]
+        evidence = [str(p) for p in links if p.exists() or p.is_symlink()]
+        evidence += [str(p) for p, document in graph.documents.items()
+                     if "# accel_homing previous:" in document.text
+                     or any(section.name.lower() in ("accel_homing", "beacon_accel_homing") for section in document.sections)]
+        if evidence:
+            _fail(api, "No complete installation history for existing plugin state: %s. Recover the original .accel_homing_backups directory" % ", ".join(evidence))
+        return dict(entries=[], history=[], records=[item["ref"] for item in records], config=config, repo=repo)
+    extras, exclude = repo / "klippy/extras", repo / ".git/info/exclude"
+    validated, baseline = checked["validated"], checked["baseline"]
+    updater_context, updater_paths = checked["updater_context"], checked["updater_paths"]
+    first = active[0]
     paths = {Path(entry["path"]) for entry, _, _ in validated} | set(baseline or {}) | {config}
     initial = {path: api.snapshot(path) for path in paths}
     virtual = {path: dict(state) for path, state in initial.items()}

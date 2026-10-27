@@ -500,7 +500,14 @@ def validate_homing_speeds(graph, args, family, existing):
     return speeds
 
 
+def assert_migration_state(args):
+    for path, expected in getattr(args, "_migration_expected", {}).items():
+        if not state_matches(path, expected):
+            raise InstallError("%s changed after migration ownership validation. No printer transaction files changed; retry." % path)
+
+
 def make_plan(source, selected, args):
+    assert_migration_state(args)
     source = canonical(source)
     for module in MODULES:
         if not (source / module).is_file():
@@ -588,6 +595,8 @@ def make_plan(source, selected, args):
         elif link.exists():
             raise InstallError("Refusing to overwrite non-symlink plugin %s. Resolve manually." % link)
         changes[link] = {"kind": "symlink", "target": wanted}
+        if link in getattr(args, "_migration_expected", {}):
+            changes[link]["expected"] = dict(args._migration_expected[link])
     exclude = selected["repo"] / ".git/info/exclude"
     if exclude.parent.is_dir():
         before = exclude.read_bytes() if exclude.exists() else b""
@@ -1352,7 +1361,8 @@ def main(argv=None):
         for module in MODULES:
             link = selected["repo"] / "klippy/extras" / module
             changes[link] = dict(kind="symlink", target=str(updater["source"] / module),
-                                 expected=changes.get(link, {}).get("expected", snapshot(link)))
+                                 expected=getattr(planning_args, "_migration_expected", {}).get(
+                                     link, changes.get(link, {}).get("expected", snapshot(link))))
         changes.update(updater["changes"])
         print("Managed update source: %s\nMoonraker config: %s" % (updater["repo"], updater["moon"]["config"]))
     print("Accelerometer: [%s] (physical mounting/orientation not inferred)" % sensor)
@@ -1368,6 +1378,7 @@ def main(argv=None):
     moon_restart = (updater_api.prepare_restart(updater["moon"], selected, uninstall_api())
                     if updater and updater["restart_needed"] and not args.no_restart else None)
     def before_write():
+        assert_migration_state(planning_args)
         executable = selected.get("executable") or args.klipper_python
         if executable:
             assert_python_instance(selected, _lexical_python(executable))
@@ -1387,7 +1398,8 @@ def main(argv=None):
         for module in MODULES:
             path = selected["repo"] / "klippy/extras" / module
             desired = dict(kind="symlink", target=str(updater["source"] / module))
-            desired["expected"] = changes.get(path, {}).get("expected", snapshot(path))
+            desired["expected"] = getattr(planning_args, "_migration_expected", {}).get(
+                path, changes.get(path, {}).get("expected", snapshot(path)))
             if state_matches(path, {key: value for key, value in desired.items() if key != "expected"}):
                 changes.pop(path, None)
             else:
