@@ -38,6 +38,7 @@ class UpdaterFixture(unittest.TestCase):
         self.commit = "a" * 40
         self.marker()
         self.refresh()
+        self.instance_discovery = updater.moonraker_instances
         instances = mock.patch.object(updater, "moonraker_instances", side_effect=lambda api: [self.moon])
         instances.start()
         self.addCleanup(instances.stop)
@@ -115,6 +116,83 @@ class UpdaterFixture(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "bound"):
             updater._path_environment(process)
 
+    def test_omitted_klippy_socket_uses_moonraker_tmp_default_without_alternate_probing(self):
+        self.moon_config.write_text("[server]\n[update_manager]\n")
+        self.refresh()
+        expected = installer.canonical("/tmp/klippy_uds", self.home)
+        self.assertEqual(self.moon["socket"], expected)
+        selected = {**self.selected, "socket": expected}
+        self.assertIs(updater.discover_moonraker(selected, installer.uninstall_api(), instances=[self.moon]), self.moon)
+        explicit = self.data / "comms/custom-klippy.sock"
+        self.moon_config.write_text("[server]\nklippy_uds_address: %s\n" % explicit)
+        self.refresh()
+        self.assertEqual(self.moon["socket"], explicit)
+        with self.assertRaisesRegex(installer.InstallError, "socket mismatch"):
+            updater.discover_moonraker(selected, installer.uninstall_api(), instances=[self.moon])
+
+    def test_configured_socket_paths_resolve_cwd_and_literal_data_path_without_defaulting_empty(self):
+        cwd = self.home / "moonraker-working-directory"
+        cwd.mkdir()
+        argv = [str(self.home / "moon-env/bin/python"), "-m", "moonraker", "-d", str(self.data)]
+        cases = (("comms/klippy.sock", cwd / "comms/klippy.sock"),
+                 ("{data_path}/comms/klippy.sock", self.data / "comms/klippy.sock"),
+                 ("{ data_path }/comms/klippy.sock", self.data / "comms/klippy.sock"),
+                 ("", cwd))
+        for configured, expected in cases:
+            with self.subTest(configured=configured):
+                self.moon_config.write_text("[server]\nklippy_uds_address: %s\n" % configured)
+                found = updater._moon_command(argv, cwd, installer.uninstall_api(), pid=77,
+                                              path_environment={"HOME": str(self.home)}, owner_home=str(self.home))
+                self.assertIsNotNone(found)
+                self.assertEqual(found["socket"], expected)
+
+    def test_no_match_diagnostics_identify_parser_template_and_socket_stages_without_payloads(self):
+        argv = [str(self.home / "moon-env/bin/python"), "-m", "moonraker", "-d", str(self.data)]
+        for body, reason in (("[server]\nklippy_uds_address: {secrets.private_socket}\n", "socket expression is unsupported"),
+                             ("[server]\n[include missing.cfg]\n", "include pattern has no matches")):
+            with self.subTest(reason=reason):
+                self.moon_config.write_text(body)
+                notes = []
+                self.assertIsNone(updater._moon_command(argv, self.home, installer.uninstall_api(), pid=77,
+                                                       diagnostics=notes))
+                self.assertIn(reason, "\n".join(notes))
+                self.assertNotIn("secrets.private_socket", "\n".join(notes))
+        self.moon_config.write_text("[server]\nklippy_uds_address: %s\n" % self.selected["socket"])
+        self.refresh()
+        selected = {**self.selected, "socket": self.home / "wanted\nsocket"}
+        with self.assertRaises(installer.InstallError) as stopped:
+            updater.discover_moonraker(selected, installer.uninstall_api(), instances=[self.moon])
+        message = str(stopped.exception)
+        self.assertIn("Selected Klipper config=", message)
+        self.assertIn("PID=77", message)
+        self.assertIn("socket mismatch", message)
+        self.assertIn("wanted\\nsocket", message)
+        self.assertNotIn("wanted\nsocket", message)
+
+    def test_proc_rejections_report_unreadable_environment_or_wrong_uid_without_secret_errors(self):
+        proc = self.home / "synthetic-proc"
+        process = proc / "77"
+        (process / "cwd").mkdir(parents=True)
+        units = self.home / "empty-system-units"
+        units.mkdir()
+        (process / "cmdline").write_bytes(b"python\0-m\0moonraker\0-d\0" + str(self.data).encode() + b"\0")
+        uid = process.stat().st_uid
+        with mock.patch.object(updater.os, "getuid", return_value=uid, create=True), \
+                mock.patch.object(updater, "_path_environment", side_effect=PermissionError("SECRET_VALUE must not escape")):
+            found = self.instance_discovery(installer.uninstall_api(), proc, [units])
+        with self.assertRaises(installer.InstallError) as stopped:
+            updater.discover_moonraker(self.selected, installer.uninstall_api(), instances=found)
+        self.assertIn("bounded path environment unavailable (PermissionError)", str(stopped.exception))
+        self.assertNotIn("SECRET_VALUE", str(stopped.exception))
+        with mock.patch.object(updater.os, "getuid", return_value=uid + 1, create=True), \
+                mock.patch.object(Path, "read_bytes", side_effect=AssertionError("foreign process arguments must not be read")), \
+                mock.patch.object(updater, "_path_environment") as environment:
+            found = self.instance_discovery(installer.uninstall_api(), proc, [units])
+            environment.assert_not_called()
+        with self.assertRaises(installer.InstallError) as stopped:
+            updater.discover_moonraker(self.selected, installer.uninstall_api(), instances=found)
+        self.assertIn("skipped 1 processes owned by other UIDs", str(stopped.exception))
+
     def test_environment_based_instances_still_require_matching_socket_unique_pid_and_stable_inputs(self):
         argv = [str(self.home / "moon-env/bin/python"), "-m", "moonraker"]
         environment = {"HOME": str(self.home), "MOONRAKER_DATA_PATH": str(self.data)}
@@ -127,10 +205,12 @@ class UpdaterFixture(unittest.TestCase):
             updater.discover_moonraker(self.selected, installer.uninstall_api(), instances=[found, {**other, "socket": found["socket"]}])
         with self.assertRaises(installer.InstallError):
             updater.discover_moonraker(self.selected, installer.uninstall_api(), self.home / "unrelated.conf", [found])
-        changed = {**found, "path_environment": {**environment, "HOME": str(self.home / "changed-home")}}
-        with mock.patch.object(updater, "discover_moonraker", return_value=changed):
-            with self.assertRaisesRegex(installer.InstallError, "changed"):
-                updater.assert_identity(found, self.selected, installer.uninstall_api())
+        changes = ({**found, "path_environment": {**environment, "HOME": str(self.home / "changed-home")}},
+                   {**found, "cwd": str(self.home / "changed-working-directory")})
+        for changed in changes:
+            with mock.patch.object(updater, "discover_moonraker", return_value=changed):
+                with self.assertRaisesRegex(installer.InstallError, "changed"):
+                    updater.assert_identity(found, self.selected, installer.uninstall_api())
 
     def test_literal_loaded_service_reuses_verified_live_environment_path_context(self):
         argv = [str(self.home / "moon-env/bin/python"), "-m", "moonraker"]
