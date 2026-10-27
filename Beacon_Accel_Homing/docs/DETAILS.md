@@ -110,7 +110,8 @@ must move with each tested axis.
 `accel_chip: auto` requires exactly one recognized configured sensor. Explicit
 selection uses its full section name, preserving suffix case, such as
 `adxl345 ToolHead`. There is no dual-sensor routing. One-axis installation is
-available with `--axes x` or `--axes y`; TEST/CHARTS still require both axes.
+available with `--axes x` or `--axes y`. TEST requires both axes; CHARTS can
+select the installed axis with `AXIS=X` or `AXIS=Y`.
 
 Compatibility depends on APIs, including MCU trigger dispatch and timestamped,
 machine-mapped accelerometer data. An older `api_dump` driver alone does not
@@ -418,9 +419,15 @@ physical behavior need operator validation.
 TEST and CHARTS need the same existing manual XY center, both axes unhomed
 and nozzle/bed clearance as calibration. `CENTERED=1` declares that preparation
 complete; omitting it fails before movement. They start without a preliminary
-XY release or a separate confirmation and never request a Z move. Both axes
-must use suitable accelerometer endstops. A suspect home aborts without an
+XY release or a separate confirmation and never request a Z move. Each tested
+axis must use a suitable accelerometer endstop. A suspect home aborts without an
 automatic return.
+
+`ACCEL_HOMING_CHARTS_GENERATE AXIS=X CENTERED=1` homes and charts X only;
+use `AXIS=Y` for Y or omit `AXIS` to home X then Y. Other values are rejected
+before renderer preflight or workflow changes. Single-axis charts still require
+manual XY centering and both axes unhomed. A successful final home gets the
+configured final back-off; no return to center follows a single-axis capture.
 
 `ACCEL_HOMING_ACCURACY AXIS=X SAMPLES=10 CENTERED=1` uses the same preparation.
 `AXIS=X` or `AXIS=Y` tests that installed axis; omitting `AXIS` tests X then Y.
@@ -456,7 +463,11 @@ g requirement. The measured onset and peak can differ from it. All new chart
 outputs, including incomplete reports, are **PNG only**: no CSV, JSON, SVG or
 HTML sidecars. Each image uses bounded samples that retain signed extrema;
 there is no full-resolution raw-data export. Previously generated files are
-retained. The default `accel_homing_charts/` directory is beside the
+retained. Titles show the host's local time as `YYYY-MM-DD HH:MM:SS`.
+Filenames use `HH-MM-SS` for portability, for example
+`Accel Homing X - 2026-10-27 23-59-42.png`; PNG metadata retains its timezone
+offset and UTC provenance.
+The default `accel_homing_charts/` directory is beside the
 main `printer.cfg`; `charts_directory` changes it. See the
 [configuration example](../examples/accel_homing.cfg) for all settings.
 
