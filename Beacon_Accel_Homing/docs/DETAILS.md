@@ -193,6 +193,21 @@ duration and count remain in STATUS; intermediate windows create no files.
 `ACCEL_HOMING_STATUS` shows results, paths, `noise_recommendation` and the
 remaining `noise_seed_axes`.
 
+Configured batch sensors discard samples at or before the active noise
+window's cutoff before checking that window's freshness and continuity.
+Delivery between windows is drained without carrying pending samples into the
+next window. Samples belonging to an active window must still pass the full
+age, future-timestamp, continuity and sensor-error checks; the requested
+reporting interval is not a delivery-time guarantee.
+
+If timing fails, STATUS reports `sample_timing_fault` independently of the
+last homing baseline. It retains the first failure's phase, window number,
+`too_old` or `future` reason, cutoff and sample timestamps, signed sample/batch
+ages and allowed limits. An aborted noise result also retains this object as
+`timing_fault`, including after stream cleanup. A new stream clears the live
+fault summary. An older homing baseline's ages do not describe a later noise
+measurement failure.
+
 For each X/Y axis, the largest absolute peak from all three windows receives
 the greater of a **20% or 0.1 g** margin, then rounds upward on the configured
 `calibration_start_threshold + n * calibration_step` grid. For example, a
@@ -287,6 +302,11 @@ After the error, run `ACCEL_HOMING_STATUS`. It retains the baseline result and
 phase, quiet-window sample count and duration, X/Y/Z peak-to-peak variation and
 quiet limit, plus sample/batch ages and the allowed sample age. Fresh samples
 can repeatedly reset the quiet window before it spans `baseline_time`.
+The retained `impact_threshold_g` identifies the threshold used for that
+reference. A failed calibration restores the ordinary homing thresholds, so
+the current X/Y thresholds can differ from the trial recorded in the baseline
+summary. For example, a 0.5 g generic calibration trial has a 0.2 g quiet
+limit even if cleanup subsequently restores an ordinary threshold of 8 g.
 Review duration, reset count, variation and sample ages together; the error
 alone does not prove excessive sensor noise. Include the status output and
 matching Klipper log when reporting a failure.

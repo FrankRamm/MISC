@@ -254,6 +254,21 @@ disconnect aborts the measurement. Generic reporting changes are restored and
 only the measurement's sensor subscription is stopped. There is no hidden
 motor-enable or motion test in this command.
 
+For configured batch sensors, the active noise cutoff is applied before
+freshness or sequence validation, including any pending singleton sample.
+Rows at or before that cutoff cannot abort a later window merely by becoming
+old during batch processing. Between-window callbacks drain the stream and
+reset the pending timestamp sequence; an active window never uses the
+permissive homing-startup age trim to discard late eligible samples. Freshness
+and continuity failures for eligible samples still abort the measurement.
+
+The first timing rejection is retained separately as `sample_timing_fault`
+in the owner status and as `timing_fault` in an aborted noise result. It
+identifies the checking phase, noise-window index, cutoff, sample timestamps,
+signed ages, limits and whether the rejected timestamp was old or future.
+The live summary survives cleanup and is cleared when a new stream starts;
+it is independent of any retained homing-baseline summary.
+
 Each window's own XYZ mean is removed. A single PNG contains all three signed
 XYZ plots on a common vertical scale, absolute peaks, RMS and starting
 candidates. Exact duration, timestamps, count, sensor/scale/map context,

@@ -363,6 +363,9 @@ class BaselineFloorTest(unittest.TestCase):
         self.assertEqual(endstop.trigger_log.messages, [])
         self.assertGreater(obj.baseline_status["quiet_resets"], 0)
         self.assertAlmostEqual(obj.baseline_status["quiet_limit_g"], 0.2)
+        obj.threshold_g["x"] = 8.0  # Workflow cleanup restores ordinary settings.
+        self.assertAlmostEqual(obj.baseline_status["impact_threshold_g"], 0.5)
+        self.assertIn("trial impact threshold 0.5", plugin.describe_reference(obj.baseline_status))
 
     def test_half_g_floor_keeps_pre_cutoff_and_timestamp_rejections(self):
         for profile in ("pre_cutoff", "stale", "future"):
@@ -697,6 +700,146 @@ class GenericTriggerTest(unittest.TestCase):
             feed(obj, samples(10.060 + n * 0.005))
         self.assertEqual(attempt.reason, "frozen")
         self.assertEqual(trigger.messages, [[HOST]])
+
+
+class NoiseWindowBoundaryTest(unittest.TestCase):
+    """Decoded callbacks retain only samples belonging to the measured window."""
+
+    def session(self, legacy=False, cutoff=9.990):
+        obj = generic(legacy=legacy)
+        obj._end_session()
+        obj.reactor.now = 10.0
+        obj.start_noise_measurement()
+        return obj, self.window(obj, cutoff)
+
+    def window(self, obj, cutoff):
+        window = {"cutoff": cutoff, "duration": 1.0, "samples": [], "last": None,
+                  "interval": None, "complete": False, "changed": False}
+        obj.noise_window = window
+        obj.backend.prepare_reference()
+        return window
+
+    def test_mixed_boundary_batch_ignores_old_rows_before_age_and_continuity(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, window = self.session(legacy=legacy)
+
+                class DelayedRows(list):
+                    def __iter__(self):
+                        # Reproduce 1 ms spent processing a callback: the old
+                        # 9.9805 row ages from 19.5 to 20.5 ms, but every row
+                        # belonging to the new window remains younger than 11 ms.
+                        obj.reactor.now = 10.001
+                        return super().__iter__()
+
+                rows = samples(9.9805, size=61)
+                obj.backend.helper.emit({"data": DelayedRows(rows)})
+                expected = [row for row in rows if row[0] > window["cutoff"]]
+                self.assertIsNone(obj.sensor_fault)
+                self.assertEqual(len(window["samples"]), len(expected))
+                self.assertGreater(window["samples"][0][0], window["cutoff"])
+                self.assertAlmostEqual(obj.backend.last_age, 0.00175)
+
+    def test_all_old_boundary_rows_and_exact_cutoff_are_ignored(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, window = self.session(legacy=legacy)
+                # Repeated and out-of-order rows from before the new window
+                # cannot set its continuity reference or become fresh data.
+                rows = samples(9.7, size=2) + samples(9.990, size=1) + samples(9.6, size=2)
+                obj.backend.helper.emit({"data": rows})
+                self.assertIsNone(obj.sensor_fault)
+                self.assertIsNone(obj.backend.last_sample_time)
+                self.assertIsNone(obj.last_batch)
+                self.assertEqual(window["samples"], [])
+                obj.backend.helper.emit({"data": samples(9.9903125)})
+                self.assertIsNone(obj.sensor_fault)
+                self.assertEqual(len(window["samples"]), 16)
+
+    def test_current_window_oldest_row_cannot_be_hidden_by_fresh_tail(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, window = self.session(legacy=legacy, cutoff=9.9)
+                # Homing warmup trimming would discard the old prefix and
+                # accept this batch, hiding lost data inside a measured window.
+                obj.backend.helper.emit({"data": samples(9.970, size=94)})
+                self.assertEqual(obj.sensor_fault, "stale_data")
+                self.assertEqual(window["samples"], [])
+
+    def test_current_window_future_duplicate_and_gap_still_fail(self):
+        for legacy in (False, True):
+            for mode in ("future", "duplicate", "gap"):
+                with self.subTest(legacy=legacy, mode=mode):
+                    obj, window = self.session(legacy=legacy)
+                    rows = samples(9.9903125)
+                    if mode == "future":
+                        rows = samples(10.006)
+                    else:
+                        obj.backend.helper.emit({"data": rows})
+                        start = rows[-1][0] + (0.0 if mode == "duplicate" else 0.002)
+                        rows = samples(start)
+                        obj.reactor.now = 10.005
+                    obj.backend.helper.emit({"data": rows})
+                    expected = {"future": "stale_data", "duplicate": "invalid_data",
+                                "gap": "sample_gap"}[mode]
+                    self.assertEqual(obj.sensor_fault, expected)
+
+    def test_current_window_pending_sample_keeps_its_age_limit(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, window = self.session(legacy=legacy)
+                obj.backend.helper.emit({"data": samples(9.9905, size=1)})
+                self.assertEqual(len(obj.backend.pending), 1)
+                obj.reactor.now = 10.011
+                obj.backend.helper.emit({"data": samples(9.9908125, size=1)})
+                self.assertEqual(obj.sensor_fault, "stale_data")
+                self.assertEqual(window["samples"], [])
+
+    def test_between_windows_drain_pending_and_continuity_before_next_window(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, window = self.session(legacy=legacy)
+                obj.backend.helper.emit({"data": samples(9.9905, size=1)})
+                self.assertEqual(len(obj.backend.pending), 1)
+                for completed in (True, False):
+                    window["complete"] = completed
+                    obj.noise_window = window if completed else None
+                    obj.reactor.now += 0.1
+                    obj.backend.helper.emit({"data": samples(9.8)})
+                    self.assertIsNone(obj.sensor_fault)
+                    self.assertEqual(obj.backend.pending, [])
+                    self.assertIsNone(obj.backend.last_sample_time)
+                next_window = self.window(obj, 10.2)
+                obj.reactor.now = 10.206
+                obj.backend.helper.emit({"data": samples(10.2003125)})
+                self.assertIsNone(obj.sensor_fault)
+                self.assertEqual(len(next_window["samples"]), 16)
+
+    def test_cutoff_filters_pending_before_continuity_even_without_callback_gap(self):
+        obj, window = self.session()
+        obj.backend.pending = samples(9.98, size=1)
+        obj.backend.last_sample_time = 9.98
+        obj.backend.helper.emit({"data": samples(9.9903125)})
+        self.assertIsNone(obj.sensor_fault)
+        self.assertEqual(len(window["samples"]), 16)
+        self.assertEqual(obj.backend.pending, [])
+
+    def test_draining_keeps_malformed_rows_and_driver_errors_fatal(self):
+        for legacy in (False, True):
+            for mode in ("shape", "nonfinite", "errors", "overflows"):
+                with self.subTest(legacy=legacy, mode=mode):
+                    obj, window = self.session(legacy=legacy)
+                    obj.noise_window = None
+                    rows, fields = samples(9.8), {}
+                    if mode == "shape":
+                        rows[0] = (9.8, 0.0, G)
+                    elif mode == "nonfinite":
+                        rows[0] = (9.8, float("nan"), 0.0, G)
+                    else:
+                        fields[mode] = 1
+                    obj.backend.helper.emit({"data": rows, **fields})
+                    self.assertEqual(obj.sensor_fault, "invalid_data" if mode in
+                                     ("shape", "nonfinite") else "data_error")
 
 
 class StreamIntegrityTest(unittest.TestCase):

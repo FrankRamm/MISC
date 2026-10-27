@@ -358,12 +358,20 @@ class TravelCheckTest(unittest.TestCase):
 class StatusTest(unittest.TestCase):
     def test_status_is_a_copy(self):
         obj = make_homing()
+        self.assertIsNone(obj.get_status(0.0)["sample_timing_fault"])
+        obj._record_sample_timing_fault("backend_batch", 0.1, 0.01, 0.02,
+                                        cutoff=0.0, reason="too_old")
         obj.last["x"] = {"result": "impact", "impact_peak_g": 10.0}
         status = obj.get_status(0.0)
         obj.last["x"]["impact_peak_g"] = 12.0
         self.assertEqual(status["last"]["x"]["impact_peak_g"], 10.0)
+        status["sample_timing_fault"]["sample_age_ms"] = 999.0
+        self.assertEqual(obj.sample_timing_fault["sample_age_ms"], 90.0)
+        obj.sample_timing_fault["reason"] = "future"
+        self.assertEqual(status["sample_timing_fault"]["reason"], "too_old")
         self.assertEqual(set(status), {"threshold_g", "impact_sign", "homing_accel", "back_off_dist",
-                                       "homing", "baseline", "last", "sensor", "backend", "workflows"})
+                                       "homing", "baseline", "sample_timing_fault", "last", "sensor",
+                                       "backend", "workflows"})
 
 
 if __name__ == "__main__":

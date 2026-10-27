@@ -239,7 +239,8 @@ class UpdaterFixture(unittest.TestCase):
                                       owner_home=str(self.home))
         properties = dict(ActiveState="active", SubState="running", MainPID="77", User="fixture",
                           WorkingDirectory=str(self.home),
-                          ExecStart="{ argv[]=%s ; ignore_errors=no ; }" % shlex.join(argv))
+                          ExecStart="{ path=%s ; argv[]=%s ; ignore_errors=no ; }" % (
+                              argv[0], shlex.join(argv)))
         with mock.patch.object(updater, "discover_moonraker", return_value=found), \
                 mock.patch.object(updater, "_current_users", return_value={"fixture"}), \
                 mock.patch.object(installer, "read_service_unit", return_value=properties):

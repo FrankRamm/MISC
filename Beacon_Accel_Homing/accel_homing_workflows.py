@@ -842,6 +842,10 @@ class AccelHomingWorkflows:
                   "iterations_requested": NOISE_ITERATIONS,
                   "iterations": list(session["iterations"]),
                   "recommendation": recommendation, **ending}
+        timing_fault = getattr(self.owner, "sample_timing_fault", None)
+        if (not complete and timing_fault is not None
+                and timing_fault is not session.get("timing_fault_before")):
+            result["timing_fault"] = dict(timing_fault)
         try:
             result["summary_paths"] = write_noise(
                 self.charts_directory, session["run_id"], session["iterations"],
@@ -865,6 +869,7 @@ class AccelHomingWorkflows:
         session = {"mode": "noise", "state": "running", "run_id": uuid.uuid4().hex,
                    "iterations": [], "context": context, "snapshot": self._noise_snapshot(),
                    "noise_generation": self.owner.operation_generation,
+                   "timing_fault_before": getattr(self.owner, "sample_timing_fault", None),
                    "iteration": 0, "recommendation": None}
         self.session = session
         try:

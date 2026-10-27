@@ -312,6 +312,76 @@ class NoiseAcquisitionTests(unittest.TestCase):
             obj.stop_noise_measurement()
             self.assertEqual(obj.toolhead.moves, [])
 
+    def test_second_window_timing_fault_retains_signed_ages_without_replacing_homing_baseline(self):
+        for decoded in (False, True):
+            for mode in ("stale", "future"):
+                with self.subTest(decoded=decoded, mode=mode):
+                    obj = self.machine(decoded)
+                    count_g = obj.scale["scale"] / 1000.0
+                    reference = plugin.QuietReference("x", 9.0, 0.1, 0.2 / count_g,
+                                                      threshold_g=0.5)
+                    reference.add(9.5, (0.0, 0.0, 1.0 / count_g))
+                    obj._remember_reference(reference, 9.50878, "acquisition", "acquisition_timeout")
+                    previous_baseline = dict(obj.baseline_status)
+                    noise_flow(obj)
+                    obj.start_noise_measurement()
+                    capture = obj.collect_noise_window(lambda: None)
+                    completed_samples = list(capture["samples"])
+                    noise_flow(obj, mode)
+                    with self.assertRaisesRegex(CommandError, "stale or in the future"):
+                        obj.collect_noise_window(lambda: None)
+                    obj.stop_noise_measurement()
+                    fault = obj.get_status(obj.reactor.now)["sample_timing_fault"]
+                    self.assertEqual(fault["context"], "stationary_noise")
+                    self.assertEqual(fault["window"], 2)
+                    self.assertEqual(fault["reason"], "too_old" if mode == "stale" else "future")
+                    self.assertEqual(fault["phase"], "backend_batch" if decoded else "noise_batch")
+                    self.assertGreater(fault["cutoff_time_s"], completed_samples[-1][0])
+                    self.assertGreater(fault["newest_sample_time_s"], fault["oldest_sample_time_s"])
+                    if mode == "stale":
+                        self.assertGreater(fault["sample_age_ms"], fault["max_sample_age_ms"])
+                    else:
+                        self.assertLess(fault["sample_age_ms"], -fault["max_future_ms"])
+                    self.assertGreaterEqual(fault["oldest_batch_age_ms"], fault["newest_batch_age_ms"])
+                    self.assertEqual(obj.baseline_status, previous_baseline)
+                    self.assertEqual(capture["samples"], completed_samples)
+                    # Later callbacks and status callers cannot replace or mutate the first fault.
+                    obj._record_sample_timing_fault("later_callback", 100.0, 1.0, 2.0)
+                    self.assertEqual(obj.sample_timing_fault, fault)
+                    fault["sample_age_ms"] = 9999
+                    self.assertNotEqual(obj.sample_timing_fault["sample_age_ms"], 9999)
+                    command = GCmd()
+                    obj.cmd_STATUS(command)
+                    self.assertTrue(any("sample timing fault" in message and '"window": 2' in message
+                                        for message in command.responses))
+                    self.assertEqual(obj.toolhead.moves, [])
+                    self.assertEqual(obj.threshold_g, {"x": 8.0, "y": 8.0})
+                    # A new stream has independent evidence; old diagnostics are not reused.
+                    obj.start_noise_measurement()
+                    self.assertIsNone(obj.sample_timing_fault)
+                    obj.stop_noise_measurement()
+
+    def test_noise_wait_diagnostic_uses_shorter_stream_timeout(self):
+        obj = generic(options={"stream_timeout": 0.01})
+        obj._end_session()
+        obj.reactor.now = 10.0
+        noise_flow(obj)
+        first_batch = obj.reactor.on_pause
+        def flow_once():
+            first_batch()
+            obj.reactor.on_pause = None
+        obj.reactor.on_pause = flow_once
+        obj.start_noise_measurement()
+        with self.assertRaisesRegex(CommandError, "stopped receiving fresh samples"):
+            obj.collect_noise_window(lambda: None)
+        obj.stop_noise_measurement()
+        fault = obj.sample_timing_fault
+        self.assertEqual(fault["phase"], "noise_wait")
+        self.assertEqual(fault["window"], 1)
+        self.assertEqual(fault["max_sample_age_ms"], 10.0)
+        self.assertGreater(fault["sample_age_ms"], 10.0)
+        self.assertLess(fault["sample_age_ms"], obj.backend.max_age * 1000.0)
+
 
 class NoiseRig(Rig):
     def __init__(self, options=None, amplitudes=(2.0, 0.05, 0.02)):
@@ -358,6 +428,47 @@ class NoiseRig(Rig):
 
 
 class NoiseWorkflowTests(unittest.TestCase):
+    def test_failed_second_window_exposes_its_timing_fault_and_keeps_completed_window(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = NoiseRig({"charts_directory": temp})
+            fault = {"phase": "backend_batch", "context": "stationary_noise",
+                     "reason": "too_old", "window": 2, "sample_age_ms": 27.0,
+                     "oldest_batch_age_ms": 27.0, "newest_batch_age_ms": 22.0,
+                     "max_sample_age_ms": 20.0, "max_future_ms": 5.0,
+                     "cutoff_time_s": 11.2}
+            def fail_second(iteration):
+                if iteration == 2:
+                    rig.owner.sample_timing_fault = dict(fault)
+                    raise CommandError("accelerometer sample timestamps are stale or in the future")
+            rig.on_noise = fail_second
+            with self.assertRaisesRegex(CommandError, "stale or in the future"):
+                rig.workflow.cmd_NOISE(GCmd())
+            result = rig.workflow.last_result
+            self.assertEqual(result["result"], "aborted")
+            self.assertEqual(result["timing_fault"], fault)
+            self.assertEqual(len(result["iterations"]), 1)
+            self.assertEqual(result["iterations"][0]["record"]["sample_count"], 1001)
+            self.assertNotIn("timing_fault", result["iterations"][0]["record"])
+            self.assertIsNone(result["recommendation"])
+            self.assertEqual(rig.workflow.noise_seeds, {})
+            rig.owner.sample_timing_fault["sample_age_ms"] = 99.0
+            self.assertEqual(result["timing_fault"]["sample_age_ms"], 27.0)
+            self.assertEqual(rig.toolhead.moves, [])
+            self.assertEqual(rig.configfile.saved, {})
+
+    def test_failure_before_stream_start_does_not_reuse_previous_timing_fault(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = NoiseRig({"charts_directory": temp})
+            rig.owner.sample_timing_fault = {"context": "stationary_noise", "window": 2}
+            def fail_start():
+                raise CommandError("sensor or homing capture is busy")
+            rig.owner.start_noise_measurement = fail_start
+            with self.assertRaisesRegex(CommandError, "busy"):
+                rig.workflow.cmd_NOISE(GCmd())
+            self.assertEqual(rig.workflow.last_result["result"], "aborted")
+            self.assertNotIn("timing_fault", rig.workflow.last_result)
+            self.assertEqual(rig.workflow.last_result["iterations"], [])
+
     def test_three_window_charts_and_transient_candidate_seed_without_motion_or_config_writes(self):
         with tempfile.TemporaryDirectory() as temp:
             rig = NoiseRig({"charts_directory": temp})

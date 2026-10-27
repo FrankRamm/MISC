@@ -1,6 +1,50 @@
 # Offline verification
 
-**Current installation fixes: source review only.** The separation of automatic
+## Noise-window timing correction — 2026-10-27
+
+The current package passed **627 tests** with CPython 3.12.14 on Linux:
+
+```bash
+python -m unittest discover -s Beacon_Accel_Homing/tests -v
+```
+
+The final run completed in 7.209 seconds with no failures, errors or skips.
+`git diff --check` also passed. All sensor, motion, service and installation
+operations in this suite use synthetic objects, mocked services or disposable
+local files; no printer or printer service was accessed.
+
+Eight new decoded-backend regressions exercise the reproduced boundary case:
+a sample preceding the new noise window ages to 20.5 ms during a callback,
+while every relevant sample remains younger than 11 ms. Both modern and
+legacy helpers now exclude the old row before freshness/continuity checks.
+Coverage also includes exact-cutoff/all-old batches, pending singleton rows,
+between-window draining and continued rejection of genuine current-window
+stale/future/duplicate/gapped data and malformed/error/overflow reports.
+
+Four new noise diagnostics tests exercise native and decoded second-window
+failures, signed ages and stale/future classification, first-fault retention,
+cleanup and next-stream reset, preservation of completed captures and prior
+homing diagnostics, the actual shorter noise-wait timeout, and refusal to
+attach a previous run's fault to a pre-stream failure. Existing baseline and
+status-copy tests also verify the retained trial threshold after restoring
+ordinary thresholds and independent copies of timing evidence.
+
+The integrated run exposed an unrelated existing updater fixture with a
+malformed simulated `ExecStart`. Its literal command now includes systemctl's
+`path=... ; argv[]=...` structure. The production updater is unchanged.
+
+No quiet-baseline limit, impact threshold, calibration-candidate policy,
+homing freshness limit or motor behavior changed. The suite verifies the
+software boundary correction and diagnostics; it does not establish that a
+particular printer's physical noise or delivery timing is acceptable.
+
+## Earlier verification history
+
+The following notes record validation at earlier revisions. The historical
+`validation/VALIDATION.json` and `validation/tests.txt` are unchanged and do not
+describe the 627-test run above.
+
+**Earlier installation fixes: source review only at the time.** The separation of automatic
 link ownership validation from uninstall restoration, live Moonraker path-default
 discovery, and their added regression source were reviewed without executing
 tests, installers or printer actions.

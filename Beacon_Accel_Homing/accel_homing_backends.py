@@ -266,11 +266,27 @@ class ConfiguredAccelBackend:
         self.error_counts = current
         values = []
         reference = self.owner.preparation
+        noise_session = self.owner.noise_session is not None
+        noise_window = self.owner.noise_window if noise_session else None
+        drain_noise = noise_session and (noise_window is None or noise_window["complete"])
+        noise_cutoff = None if not noise_session or drain_noise else noise_window["cutoff"]
+        if drain_noise:
+            # No samples are being measured between stationary windows. Do not
+            # let this unmeasured interval carry pending data or continuity into
+            # the next window, but still validate rows and driver error counts.
+            self.prepare_reference()
+        elif noise_cutoff is not None:
+            self.pending = [row for row in self.pending if row[0] > noise_cutoff]
+            if self.last_sample_time is not None and self.last_sample_time <= noise_cutoff:
+                self.last_sample_time = None
+                self.last_xyz = self.unchanged_since = None
         # home_rails_begin can attach to an already streaming helper before
         # move_begin establishes its stricter post-settle cutoff. Drain old
         # valid backlog here rather than poisoning the upcoming preparation.
+        # Active noise windows have their own cutoff; trimming by age there
+        # would hide genuinely late samples belonging to the measured window.
         warmup_cutoff = None
-        if reference is None and self.owner.attempt is None:
+        if reference is None and self.owner.attempt is None and not noise_session:
             warmup_cutoff = self.owner.main_mcu.estimated_print_time(
                 self.owner.reactor.monotonic()) - self.max_age
         for row in rows:
@@ -279,6 +295,8 @@ class ConfiguredAccelBackend:
             sample = tuple(float(value) for value in row)
             if not all(math.isfinite(value) for value in sample):
                 return self._fail("invalid_data")
+            if drain_noise or (noise_cutoff is not None and sample[0] <= noise_cutoff):
+                continue
             if reference is not None and sample[0] <= reference.cutoff:
                 reference.pre_cutoff += 1
                 continue
@@ -308,7 +326,19 @@ class ConfiguredAccelBackend:
         attempt = self.owner.attempt
         relevant = [row for row in values if attempt is None or row[0] >= attempt.arm_time]
         if self.last_age < -0.005 or (relevant and print_time - relevant[0][0] > self.max_age):
-            return self._fail("stale_data")
+            # Stop any armed move before diagnostic formatting or logging.
+            self._fail("stale_data")
+            record_timing = getattr(self.owner, "_record_sample_timing_fault", None)
+            if record_timing is not None:
+                oldest, newest = (relevant or values)[0][0], values[-1][0]
+                future = self.last_age < -0.005
+                cutoff = (noise_cutoff if noise_cutoff is not None else
+                          reference.cutoff if reference is not None else
+                          attempt.arm_time if attempt is not None else None)
+                record_timing("backend_batch", print_time, oldest, newest, cutoff=cutoff,
+                              reason="future" if future else "too_old",
+                              sample_time=newest if future else oldest)
+            return
         if (attempt is not None and not attempt.done
                 and values[-1][0] - max(self.unchanged_since, attempt.arm_time) > 0.025
                 and self.owner._commanded_speed(attempt, values[-1][0] - 0.015) >= 40.0):

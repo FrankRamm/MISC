@@ -85,8 +85,9 @@ def validate_threshold(value, name, error, full_scale=None):
 class QuietReference:
     """Constant-size stationary-window statistics, protected by the owner lock."""
 
-    def __init__(self, axis, cutoff, duration, limit):
+    def __init__(self, axis, cutoff, duration, limit, threshold_g=None):
         self.axis, self.cutoff, self.duration, self.limit = axis, cutoff, duration, limit
+        self.threshold_g = threshold_g
         self.first = self.last = None
         self.count = 0
         self.totals = [0.0, 0.0, 0.0]
@@ -194,6 +195,8 @@ def describe_reference(status):
                age(status["oldest_batch_age_ms"]), age(status["newest_batch_age_ms"])))
     if status["motion_proof_noise_bound_g"] is not None:
         result += "; motion-proof noise bound XYZ %s g" % xyz(status["motion_proof_noise_bound_g"])
+    if status.get("impact_threshold_g") is not None:
+        result += "; trial impact threshold %.6g g" % status["impact_threshold_g"]
     return result
 
 
@@ -407,6 +410,7 @@ class BeaconAccelHoming:
         self.saved_handler = None
         self.sensor_clock = self.clock_to_time = None
         self.sensor_fault = None
+        self.sample_timing_fault = None
         self.scale = self.session_scale = None
         self.clip_values = (CLIPPED, -CLIPPED - 1)
         self.stream_alone = False
@@ -667,6 +671,7 @@ class BeaconAccelHoming:
     # Stream and acceleration, owned only for the duration of a homing session
     def _start_stream(self):
         self.sensor_fault = None
+        self.sample_timing_fault = None
         if self.backend is not None:
             self.session_scale = self.scale
             self.full_scale_g = self.backend.full_scale
@@ -948,7 +953,8 @@ class BeaconAccelHoming:
             axis = next(iter(self.session_axes))
             count_g = self.session_scale["scale"] / 1000.0
             reference = QuietReference(axis, cutoff, self.baseline_time,
-                                       self._reference_noise_limit(axis) / count_g)
+                                       self._reference_noise_limit(axis) / count_g,
+                                       threshold_g=self.threshold_g[axis])
             with self.lock:
                 self.recent.clear()
                 self.tail = None
@@ -1012,6 +1018,7 @@ class BeaconAccelHoming:
                 "observed_peak_to_peak_g": mapped(observed),
                 "quiet_limit_g": (self._reference_noise_limit(axis) if reference is None
                                   else reference.limit * count_g),
+                "impact_threshold_g": None if reference is None else reference.threshold_g,
                 "accepted_samples": 0 if reference is None else reference.accepted,
                 "pre_cutoff_samples": 0 if reference is None else reference.pre_cutoff,
                 "quiet_resets": 0 if reference is None else reference.resets,
@@ -1617,6 +1624,36 @@ class BeaconAccelHoming:
         if attempt is not None and not attempt.done:
             self._fire(attempt, reason, mcu.MCU_trsync.REASON_HOST_REQUEST)
 
+    def _record_sample_timing_fault(self, phase, sensor_now, oldest, newest,
+                                    cutoff=None, reason=None, sample_time=None, max_age=None):
+        """Retain the first rejected timestamp separately from prior baseline data."""
+        if self.sample_timing_fault is not None:
+            return
+        if max_age is None:
+            max_age = self._reference_max_age()
+        if reason is None:
+            reason = "too_old" if sensor_now - oldest > max_age else "future"
+        if sample_time is None:
+            sample_time = oldest if reason == "too_old" else newest
+        window = self.noise_window
+        context = ("stationary_noise" if self.noise_session is not None else
+                   "baseline" if self.preparation is not None else
+                   "homing" if self.attempt is not None else "stream")
+        self.sample_timing_fault = {
+            "phase": phase, "context": context, "reason": reason,
+            "window": None if window is None else window.get("index"),
+            "sensor_now_s": sensor_now, "cutoff_time_s": cutoff,
+            "oldest_sample_time_s": oldest, "newest_sample_time_s": newest,
+            "rejected_sample_time_s": sample_time,
+            "sample_age_ms": round((sensor_now - sample_time) * 1000.0, 3),
+            "oldest_batch_age_ms": round((sensor_now - oldest) * 1000.0, 3),
+            "newest_batch_age_ms": round((sensor_now - newest) * 1000.0, 3),
+            "max_sample_age_ms": max_age * 1000.0,
+            "max_future_ms": 5.0,
+        }
+        logging.info("accel_homing: sample timing fault %s",
+                     json.dumps(self.sample_timing_fault, sort_keys=True))
+
     def _inspect_batch(self, params):
         if self.noise_session is not None:
             self._inspect_noise_batch(params)
@@ -1898,7 +1935,8 @@ class BeaconAccelHoming:
         if self._noise_shared_client():
             raise self.printer.command_error("accel_homing: noise measurement requires an exclusive sensor stream")
         session = {"context": context, "sensor": self.sensor, "helper": self.helper,
-                   "helper_scale": dict(self.helper._scale) if self.backend is None else None}
+                   "helper_scale": dict(self.helper._scale) if self.backend is None else None,
+                   "windows_started": 0}
         self.noise_session = session
         with self.lock:
             # A prior home's peak tail must not be extended by stationary data.
@@ -1930,7 +1968,9 @@ class BeaconAccelHoming:
             raise self.printer.command_error("accel_homing: noise measurement requires a one-second session")
         check_running()
         started = self.reactor.monotonic()
-        window = {"cutoff": self.main_mcu.estimated_print_time(started),
+        session["windows_started"] += 1
+        window = {"index": session["windows_started"],
+                  "cutoff": self.main_mcu.estimated_print_time(started),
                   "duration": duration, "samples": [], "last": None,
                   "interval": None, "complete": False, "changed": False}
         with self.lock:
@@ -1963,6 +2003,10 @@ class BeaconAccelHoming:
                             "_noise_context": session["context"]}
                 sensor_now = self.main_mcu.estimated_print_time(now)
                 if last is not None and sensor_now - last > self.stream_timeout:
+                    self._record_sample_timing_fault(
+                        "noise_wait", sensor_now, last, last,
+                        cutoff=window["cutoff"], reason="too_old", sample_time=last,
+                        max_age=self.stream_timeout)
                     raise self.printer.command_error("accel_homing: noise measurement stopped receiving fresh samples")
                 if now - started > duration + STREAM_START_TIMEOUT:
                     raise self.printer.command_error("accel_homing: noise measurement acquisition timeout")
@@ -2015,6 +2059,11 @@ class BeaconAccelHoming:
                 if when <= window["cutoff"]:
                     continue
                 if not -0.005 <= sensor_now - when <= max_age:
+                    self._record_sample_timing_fault(
+                        "noise_batch", sensor_now, start, start + (count - 1) * interval,
+                        cutoff=window["cutoff"],
+                        reason="too_old" if sensor_now - when > max_age else "future",
+                        sample_time=when)
                     self._sensor_fault("stale_data")
                     return
                 if window["last"] is not None:
@@ -2240,6 +2289,8 @@ class BeaconAccelHoming:
             "baseline": (None if self.baseline_status is None else
                          {key: dict(value) if isinstance(value, dict) else value
                           for key, value in self.baseline_status.items()}),
+            "sample_timing_fault": (None if self.sample_timing_fault is None else
+                                    dict(self.sample_timing_fault)),
             "last": {axis: {key: dict(value) if isinstance(value, dict) else value
                             for key, value in record.items()} for axis, record in self.last.items()},
             "sensor": self.sensor_name,
@@ -2266,6 +2317,9 @@ class BeaconAccelHoming:
                                  "disabled" if self.backend.startup_travel is None else "%.3f mm" % self.backend.startup_travel))
         if self.baseline_status is not None:
             gcmd.respond_info("accel_homing: " + describe_reference(self.baseline_status))
+        if self.sample_timing_fault is not None:
+            gcmd.respond_info("accel_homing: sample timing fault " +
+                              json.dumps(self.sample_timing_fault, sort_keys=True))
         if not self.history:
             gcmd.respond_info("beacon_accel_homing: no homes recorded since restart")
             return
