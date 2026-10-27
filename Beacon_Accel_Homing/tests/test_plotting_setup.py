@@ -169,7 +169,7 @@ class PrivatePlottingSetupTests(unittest.TestCase):
                 mock.patch.object(installer, "activate_install") as activate, \
                 contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(installer.InstallError, "dependency failure"):
-                installer.main(["--no-restart"])
+                installer.main(["--no-restart", "--no-update-manager"])
         apply.assert_not_called()
         activate.assert_not_called()
 
