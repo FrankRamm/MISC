@@ -39,6 +39,8 @@ class AccuracyRig(Rig):
         if record is None:
             return {"samples": [], "dropped": 0}
         t0 = self.sensor_time
+        onset_sample = (round(t0 * 1000) & 0xFFFFFFFF, 3, 2, 4)
+        record["onset_sample"] = onset_sample
         capture = {"samples": [(t0, 0.0, 0.0, 1.0),
                                (t0 + 0.001, 0.1, 0.0, 1.0),
                                (t0 + 0.002, -4.0, -5.0, 1.0),
@@ -47,6 +49,9 @@ class AccuracyRig(Rig):
                    "detector": {"axis": axis, "attempt_count": 1,
                                 "arm_time_s": record["arm_time_s"],
                                 "onset_time_s": record["onset_time_s"],
+                                "trigger_onset_time_s": record["onset_time_s"],
+                                "onset_sample_version": 1, "onset_sample": onset_sample,
+                                "onset_sample_matches": 1, "onset_sample_index": 2,
                                 "threshold_g": self.home_calls[-1]["threshold"],
                                 "onset_g": record.get("onset_g"),
                                 "impact_peak_g": record.get("impact_peak_g"),
@@ -266,6 +271,100 @@ class AccuracyWorkflowTests(unittest.TestCase):
                 self.assertEqual(rig.workflow.last_result["axis_results"]["x"]["trials"], [])
                 self.assert_restored(rig)
 
+    def test_current_retained_row_survives_a_later_clock_adjustment(self):
+        for shift in (-0.00001, 0.00001):
+            with self.subTest(shift=shift), tempfile.TemporaryDirectory() as temp:
+                rig = AccuracyRig({"charts_directory": temp})
+                def adjust_export_clock(capture):
+                    capture["samples"] = [(row[0] + shift,) + row[1:] for row in capture["samples"]]
+                    capture["detector"]["onset_time_s"] = capture["samples"][2][0]
+                rig.capture_mutator = adjust_export_clock
+                rig.accuracy()
+                records = rig.workflow.last_result["records"]
+                self.assertEqual(len(records), 3)
+                for record in records:
+                    self.assertTrue(record["capture_valid"])
+                    self.assertEqual(record["capture_onset_sample_index"], 2)
+                    self.assertAlmostEqual(record["capture_clock_shift_s"], shift)
+                    self.assertNotEqual(record["onset_time_s"], record["trigger_onset_time_s"])
+                self.assertEqual(rig.owner.last["x"]["onset_time_s"], records[-1]["trigger_onset_time_s"])
+                self.assert_restored(rig)
+
+    def test_last_retained_impact_row_is_used_without_a_timestamp_epsilon(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = AccuracyRig({"charts_directory": temp})
+            def last_row_rounding(capture):
+                last = capture["samples"][-1]
+                capture["samples"][-1] = (last[0], -4.0, -5.0, 1.0)
+                onset = math.nextafter(last[0], math.inf)
+                stamp = capture["_record"]["onset_sample"]
+                stamp = stamp[:2] + (3, stamp[3])
+                capture["_record"].update(onset_time_s=onset, onset_sample=stamp)
+                capture["detector"].update(onset_sample=stamp, onset_sample_index=3,
+                                            trigger_onset_time_s=onset, onset_time_s=last[0])
+            rig.capture_mutator = last_row_rounding
+            rig.accuracy()
+            for record in rig.workflow.last_result["records"]:
+                self.assertTrue(record["capture_valid"])
+                self.assertEqual(record["capture_onset_sample_index"], 3)
+                self.assertGreater(record["trigger_onset_time_s"], record["onset_time_s"])
+            self.assert_restored(rig)
+
+    def test_missing_ambiguous_changed_or_downgraded_sample_proof_is_rejected(self):
+        def omit_all_stamps(capture):
+            capture["_record"].pop("onset_sample")
+            for key in ("onset_sample", "onset_sample_version", "onset_sample_matches", "onset_sample_index"):
+                capture["detector"].pop(key)
+        mutations = (omit_all_stamps,
+                     lambda c: c["detector"].update(onset_sample_version=0),
+                     lambda c: c["detector"].update(onset_sample_version=True),
+                     lambda c: c["detector"].update(onset_sample=None),
+                     lambda c: c["_record"].update(onset_sample=(123, 3, 2, 4)),
+                     lambda c: c["detector"].update(onset_sample_matches=0, onset_sample_index=None),
+                     lambda c: c["detector"].update(onset_sample_matches=2, onset_sample_index=None),
+                     lambda c: c["detector"].update(onset_sample_index=True),
+                     lambda c: c["detector"].update(onset_sample_index=-1),
+                     lambda c: c["detector"].update(onset_sample_index=len(c["samples"])),
+                     lambda c: c["detector"].update(trigger_onset_time_s=c["_record"]["onset_time_s"] + 0.00001),
+                     lambda c: c["detector"].update(onset_time_s=c["samples"][2][0] + 0.00001),
+                     lambda c: c.update(samples=c["samples"][:2]))
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp:
+                rig = AccuracyRig({"charts_directory": temp})
+                rig.capture_mutator = mutation
+                with self.assertRaisesRegex(CommandError, "lacks the current measured impact"):
+                    rig.accuracy()
+                self.assertEqual(rig.scripts, ["G28 X"])
+                self.assertEqual(rig.toolhead.moves, [])
+                self.assertFalse(rig.workflow.last_result["axis_results"]["x"]["complete"])
+                self.assert_restored(rig)
+
+    def test_missing_retained_impact_reports_bounded_diagnostics_and_keeps_prior_trials(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = AccuracyRig({"charts_directory": temp})
+            def missing_third_measurement(capture):
+                if rig.capture_stops == 4:
+                    capture["detector"].update(onset_sample_matches=0, onset_sample_index=None,
+                                                onset_time_s=None)
+            rig.capture_mutator = missing_third_measurement
+            with self.assertRaisesRegex(CommandError, "not retained exactly once.*matches=0"):
+                rig.accuracy(axis="Y", samples=5)
+            result = rig.workflow.last_result
+            axis_result = result["axis_results"]["y"]
+            self.assertEqual(len(axis_result["trials"]), 2)
+            self.assertEqual(axis_result["statistics"]["count"], 2)
+            self.assertEqual(len(result["paths"]), 3)
+            rejected = axis_result["rejected"]
+            self.assertFalse(rejected["capture_valid"])
+            diagnostics = rejected["capture_diagnostics"]
+            self.assertEqual(diagnostics["reason"], "onset packet/sample was not retained exactly once")
+            self.assertEqual(diagnostics["onset_sample_matches"], 0)
+            self.assertEqual(diagnostics["sample_count"], 4)
+            self.assertIsNone(diagnostics["capture_onset_time_s"])
+            self.assertLess(len(json.dumps(diagnostics, allow_nan=False)), 1500)
+            json.dumps(rig.workflow.get_status(0), allow_nan=False)
+            self.assert_restored(rig)
+
     def test_prior_completed_axis_and_paths_survive_fault_on_next_axis(self):
         with tempfile.TemporaryDirectory() as temp:
             rig = AccuracyRig({"charts_directory": temp})
@@ -416,6 +515,104 @@ class AccuracyWorkflowTests(unittest.TestCase):
 
 
 class DetectorCaptureProvenanceTests(unittest.TestCase):
+    def retained_impact(self, arm_clock=200, start_clock=250, position=2):
+        obj = make_homing()
+        obj.start_capture()
+        obj._capture_batch(batch(arm_clock - 20, [(0, 0, counts(1))] * 8))
+        attempt, trigger = arm_axis(obj, "x", arm_clock, arm_clock + 1000)
+        attempt.bases, attempt.baseline = (0.0, 0.0, counts(1)), 0.0
+        attempt.effective_speed, attempt.effective_accel = 100.0, 5000.0
+        attempt.moving = attempt.motion_seen = True
+        values = [(0, 0, counts(1))] * 8
+        values[position] = (counts(-10), 0, counts(1))
+        params = batch(start_clock, values)
+        obj._inspect(params)
+        self.assertEqual(attempt.reason, "impact")
+        self.assertEqual(len(trigger.messages), 1)
+        obj.disarm()
+        return obj, attempt, params
+
+    def validate_retained_impact(self, attempt, capture):
+        rig = Rig()
+        session = {"saved_thresholds": {"x": 8.0}, "last_arm_time": None}
+        record = dict(attempt.record)
+        rig.workflow._validate_accuracy_capture(session, "x", attempt.record,
+                                                capture["_record"], record, capture)
+        return record
+
+    def test_export_clock_adjustment_uses_the_actual_retained_row_and_keeps_trigger_time(self):
+        for shift in (-0.00001, 0.00001):
+            with self.subTest(shift=shift):
+                obj, attempt, _params = self.retained_impact()
+                original = copy.deepcopy(attempt.record)
+                obj.clock_to_time = lambda clock: clock / 1000.0 + shift
+                capture = obj.stop_capture()
+                detector = capture["detector"]
+                self.assertEqual(detector["onset_sample_matches"], 1)
+                self.assertEqual(detector["onset_sample_index"], 10)
+                self.assertEqual(detector["onset_time_s"], capture["samples"][10][0])
+                self.assertEqual(detector["trigger_onset_time_s"], original["onset_time_s"])
+                self.assertNotEqual(detector["onset_time_s"], original["onset_time_s"])
+                record = self.validate_retained_impact(attempt, capture)
+                self.assertEqual(record["onset_time_s"], capture["samples"][10][0])
+                self.assertEqual(record["trigger_onset_time_s"], original["onset_time_s"])
+                self.assertEqual(attempt.record, original)
+
+    def test_arm_trimmed_last_single_sample_refers_to_the_original_retained_packet(self):
+        obj, attempt, params = self.retained_impact(start_clock=193, position=7)
+        self.assertEqual(attempt.onset_batch, (200, 0, 0, 1))
+        self.assertEqual(attempt.onset_sample, (193, 7, 7, 8))
+        obj.clock_to_time = lambda clock: clock / 1000.0 + 0.00001
+        capture = obj.stop_capture()
+        self.assertEqual(capture["detector"]["onset_sample_index"], 15)
+        self.assertEqual(capture["detector"]["onset_time_s"], capture["samples"][-1][0])
+        self.assertEqual(len(capture["samples"]), 16)
+        self.assertEqual(capture["samples"][-1][1], counts(-10) * attempt.count_g)
+        self.assertEqual(params["start_clock"], 193)
+        self.validate_retained_impact(attempt, capture)
+
+    def test_original_packet_identity_and_sample_index_survive_clock_wrap(self):
+        arm_clock = 2 ** 32 - 8
+        obj, attempt, params = self.retained_impact(arm_clock, arm_clock + 4, position=4)
+        obj.clock_to_time = lambda clock: (arm_clock + (
+            ((clock - arm_clock + 0x80000000) & 0xFFFFFFFF) - 0x80000000)) / 1000.0
+        capture = obj.stop_capture()
+        self.assertEqual(attempt.onset_sample, (params["start_clock"], 7, 4, 8))
+        self.assertEqual(capture["detector"]["onset_sample_matches"], 1)
+        self.assertEqual(capture["detector"]["onset_sample_index"], 12)
+        self.assertEqual(capture["detector"]["onset_time_s"], capture["samples"][12][0])
+        self.validate_retained_impact(attempt, capture)
+
+    def test_missing_or_ambiguous_retained_packet_never_synthesizes_an_impact_row(self):
+        for mode in ("missing", "duplicate"):
+            with self.subTest(mode=mode):
+                obj, attempt, params = self.retained_impact()
+                if mode == "missing":
+                    obj.capture_batches = [row for row in obj.capture_batches if row[0] != params["start_clock"]]
+                    obj._capture_batch(batch(300, [(0, 0, counts(1))] * 8))
+                else:
+                    obj._capture_batch(params)
+                capture = obj.stop_capture()
+                self.assertEqual(capture["detector"]["onset_sample_matches"], 0 if mode == "missing" else 2)
+                self.assertIsNone(capture["detector"]["onset_sample_index"])
+                self.assertIsNone(capture["detector"]["onset_time_s"])
+                self.assertEqual(len(capture["samples"]), 16 if mode == "missing" else 24)
+                with self.assertRaisesRegex(CommandError, "not retained exactly once"):
+                    self.validate_retained_impact(attempt, capture)
+
+    def test_changed_or_removed_backend_stamp_cannot_downgrade_to_timestamp_equality(self):
+        for mode in ("changed", "removed"):
+            with self.subTest(mode=mode):
+                obj, attempt, _params = self.retained_impact()
+                if mode == "changed":
+                    attempt.onset_sample = (250, 7, 1, 8)
+                else:
+                    attempt.onset_sample = None
+                    attempt.record.pop("onset_sample")
+                capture = obj.stop_capture()
+                with self.assertRaisesRegex(CommandError, "missing or changed raw onset sample identity"):
+                    self.validate_retained_impact(attempt, capture)
+
     def test_previous_pass_cannot_supply_current_capture_reference(self):
         obj = make_homing()
         previous, _trigger = arm_axis(obj, "x", 100, 1000)

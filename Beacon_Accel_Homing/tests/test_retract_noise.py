@@ -540,11 +540,13 @@ class PNGIntegrationTests(unittest.TestCase):
             base = Path(temp)
             data, proc = base / "custom_printer_data", base / "proc"
             (data / "config/nested").mkdir(parents=True)
-            (data / "config/moonraker.conf").write_text("[server]\n", encoding="utf-8")
+            socket = data / "comms/klippy.sock"
+            (data / "config/moonraker.conf").write_text(
+                "[server]\nklippy_uds_address: %s\n" % socket, encoding="utf-8")
             process = proc / "123"
             (process / "cwd").mkdir(parents=True)
             (process / "cmdline").write_bytes(b"python\0moonraker.py\0-d\0" + str(data).encode() + b"\0")
-            socket = data / "comms/klippy.sock"
+            (process / "environ").write_bytes(b"")
             start = {"apiserver": str(socket), "config_file": str(data / "config/nested/printer.cfg")}
             with mock.patch.object(workflow_module.os, "getuid", return_value=process.stat().st_uid, create=True):
                 found = workflow_module.verified_moonraker_config_root(start, proc)

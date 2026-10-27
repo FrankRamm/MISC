@@ -460,12 +460,18 @@ class Rig:
         axis = self.home_calls[-1]["axis"] if self.home_calls else "x"
         record = self.owner.last.get(axis)
         t0 = self.capture_stops - 1.0
+        onset_sample = (round(t0 * 1000) & 0xFFFFFFFF, 3, 2, 4)
+        if record is not None:
+            record["onset_sample"] = onset_sample
         return {"samples": [(t0, 0.0, 0.0, 1.0), (t0 + 0.001, 0.1, 0.0, 1.0),
                             (t0 + 0.002, -4.0, -5.0, 1.0), (t0 + 0.003, 0.0, 0.0, 1.0)],
                 "dropped": 0, "baseline_g": (0.0, 0.0, 1.0), "_record": record,
                 "detector": None if record is None else {
                     "axis": axis, "attempt_count": 1, "arm_time_s": record["arm_time_s"],
                     "onset_time_s": record["onset_time_s"], "threshold_g": self.owner.threshold_g[axis],
+                    "trigger_onset_time_s": record["onset_time_s"],
+                    "onset_sample_version": 1, "onset_sample": onset_sample,
+                    "onset_sample_matches": 1, "onset_sample_index": 2,
                     "onset_g": record.get("onset_g"), "impact_peak_g": record.get("impact_peak_g"),
                     "direction": record.get("direction", -1),
                     "homing_speed_mm_s": self.owner.rails_by_axis[axis].info.speed,
@@ -2192,6 +2198,138 @@ class TestAndChartWorkflowTests(unittest.TestCase):
                 self.assertEqual(rig.workflow._timeout(rig.reactor.now), rig.reactor.NEVER)
                 rig.workflow.cmd_CANCEL(GCmd())
                 rig.workflow.cmd_STATUS(GCmd())
+
+
+class MoonrakerChartDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.proc = self.base / "proc"
+        self.proc.mkdir()
+        self.uid = self.base.stat().st_uid
+        self.data = self.base / "selected_data"
+        self.socket = (self.base / "selected_klippy.sock").resolve()
+
+    def configure(self, data, text=None):
+        root = data / "config"
+        root.mkdir(parents=True, exist_ok=True)
+        config = root / "moonraker.conf"
+        config.write_bytes((text if text is not None else
+                            "[server]\nklippy_uds_address: %s\n" % self.socket).encode())
+        return root
+
+    def process(self, argv=None, environment=None, pid="123"):
+        process = self.proc / pid
+        (process / "cwd").mkdir(parents=True, exist_ok=True)
+        argv = argv if argv is not None else ["python", "-m", "moonraker"]
+        (process / "cmdline").write_bytes(b"\0".join(value.encode() for value in argv) + b"\0")
+        (process / "environ").write_bytes(b"\0".join(
+            (key + "=" + value).encode() for key, value in (environment or {}).items()) + b"\0")
+        return process
+
+    def discover(self, socket=None, uid=None):
+        start = {"apiserver": str(self.socket if socket is None else socket),
+                 "config_file": str(self.base / "unrelated/nested/printer.cfg")}
+        with mock.patch.object(workflow_module.os, "getuid",
+                               return_value=self.uid if uid is None else uid, create=True):
+            return workflow_module.verified_moonraker_config_root(start, self.proc)
+
+    def test_env_only_module_launch_maps_the_socket_matched_data_config_root(self):
+        root = self.configure(self.data)
+        alternate = self.base / "outside_config/moonraker.conf"
+        alternate.parent.mkdir()
+        alternate.write_bytes((root / "moonraker.conf").read_bytes())
+        self.process(environment={"HOME": str(self.base / "process_home"),
+                                  "MOONRAKER_DATA_PATH": str(self.data),
+                                  "MOONRAKER_CONFIG_PATH": str(alternate)})
+        self.assertEqual(self.discover(), str(root.resolve()))
+        self.assertIsNone(self.discover(self.base / "wrong_klippy.sock"))
+        self.assertNotEqual(root.resolve(), alternate.parent.resolve())
+
+    def test_path_defaults_use_process_home_and_argv_overrides_environment_in_process_cwd(self):
+        home = self.base / "moonraker_home"
+        root = self.configure(home / "printer_data")
+        process = self.process(environment={"HOME": str(home),
+                                            "MOONRAKER_CONFIG_PATH": "~/printer_data/config/moonraker.conf"})
+        self.assertEqual(self.discover(), str(root.resolve()))
+        data = process / "cwd/selected"
+        selected = self.configure(data)
+        alternate = selected / "alternate.conf"
+        alternate.write_bytes((selected / "moonraker.conf").read_bytes())
+        self.process(argv=["python", "moonraker.py", "--datapath=unused", "-d", "selected",
+                           "--configfile=selected/config/alternate.conf"],
+                     environment={"HOME": str(home), "MOONRAKER_DATA_PATH": str(root),
+                                  "MOONRAKER_CONFIG_PATH": str(self.base / "missing.conf")})
+        self.assertEqual(self.discover(), str(selected.resolve()))
+        unsupported = ["-dunused", "-cunused"]
+        unsupported.extend(option[:length] + "=unused"
+                           for option in ("--datapath", "--configfile")
+                           for length in range(3, len(option)))
+        for argument in unsupported:
+            with self.subTest(argument=argument):
+                self.process(argv=["python", "-m", "moonraker", argument],
+                             environment={"HOME": str(home), "MOONRAKER_DATA_PATH": str(data)})
+                self.assertIsNone(self.discover())
+
+    def test_missing_home_uses_the_same_uid_passwd_home_without_host_home_substitution(self):
+        home = self.base / "passwd_home"
+        root = self.configure(home / "printer_data")
+        self.process()
+        lookup = mock.Mock(return_value=types.SimpleNamespace(pw_dir=str(home)))
+        with mock.patch.dict(sys.modules, {"pwd": types.SimpleNamespace(getpwuid=lookup)}):
+            self.assertEqual(self.discover(), str(root.resolve()))
+        lookup.assert_called_once_with(self.uid)
+
+    def test_omitted_socket_uses_official_default_and_unresolved_config_stays_unmapped(self):
+        root = self.configure(self.data, "[server]\n")
+        self.process(argv=["python", "-m", "moonraker", "-d", str(self.data)])
+        self.assertEqual(self.discover(Path("/tmp/klippy_uds").resolve()), str(root.resolve()))
+        self.assertIsNone(self.discover(self.data / "comms/klippy.sock"))
+        for text in ("[server]\nklippy_uds_address:\n",
+                     "[server]\nklippy_uds_address: selected_klippy.sock\n",
+                     "[server]\nklippy_uds_address: {data_path}/comms/klippy.sock\n",
+                     "[other]\nklippy_uds_address: %s\n" % self.socket,
+                     "[server]\nklippy_uds_address: %s\n[include extra.conf]\n" % self.socket,
+                     "[server]\nklippy_uds_address: %s\n[include\textra.conf]\n" % self.socket):
+            with self.subTest(text=text):
+                self.configure(self.data, text)
+                self.assertIsNone(self.discover())
+
+    def test_environment_reads_follow_uid_and_entrypoint_checks_and_remain_bounded_allowlisted(self):
+        root = self.configure(self.data)
+        process = self.process(argv=["python", "-m", "other"],
+                               environment={"MOONRAKER_DATA_PATH": str(self.data)})
+        with mock.patch.object(workflow_module, "_moonraker_path_environment",
+                               side_effect=AssertionError("environment read before identity")) as read:
+            self.assertIsNone(self.discover())
+            read.assert_not_called()
+        self.process(environment={"MOONRAKER_DATA_PATH": str(self.data)})
+        with mock.patch.object(workflow_module, "_moonraker_path_environment",
+                               side_effect=AssertionError("foreign UID environment read")) as read:
+            self.assertIsNone(self.discover(uid=self.uid + 1))
+            read.assert_not_called()
+        valid = b"MOONRAKER_DATA_PATH=" + str(self.data).encode() + b"\0"
+        (process / "environ").write_bytes(valid + b"SECRET_TOKEN=\xff\0")
+        self.assertEqual(self.discover(), str(root.resolve()))
+        for invalid in (valid + b"HOME=/first\0HOME=/second\0", b"x" * 65537):
+            with self.subTest(environment_case=len(invalid)):
+                (process / "environ").write_bytes(invalid)
+                self.assertIsNone(self.discover())
+        (process / "environ").unlink()
+        self.assertIsNone(self.discover())
+
+    def test_multiple_matching_pids_are_ambiguous_even_when_their_roots_are_identical(self):
+        root = self.configure(self.data)
+        self.process(environment={"MOONRAKER_DATA_PATH": str(self.data)})
+        self.process(environment={"MOONRAKER_DATA_PATH": str(self.data)}, pid="456")
+        self.assertIsNone(self.discover())
+        other = self.base / "other_data"
+        self.configure(other)
+        self.process(environment={"MOONRAKER_DATA_PATH": str(other)}, pid="456")
+        self.assertIsNone(self.discover())
+        self.configure(other, "[server]\nklippy_uds_address: %s\n" % (self.base / "other.sock"))
+        self.assertEqual(self.discover(), str(root.resolve()))
 
 
 class PortableChartTests(unittest.TestCase):
