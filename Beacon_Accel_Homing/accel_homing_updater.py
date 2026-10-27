@@ -319,12 +319,74 @@ def stanza(repo):
 
 
 def main_suffix(add_base, add_include):
+    # Keep the original bytes for existing include-layout transaction journals.
     text = "\n# accel_homing managed Moonraker update registration\n"
     if add_base:
         text += "[update_manager]\n"
     if add_include:
         text += "[include %s]\n" % INCLUDE
     return text.encode() if add_base or add_include else b""
+
+
+def direct_suffix(repo, add_base, add_stanza):
+    if not add_base and not add_stanza:
+        return b""
+    text = b"\n# accel_homing managed Moonraker update registration\n"
+    if add_base:
+        text += b"[update_manager]\n"
+    return text + (stanza(repo) if add_stanza else b"")
+
+
+def matching_stanza(section, repo, api):
+    expected = api.ConfigDocument(section.document.path, stanza(repo)).sections[0]
+    header = section.document.lines[section.start]
+    if (not header.startswith("[") or api.SECTION.match(header).group(1) != SECTION
+            or set(section.options) != set(expected.options)):
+        return False
+    for line in section.document.lines[section.start + 1:section.end]:
+        if line.strip() and not line.lstrip().startswith(("#", ";")):
+            match = api.OPTION.match(line)
+            if not match or match.group(1):
+                return False
+    return all(section.get(name) == expected.get(name) for name in expected.options)
+
+
+def journal_layout(context, selected, api):
+    common = {"moon_config", "moon_data", "moon_socket", "managed_repo", "origin", "branch", "append"}
+    direct = isinstance(context, dict) and context.get("layout") == "direct"
+    keys = common | ({"layout"} if direct else {"include_file"})
+    if not isinstance(context, dict) or set(context) != keys:
+        _fail(api, "invalid updater journal context")
+    repo = managed_path(selected)
+    if not isinstance(context["moon_config"], str):
+        _fail(api, "invalid updater journal main configuration")
+    main = Path(context["moon_config"])
+    include = main.parent / INCLUDE
+    if (not main.is_absolute() or (not direct and context["include_file"] != str(include))
+            or context["managed_repo"] != str(repo) or context["origin"] != ORIGIN or context["branch"] != BRANCH
+            or context["moon_socket"] != str(selected["socket"])):
+        _fail(api, "updater journal is outside selected instance ownership")
+    try:
+        suffix = base64.b64decode(context["append"], validate=True)
+    except (ValueError, TypeError):
+        _fail(api, "invalid updater main-config journal")
+    suffixes = ({direct_suffix(repo, base, entry) for base in (False, True) for entry in (False, True)}
+                if direct else {main_suffix(base, inc) for base in (False, True) for inc in (False, True)})
+    if suffix not in suffixes:
+        _fail(api, "unowned Moonraker main-config edit")
+    return dict(keys=keys, main=main, include=include, suffix=suffix, direct=direct)
+
+
+def receipt_context(value, selected, api):
+    if not isinstance(value, dict):
+        _fail(api, "unowned updater receipt contents")
+    context = {key: item for key, item in value.items() if key not in ("version", "instance", "commit")}
+    layout = journal_layout(context, selected, api)
+    if (set(value) != {"version", "instance", "commit"} | layout["keys"]
+            or value["version"] != 1 or value["instance"] != instance_key(selected)
+            or not isinstance(value["commit"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["commit"])):
+        _fail(api, "unowned updater receipt contents")
+    return context
 
 
 def activation_needed(selected, context, api):
@@ -385,44 +447,56 @@ def make_plan(source, selected, args, api):
         _fail(api, "managed checkout path cannot be represented safely in Moonraker configuration")
     include = moon["config"].parent / INCLUDE
     graph, changes = moon["graph"], {}
+    original = moon["config"].read_bytes()
+    receipt = selected["config"].parent / RECEIPT
+    receipt_state = api.snapshot(receipt)
+    previous = None
+    if receipt_state["kind"] != "absent":
+        if receipt_state["kind"] != "file":
+            _fail(api, "refusing unsafe updater receipt")
+        previous = receipt_context(json.loads(base64.b64decode(receipt_state["data"])), selected, api)
+        if any(previous[key] != str(moon[name]) for key, name in
+               (("moon_config", "config"), ("moon_data", "data"), ("moon_socket", "socket"))):
+            _fail(api, "existing updater receipt belongs to another Moonraker instance")
+        owned = base64.b64decode(previous["append"])
+        if owned and original.count(owned) != 1:
+            _fail(api, "owned Moonraker main-config registration changed/missing; preserve/reconcile it before updating")
     existing = graph.one(SECTION, False)
+    direct = True
     if existing:
-        if existing.document.path != include or include.read_bytes() != stanza(repo):
+        if existing.document.path == include and include.read_bytes() == stanza(repo):
+            direct = False
+        elif existing.document.path != moon["config"] or not matching_stanza(existing, repo, api):
             _fail(api, "conflicting existing [%s]; preserve/reconcile it instead of overwriting" % SECTION)
-    elif include.exists() or include.is_symlink():
+    elif previous:
+        _fail(api, "owned Moonraker updater registration is missing; preserve/reconcile it before updating")
+    if direct and (include.exists() or include.is_symlink()):
         _fail(api, "%s exists without the unique managed updater stanza" % include)
-    else:
-        changes[include] = dict(kind="file", data=stanza(repo))
-    matching = [pattern for pattern in graph.include_patterns if include.match(pattern)]
-    if not existing and len(matching) > 1:
-        _fail(api, "the generated updater would match multiple includes; reconcile overlapping wildcard patterns")
-    add_include = not existing and not matching
-    add_base = graph.one("update_manager", False) is None
-    suffix = main_suffix(add_base, add_include)
+    if previous and (previous.get("layout") == "direct") != direct:
+        _fail(api, "existing updater layout changed; preserve its recorded registration instead of migrating it")
+    base = graph.one("update_manager", False)
+    if base:
+        for name in base.options:
+            base.get(name)  # Reject duplicate base options without changing them.
+    add_base = base is None
+    suffix = direct_suffix(repo, add_base, not existing) if direct else main_suffix(add_base, False)
+    if suffix and previous and previous["append"]:
+        _fail(api, "Moonraker base updater configuration changed; reconcile it before updating")
     if suffix:
-        original = moon["config"].read_bytes()
         changes[moon["config"]] = dict(kind="file", data=original + suffix)
     commit = source_commit(source, api)
     context = dict(moon_config=str(moon["config"]), moon_data=str(moon["data"]),
                    moon_socket=str(moon["socket"]), managed_repo=str(repo), origin=ORIGIN,
-                   branch=BRANCH, include_file=str(include), append=base64.b64encode(suffix).decode())
-    receipt = selected["config"].parent / RECEIPT
+                   branch=BRANCH, append=base64.b64encode(suffix).decode())
+    context.update(dict(layout="direct") if direct else dict(include_file=str(include)))
+    if previous and not suffix:
+        context["append"] = previous["append"]
     encoded = (json.dumps(dict(version=1, instance=instance_key(selected), commit=commit,
                                **context), sort_keys=True, indent=2) + "\n").encode()
-    if receipt.is_symlink():
-        _fail(api, "refusing symlink updater receipt")
-    if receipt.exists():
-        old = json.loads(receipt.read_text())
-        if old.get("instance") != instance_key(selected) or old.get("managed_repo") != str(repo):
-            _fail(api, "existing updater receipt belongs to another source/instance")
-        if not suffix:
-            context["append"] = old.get("append", "")
-            encoded = (json.dumps(dict(version=1, instance=instance_key(selected), commit=commit,
-                                       **context), sort_keys=True, indent=2) + "\n").encode()
-    if not receipt.exists() or receipt.read_bytes() != encoded:
+    if receipt_state.get("data") != base64.b64encode(encoded).decode():
         changes[receipt] = dict(kind="file", data=encoded)
     for path, change in changes.items():
-        change["expected"] = api.snapshot(path)
+        change["expected"] = receipt_state if path == receipt else api.snapshot(path)
     pending = activation_needed(selected, context, api)
     return dict(moon=moon, repo=repo, source=repo / "Beacon_Accel_Homing", commit=commit,
                 changes=changes, context=context, source_input=source, published=False,
@@ -682,26 +756,16 @@ def validate_record(manifest, selected, api, verify_live=True):
     context = manifest.get("updater")
     if context is None:
         return {}
-    keys = {"moon_config", "moon_data", "moon_socket", "managed_repo", "origin", "branch", "include_file", "append"}
-    if not isinstance(context, dict) or set(context) != keys:
-        _fail(api, "invalid updater journal context")
+    layout = journal_layout(context, selected, api)
     repo = managed_path(selected)
-    main, include = Path(context["moon_config"]), Path(context["include_file"])
-    if (not main.is_absolute() or include != main.parent / INCLUDE
-            or context["managed_repo"] != str(repo) or context["origin"] != ORIGIN or context["branch"] != BRANCH
-            or context["moon_socket"] != str(selected["socket"])):
-        _fail(api, "updater journal is outside selected instance ownership")
+    main, include, suffix = layout["main"], layout["include"], layout["suffix"]
     if verify_live:
         moon = discover_moonraker(selected, api, main)
         if str(moon["data"]) != context["moon_data"]:
             _fail(api, "updater journal Moonraker data path differs from actual instance")
-    try:
-        suffix = base64.b64decode(context["append"], validate=True)
-    except (ValueError, TypeError):
-        _fail(api, "invalid updater include journal")
-    if suffix not in {main_suffix(base, inc) for base in (False, True) for inc in (False, True)}:
-        _fail(api, "unowned Moonraker main-config edit")
-    allowed = {main: "moon_main", include: "moon_generated", selected["config"].parent / RECEIPT: "updater_receipt"}
+    allowed = {main: "moon_main", selected["config"].parent / RECEIPT: "updater_receipt"}
+    if not layout["direct"]:
+        allowed[include] = "moon_generated"
     checked = {}
     for entry in manifest["changes"]:
         path = Path(entry["path"])
@@ -714,7 +778,7 @@ def validate_record(manifest, selected, api, verify_live=True):
             if before["kind"] != "absent" or after["kind"] != "file" or base64.b64decode(after["data"]) != stanza(repo):
                 _fail(api, "unowned generated Moonraker updater edit")
         elif path == main:
-            if before["kind"] != "file" or after["kind"] != "file":
+            if not suffix or before["kind"] != "file" or after["kind"] != "file":
                 _fail(api, "unsafe Moonraker main configuration journal")
             old, new = base64.b64decode(before["data"]), base64.b64decode(after["data"])
             if manifest.get("operation") == "uninstall":
@@ -729,10 +793,8 @@ def validate_record(manifest, selected, api, verify_live=True):
                 if state["kind"] != "file":
                     _fail(api, "unsafe updater receipt journal")
                 value = json.loads(base64.b64decode(state["data"]))
-                expected = {"version", "instance", "commit"} | keys
-                if (set(value) != expected or value["version"] != 1 or value["instance"] != instance_key(selected)
-                        or value["managed_repo"] != str(repo) or value["origin"] != ORIGIN or value["branch"] != BRANCH
-                        or not re.fullmatch(r"[0-9a-f]{40}", value.get("commit", ""))):
+                value_context = receipt_context(value, selected, api)
+                if set(value_context) != layout["keys"]:
                     _fail(api, "unowned updater receipt contents")
         checked[path] = allowed[path]
     return checked

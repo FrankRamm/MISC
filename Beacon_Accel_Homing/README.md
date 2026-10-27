@@ -22,6 +22,28 @@ For later updates, use **accel_homing → Update** in Mainsail/Fluidd while idle
 Older recorded snapshot installations use the same installer to migrate.
 [Custom hosts and recovery](docs/INSTALLATION.md).
 
+## Moonraker updates
+
+New installations add this entry directly to `moonraker.conf` automatically.
+For manual setup, replace `path` below with the complete **Managed update source**
+path printed by the installer, then paste into that instance's `moonraker.conf`:
+
+```ini
+[update_manager accel_homing]
+type: git_repo
+channel: dev
+path: <full Managed update source path>
+origin: https://github.com/FrankRamm/MISC.git
+primary_branch: codex/universal-accel-homing
+is_system_service: False
+managed_services: klipper
+```
+
+Add `[update_manager]` once if your configuration does not already contain it.
+Keep only one `accel_homing` updater entry, including entries in an existing
+`accel_homing_update.cfg`; those installations keep their current include.
+If you edited the configuration manually, restart that Moonraker service while idle.
+
 ## Settings
 
 In your existing `[accel_homing]` section (`accel_homing.cfg` for new installs),
