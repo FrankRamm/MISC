@@ -7,6 +7,7 @@ import json
 import io
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -59,6 +60,93 @@ class UpdaterFixture(unittest.TestCase):
         backup = installer.apply_plan(changes, self.config, selected=self.selected, updater=plan)
         self.refresh()
         return backup
+
+    def test_live_moonraker_paths_follow_argv_environment_and_verified_owner_home(self):
+        owner = self.home / "moonraker-owner"
+        default_data = owner / "printer_data"
+        default_config = default_data / "config/moonraker.conf"
+        default_config.parent.mkdir(parents=True)
+        default_config.write_bytes(self.moon_config.read_bytes())
+        alternate = self.home / "alternate-data"
+        alternate.mkdir()
+        custom = self.home / "custom-moonraker.conf"
+        custom.write_bytes(self.moon_config.read_bytes())
+        argv = [str(self.home / "moon-env/bin/python"), "-m", "moonraker"]
+        cases = (
+            ([], {"HOME": str(owner), "MOONRAKER_DATA_PATH": str(self.data)}, self.data, self.moon_config),
+            ([], {"HOME": str(owner)}, default_data, default_config),
+            ([], {}, default_data, default_config),
+            ([], {"HOME": str(owner), "MOONRAKER_DATA_PATH": "~/printer_data"}, default_data, default_config),
+            (["-d", str(alternate), "--datapath", str(self.data)],
+             {"HOME": str(owner), "MOONRAKER_DATA_PATH": str(alternate)}, self.data, self.moon_config),
+            (["--datapath="], {"HOME": str(owner), "MOONRAKER_DATA_PATH": str(self.data)}, default_data, default_config),
+            (["-d", str(self.data)], {"HOME": str(owner), "MOONRAKER_CONFIG_PATH": str(custom)}, self.data, custom),
+            (["-d", str(self.data), "--configfile", str(self.moon_config)],
+             {"HOME": str(owner), "MOONRAKER_CONFIG_PATH": str(custom)}, self.data, self.moon_config),
+        )
+        for flags, environment, data, config in cases:
+            with self.subTest(flags=flags, environment_keys=sorted(environment)):
+                found = updater._moon_command(argv + flags, self.home, installer.uninstall_api(), pid=77,
+                                              path_environment=environment, owner_home=str(owner))
+                self.assertIsNotNone(found)
+                self.assertEqual(found["data"], data)
+                self.assertEqual(found["config"], config)
+        # Moonraker treats an empty config as a supplied path, not its default.
+        self.assertIsNone(updater._moon_command(argv, self.home, installer.uninstall_api(), pid=77,
+                                               path_environment={"HOME": str(owner), "MOONRAKER_CONFIG_PATH": ""},
+                                               owner_home=str(owner)))
+        # No live environment proof must not create an assumed default instance.
+        self.assertIsNone(updater._moon_command(argv, self.home, installer.uninstall_api(), pid=77))
+
+    def test_moonraker_environment_reader_retains_only_bounded_path_inputs(self):
+        process = self.home / "synthetic-process"
+        process.mkdir()
+        path = process / "environ"
+        path.write_bytes(b"HOME=/verified/home\0MOONRAKER_DATA_PATH=/verified/data\0"
+                         b"MOONRAKER_CONFIG_PATH=/verified/moonraker.conf\0"
+                         b"SECRET_TOKEN=must-not-be-retained\0MOONRAKER_LOG_PATH=/ignored/log\0")
+        self.assertEqual(updater._path_environment(process), {
+            "HOME": "/verified/home", "MOONRAKER_DATA_PATH": "/verified/data",
+            "MOONRAKER_CONFIG_PATH": "/verified/moonraker.conf"})
+        path.write_bytes(b"HOME=/one\0HOME=/two\0")
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            updater._path_environment(process)
+        path.write_bytes(b"IGNORED=" + b"x" * 65536)
+        with self.assertRaisesRegex(ValueError, "bound"):
+            updater._path_environment(process)
+
+    def test_environment_based_instances_still_require_matching_socket_unique_pid_and_stable_inputs(self):
+        argv = [str(self.home / "moon-env/bin/python"), "-m", "moonraker"]
+        environment = {"HOME": str(self.home), "MOONRAKER_DATA_PATH": str(self.data)}
+        found = updater._moon_command(argv, self.home, installer.uninstall_api(), pid=77,
+                                      service="moonraker-test.service", scope="system", start="100",
+                                      path_environment=environment, owner_home=str(self.home))
+        other = {**found, "pid": 78, "socket": self.home / "other-klippy.sock"}
+        self.assertIs(updater.discover_moonraker(self.selected, installer.uninstall_api(), instances=[found, other]), found)
+        with self.assertRaisesRegex(installer.InstallError, "multiple live"):
+            updater.discover_moonraker(self.selected, installer.uninstall_api(), instances=[found, {**other, "socket": found["socket"]}])
+        with self.assertRaises(installer.InstallError):
+            updater.discover_moonraker(self.selected, installer.uninstall_api(), self.home / "unrelated.conf", [found])
+        changed = {**found, "path_environment": {**environment, "HOME": str(self.home / "changed-home")}}
+        with mock.patch.object(updater, "discover_moonraker", return_value=changed):
+            with self.assertRaisesRegex(installer.InstallError, "changed"):
+                updater.assert_identity(found, self.selected, installer.uninstall_api())
+
+    def test_literal_loaded_service_reuses_verified_live_environment_path_context(self):
+        argv = [str(self.home / "moon-env/bin/python"), "-m", "moonraker"]
+        found = updater._moon_command(argv, self.home, installer.uninstall_api(), pid=77,
+                                      service="moonraker-test.service", scope="system", start="100",
+                                      path_environment={"HOME": str(self.home), "MOONRAKER_DATA_PATH": str(self.data)},
+                                      owner_home=str(self.home))
+        properties = dict(ActiveState="active", SubState="running", MainPID="77", User="fixture",
+                          WorkingDirectory=str(self.home),
+                          ExecStart="{ argv[]=%s ; ignore_errors=no ; }" % shlex.join(argv))
+        with mock.patch.object(updater, "discover_moonraker", return_value=found), \
+                mock.patch.object(updater, "_current_users", return_value={"fixture"}), \
+                mock.patch.object(installer, "read_service_unit", return_value=properties):
+            identity = updater.service_identity(found, self.selected, installer.uninstall_api(), "systemctl")
+        self.assertEqual(identity["instance"]["config"], str(self.moon_config))
+        self.assertEqual(identity["instance"]["path_environment"], found["path_environment"])
 
     def test_exact_git_transport_and_owned_include_are_journalled_without_env_or_hooks(self):
         plan = self.updater_plan()
