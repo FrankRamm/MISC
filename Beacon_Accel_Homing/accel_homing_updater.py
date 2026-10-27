@@ -33,6 +33,40 @@ RECEIPT = ".accel_homing_updater.json"
 PATH_ENVIRONMENT = frozenset(("HOME", "MOONRAKER_DATA_PATH", "MOONRAKER_CONFIG_PATH"))
 
 
+class _MoonrakerDiscovery(list):
+    def __init__(self):
+        super().__init__()
+        self.diagnostics = []
+
+
+def _diagnostic_value(value):
+    return json.dumps(str(value)[:240], ensure_ascii=True)
+
+
+def _discovery_note(notes, source, reason, config=None):
+    if notes is None or len(notes) >= 8:
+        return
+    text = "%s: %s" % (_diagnostic_value(source), reason)
+    if config is not None:
+        text += "; config=" + _diagnostic_value(config)
+    notes.append(text)
+
+
+def _config_rejection(error):
+    message = str(error)
+    if message.startswith("Include has no matches"):
+        return "configuration include pattern has no matches"
+    if message.startswith("Config included more than once"):
+        return "configuration includes the same file more than once"
+    if message.startswith("Recursive config include"):
+        return "configuration has a recursive include"
+    if message.startswith("Expected exactly one [server]"):
+        return "configuration needs one unambiguous [server] section"
+    if message.startswith("Duplicate "):
+        return "configuration has an ambiguous duplicate option"
+    return "configuration could not be read by the safe configuration parser"
+
+
 def _fail(api, message):
     raise api.InstallError("Moonraker updater: " + message)
 
@@ -91,7 +125,7 @@ def _expand_moon_path(value, environment, owner_home):
 
 
 def _moon_command(argv, cwd, api, pid=None, service=None, scope=None, start=None,
-                  path_environment=None, owner_home=None):
+                  path_environment=None, owner_home=None, diagnostics=None):
     index = _moon_index(argv)
     if index is None:
         return None
@@ -106,8 +140,11 @@ def _moon_command(argv, cwd, api, pid=None, service=None, scope=None, start=None
     # falls back to ~/printer_data, but an empty config is not a default.
     defaults = environment or {}
     raw_data = options.get("data", defaults.get("MOONRAKER_DATA_PATH"))
+    source = "PID %s" % pid if pid is not None else "service %s" % (service or "unknown")
     if not raw_data and environment is None:
+        _discovery_note(diagnostics, source, "data path unavailable without explicit argv or verified live environment")
         return None
+    config = None
     try:
         data = api.canonical(_expand_moon_path(raw_data or "~/printer_data", environment, owner_home), cwd)
         raw_config = options.get("config", defaults.get("MOONRAKER_CONFIG_PATH"))
@@ -115,13 +152,21 @@ def _moon_command(argv, cwd, api, pid=None, service=None, scope=None, start=None
                   if raw_config is not None else data / "config/moonraker.conf")
         graph = api.ConfigGraph(config)
         server = graph.one("server")
-        raw_socket = server.get("klippy_uds_address", str(data / "comms/klippy.sock"))
+        # Moonraker defaults this option to /tmp/klippy_uds. An explicit empty
+        # value is a configured relative path, not permission to use a default.
+        raw_socket = server.get("klippy_uds_address", "/tmp/klippy_uds")
+        raw_socket = re.sub(r"\{\s*data_path\s*\}", lambda _match: str(data), raw_socket)
         if any(token in raw_socket for token in ("$", "%", "{", "}")):
+            _discovery_note(diagnostics, source, "socket expression is unsupported; only literal paths and {data_path} are resolved", config)
             return None
-        socket = Path(_expand_moon_path(raw_socket, environment, owner_home))
-        if not socket.is_absolute():
-            return None
-    except (api.InstallError, OSError, ValueError):
+        # ConfigHelper.getpath resolves configured relative paths against the
+        # Moonraker process working directory, after template/home expansion.
+        socket = api.canonical(_expand_moon_path(raw_socket, environment, owner_home), cwd)
+    except api.InstallError as exc:
+        _discovery_note(diagnostics, source, _config_rejection(exc), config)
+        return None
+    except (OSError, ValueError) as exc:
+        _discovery_note(diagnostics, source, "path/configuration resolution failed (%s)" % type(exc).__name__, config)
         return None
     return dict(config=config, data=data, socket=socket.resolve(), pid=pid,
                 service=service, service_scope=scope, start_time=start,
@@ -130,14 +175,17 @@ def _moon_command(argv, cwd, api, pid=None, service=None, scope=None, start=None
 
 
 def moonraker_instances(api, proc_root=Path("/proc"), unit_directories=None):
-    found = []
+    found = _MoonrakerDiscovery()
+    skipped_uid = 0
     if proc_root.is_dir():
         for process in proc_root.iterdir():
             if not process.name.isdigit():
                 continue
+            recognized = False
             try:
                 uid = process.stat().st_uid
                 if hasattr(os, "getuid") and uid != os.getuid():
+                    skipped_uid += 1
                     continue
                 raw = (process / "cmdline").read_bytes()
                 if len(raw) > 65536:
@@ -145,18 +193,31 @@ def moonraker_instances(api, proc_root=Path("/proc"), unit_directories=None):
                 argv = [part.decode("utf-8") for part in raw.split(b"\0") if part]
                 if _moon_index(argv) is None:
                     continue
-                environment = _path_environment(process)
+                recognized = True
+                try:
+                    environment = _path_environment(process)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    _discovery_note(found.diagnostics, "PID " + process.name,
+                                    "bounded path environment unavailable (%s)" % type(exc).__name__)
+                    continue
                 groups = (process / "cgroup").read_text() if (process / "cgroup").is_file() else ""
                 services = re.findall(r"/([^/\n]+\.service)(?:/|$)", groups)
                 fields = (process / "stat").read_text().rsplit(") ", 1)[1].split()
                 item = _moon_command(argv, (process / "cwd").resolve(), api, int(process.name),
                                      services[-1] if services else None,
                                      "user" if "/user.slice/" in groups else "system", fields[19],
-                                     path_environment=environment, owner_home=_owner_home(uid))
+                                     path_environment=environment, owner_home=_owner_home(uid),
+                                     diagnostics=found.diagnostics)
                 if item:
                     found.append(item)
-            except (OSError, UnicodeError, ValueError, IndexError):
+            except (OSError, UnicodeError, ValueError, IndexError) as exc:
+                if recognized:
+                    _discovery_note(found.diagnostics, "PID " + process.name,
+                                    "process identity metadata unavailable (%s)" % type(exc).__name__)
                 continue
+    if skipped_uid:
+        _discovery_note(found.diagnostics, "process scan",
+                        "skipped %s processes owned by other UIDs; only installer UID %s was inspected" % (skipped_uid, os.getuid()))
     directories = unit_directories or (Path("/etc/systemd/system"), Path("/lib/systemd/system"),
                                        Path("/usr/lib/systemd/system"), Path.home() / ".config/systemd/user")
     seen = {item["service"] for item in found if item["service"]}
@@ -165,24 +226,34 @@ def moonraker_instances(api, proc_root=Path("/proc"), unit_directories=None):
             if unit.name in seen:
                 continue
             seen.add(unit.name)
+            recognized = "moonraker" in unit.name.lower()
             try:
-                if any((directory / (unit.name + ".d")).glob("*.conf")):
-                    continue
                 text = re.sub(r"\\\r?\n\s*", " ", unit.read_text())
+                if not re.search(r"\bmoonraker(?:\.py)?\b", text, re.I):
+                    continue
+                recognized = True
+                if any((directory / (unit.name + ".d")).glob("*.conf")):
+                    _discovery_note(found.diagnostics, unit.name, "service has drop-ins and needs a readable matching live process")
+                    continue
                 users = re.findall(r"^\s*User\s*=\s*(\S+)\s*$", text, re.M)
                 allowed_users = _current_users()
                 if allowed_users is not None and (len(users) != 1 or users[0] not in allowed_users):
+                    _discovery_note(found.diagnostics, unit.name, "service user does not match the installer user")
                     continue
                 starts = re.findall(r"^\s*ExecStart\s*=\s*(.+)$", text, re.M)
                 working = re.findall(r"^\s*WorkingDirectory\s*=\s*(.+)$", text, re.M)
                 if len(starts) != 1 or "$" in starts[0] or "%" in starts[0]:
+                    _discovery_note(found.diagnostics, unit.name, "service arguments need a readable matching live process")
                     continue
                 item = _moon_command(shlex.split(starts[0]), working[-1] if working else "/", api,
                                      service=unit.name,
-                                     scope="user" if directory == Path.home() / ".config/systemd/user" else "system")
+                                     scope="user" if directory == Path.home() / ".config/systemd/user" else "system",
+                                     diagnostics=found.diagnostics)
                 if item:
                     found.append(item)
-            except (OSError, UnicodeError, ValueError):
+            except (OSError, UnicodeError, ValueError) as exc:
+                if recognized:
+                    _discovery_note(found.diagnostics, unit.name, "service definition unavailable (%s)" % type(exc).__name__)
                 continue
     return found
 
@@ -200,16 +271,30 @@ def discover_moonraker(selected, api, explicit=None, instances=None):
     candidates = live or candidates
     unique = {(item["config"], item.get("service")): item for item in candidates}
     if len(unique) != 1:
+        details = ["Selected Klipper config=%s; socket=%s; installer UID=%s." % (
+            _diagnostic_value(selected["config"]), _diagnostic_value(selected["socket"]),
+            os.getuid() if hasattr(os, "getuid") else "unavailable")]
+        for item in instances[:4]:
+            reason = ("socket mismatch" if item["socket"] != selected["socket"] else
+                      "explicit config selector mismatch" if config is not None and item["config"] != config else
+                      "matches selected socket; selection is ambiguous")
+            details.append("Verified Moonraker candidate PID=%s service=%s config=%s socket=%s: %s." % (
+                item.get("pid"), _diagnostic_value(item.get("service")), _diagnostic_value(item["config"]),
+                _diagnostic_value(item["socket"]), reason))
+        details.extend(getattr(instances, "diagnostics", [])[:8])
+        if not instances and not getattr(instances, "diagnostics", []):
+            details.append("No readable recognized Moonraker process or literal service candidate was found for this user.")
         _fail(api, "cannot select exactly one Moonraker for this Klippy socket (%d matches). "
-              "Use --moonraker-config with an actual matching process/literal service, or --no-update-manager; "
-              "no printer configuration was changed" % len(unique))
+              "Run as the selected service user; --moonraker-config "
+              "only filters verified candidates and cannot supply missing process/socket evidence.\n%s" %
+              (len(unique), "\n".join(details)))
     return next(iter(unique.values()))
 
 
 def _fingerprint(moon):
     return {key: str(moon[key]) if isinstance(moon[key], Path) else moon.get(key)
             for key in ("config", "data", "socket", "pid", "start_time", "service", "service_scope", "argv",
-                        "path_environment", "owner_home")}
+                        "cwd", "path_environment", "owner_home")}
 
 
 def assert_identity(moon, selected, api):

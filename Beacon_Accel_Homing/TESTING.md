@@ -16,6 +16,13 @@ Four unexecuted regression methods cover path precedence/defaults, bounded
 environment filtering, socket/instance identity and loaded-service path reuse.
 The changed modules were not imported, compiled or run for this source review.
 
+The subsequent zero-match discovery correction is also source-reviewed only.
+Its unexecuted regression source covers Moonraker's omitted `/tmp/klippy_uds`
+default, explicit empty/relative socket paths, literal `{data_path}` expansion,
+working-directory identity, and bounded rejection diagnostics that omit raw
+environment/configuration and exception payloads. No affected-host cause or
+universal installation compatibility is established by this source review.
+
 All recorded verification uses synthetic Klipper objects, fake sensor
 batches, temporary config files and mocked status/download responses. No
 printer connection, SSH session, deployment, service restart, physical home,
