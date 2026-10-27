@@ -65,7 +65,7 @@ immutable download cache. See [updater details](INSTALLATION.md#native-moonraker
 
 Known installer-owned snapshot links migrate using transaction history.
 Foreign links still require explicit review and `--replace-existing-links`;
-custom homing overrides keep their separate acknowledgement requirement.
+custom `gcode_macro G28` entries keep their separate acknowledgement requirement.
 Keep source directories and backups for rollback. Moonraker **Hard Recovery**
 may replace the checkout and discard ignored plotting dependencies: rerun the
 short installer afterward. Use it again when a release requires installer,
@@ -241,15 +241,20 @@ are unchanged; a completed release is not proof of physical stop accuracy.
 
 Workflows require idle, unpaused Klipper, Cartesian/CoreXY, independent Z,
 controllable XY enables and single-touch X/Y settings (`homing_retract_dist: 0`,
-`min_home_dist: 0`). Standard Klipper/Kalico `[safe_z_home]` is supported when
-its active handler and underlying stock `G28` are verified. Workflow homes
-recheck this path before each trial and call that stock handler for X or Y
-only, bypassing `safe_z_home`'s `z_hop`.
-Normal `G28` retains its configured safe Z behavior. Each successful underlying
+`min_home_dist: 0`). Standard Klipper/Kalico `[safe_z_home]` or `[homing_override]`
+is supported when its exact built-in handler, stock predecessor and matching
+G28 registrations are verified; an override script must not be active.
+The two built-in sections cannot coexist. Workflow homes recheck this path
+before each trial and call stock `G28` for X or Y only. They skip safe Z hops,
+all override G-code and forced `set_position_*` setup, including current/enable
+hooks, `SYNC_MOTORS` and Z/Beacon actions. Prepare suitable XY test
+currents/enables and nozzle clearance independently.
+Normal `G28` retains its configured wrapper and complete macro sequence.
+Each successful underlying
 XY home releases as described above; later safe Z/wrapper positioning may still
 move XY. Z homing and Cartographer probe configuration
-retain their existing behavior. Dual carriages, shared XY/Z enables, `homing_override`,
-G28 macros and unknown wrapper chains remain rejected. See
+retain their existing behavior. Dual carriages, shared XY/Z enables,
+G28 macros and nested/unknown wrapper chains remain rejected. See
 [the source contract and limits](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
 Calibration defaults: start at 0.5 g, increase by 0.5 g for early triggers, stop
@@ -372,7 +377,8 @@ including temporary changes left by a macro or tuning routine. A nonzero
 CALIBRATE/TEST/CHARTS check their requested generic X/Y plans before changing
 workflow state or moving; homing preparation checks them again. Ordinary
 `G28 X/Y` still uses the configured public handler, so `safe_z_home` can perform
-its Z hop before a later X/Y policy refusal. No Z settings are changed.
+its Z hop or `homing_override` its script before a later X/Y policy refusal.
+No Z settings are changed.
 
 A generic home with no impact must establish motion before a calculated
 deadline or fail with `no_motion`; this does not establish an origin. Ordinary

@@ -1,6 +1,8 @@
 # Compatibility evidence and limits
 
-This rewrite was verified offline. No new sensor, printer, homing impact,
+Historical offline verification is recorded in [TESTING.md](../TESTING.md).
+The new built-in `homing_override` support and regression source were reviewed
+without execution. No new sensor, printer, homing impact,
 calibration or first-layer result was tested on hardware. The original
 Beacon-only project's historical printer reports are not evidence that these
 changes work on every ADXL carrier, firmware version, fork or mechanism.
@@ -21,6 +23,7 @@ Source contracts inspected for this work:
 | [Beacon](https://github.com/beacon3d/beacon_klipper/blob/3eb0134607664734ccf5cd94cb51840e1c8b27b3/beacon.py) | `3eb0134607664734ccf5cd94cb51840e1c8b27b3`: raw accelerator helper, scale and axes map |
 | [Cartographer configuration](https://github.com/Cartographer3D/docs/blob/2e7c69641fb106cf9c59d70f3987008a1117c887/cartographer-probe/installation-and-setup/installation/klipper-configuation.md) | Separate configured `[adxl345]` or `[lis2dw]` object through its MCU; scanner distance data is not substituted for acceleration |
 | [Klipper safe_z_home](https://github.com/Klipper3d/klipper/blob/ee2c6fb6b00b2b5d097ef70d0868df7d74943b51/klippy/extras/safe_z_home.py), [Kalico safe_z_home](https://github.com/KalicoCrew/kalico/blob/0057b6a153170807e99080360c1ef15a2078f672/klippy/extras/safe_z_home.py) | Built-in `SafeZHoming.cmd_G28` retains the previous handler as `prev_G28`; configured `z_hop` runs before axis selection |
+| [Klipper homing_override](https://github.com/Klipper3d/klipper/blob/ee2c6fb6b00b2b5d097ef70d0868df7d74943b51/klippy/extras/homing_override.py), [Kalico homing_override](https://github.com/KalicoCrew/kalico/blob/0057b6a153170807e99080360c1ef15a2078f672/klippy/extras/homing_override.py) | Built-in `HomingOverride.cmd_G28` retains `prev_G28` and uses `in_script` to guard recursive script calls |
 
 These revisions establish API assumptions, not a promise that only those
 revisions run or that later versions remain compatible. Standard generic
@@ -94,29 +97,43 @@ or physical printer was exercised here.
 
 ## safe_z_home and X/Y-only workflows
 
-The standard Klipper/Kalico `[safe_z_home]` is supported without the installer's
-`--acknowledge-homing-override` flag. Cartographer's
+The standard Klipper/Kalico `[safe_z_home]` and `[homing_override]` are supported
+without the installer's `--acknowledge-homing-override` flag. They cannot coexist
+in one configuration. The installer preserves the selected section and its
+settings; that alone does not certify the running handler chain. Cartographer's
 [Klipper setup guide](https://docs.cartographer3d.com/cartographer-probe/installation-and-setup/software-configuration/klipper-setup)
-recommends this built-in path for homing Z at a suitable bed position.
-The installer preserves the section and probe/Z settings.
+recommends `safe_z_home` for homing Z at a suitable bed position.
+The installer preserves existing probe/Z settings.
 
 Even `G28 X` sent to the standard safe Z handler can run its configured
-`z_hop` before checking which axes were requested. CALIBRATE, TEST and CHARTS
+`z_hop` before checking which axes were requested. CALIBRATE, TEST, CHARTS and ACCURACY
 therefore verify that the active `G28` is either stock or the recognized
-built-in `SafeZHoming.cmd_G28` whose `prev_G28` is stock. They call the verified
-stock handler directly for the requested X or Y axis only, rechecking the path
-before every trial. Both active and ready G28 registrations must agree.
+built-in `SafeZHoming.cmd_G28` or `HomingOverride.cmd_G28` whose `prev_G28` is
+stock. The override must not already be running its script (`in_script` must
+be exactly false). They call the verified stock handler directly for the
+requested X or Y axis only, rechecking the path
+before every trial. Exact built-in class/method identities and both active and
+ready G28 registrations must agree.
 This bypass is limited to workflow homes; it neither replaces the registered
 `G28` command nor changes normal safe Z homing, Cartographer probing, saved Z
 data or the wrapper's settings. Ordinary `G28 X/Y` retains any configured safe
-Z hop.
+Z hop. Normal `G28` also retains the complete configured homing-override sequence,
+including `SYNC_MOTORS` and Beacon Z actions in their existing order.
 
-`homing_override`, G28 macros, unrecognized/replaced handlers and chains with
-a custom handler above or below `safe_z_home` remain unsupported by workflows.
+Workflow homes skip all override G-code and its forced `set_position_*` setup:
+current/enable hooks, `SYNC_MOTORS`, Z moves and Beacon probing are not run.
+The operator must establish suitable XY test currents/enable behavior and
+nozzle/bed clearance independently. Direct stock homing retains its normal
+motor-enable lifecycle; custom preparation macros are not inferred or replayed.
+
+G28 macros, unrecognized/replaced handlers and nested wrapper chains remain
+unsupported by workflows, including a custom handler above or below either
+built-in wrapper.
 Validation fails before the affected homing attempt, including when
-installation was manually acknowledged. This support follows inspected source
-contracts and offline fixtures; no Cartographer or safe Z path was physically
-tested for this fix.
+installation was manually acknowledged. `--acknowledge-homing-override` applies
+only to reviewed `gcode_macro G28` installation; it does not enable that path
+for workflows. The new override support follows inspected source contracts
+and unexecuted regression source; no physical path was tested for this fix.
 The independent-Z and other workflow restrictions still apply.
 Before manual centering and these X/Y-only workflows, the operator must ensure
 nozzle/bed clearance for XY travel because the safe Z hop will not run.
@@ -586,8 +603,9 @@ sensors do not measure moving-bed Y impacts. Multi-MCU motor arrangements,
 unusual kinematics, independent carriages, endstop geometry and every possible
 ADXL carrier have not been physically validated. Supervised workflows limit
 their supported kinematics to Cartesian/CoreXY with independent Z and verified
-stock G28, either directly or beneath the recognized built-in `safe_z_home`.
-Other homing wrappers and potentially Z-coupled paths remain rejected.
+stock G28, either directly or beneath one recognized built-in `safe_z_home` or
+`homing_override`. Other homing wrappers, nested chains and potentially
+Z-coupled paths remain rejected.
 
 Distance qualification uses commanded/firmware step positions, not encoder
 measurements. An accelerometer plus step counts cannot distinguish every jam,

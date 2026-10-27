@@ -146,7 +146,7 @@ Current supported frontends can display dev updates without a repository tag.
 Run the same short installer command once to migrate an older recorded
 snapshot installation. Existing installer history must prove ownership before
 links migrate automatically. Foreign links retain `--replace-existing-links`
-after explicit review, and custom G28 overrides retain their independent
+after explicit review, and custom `gcode_macro G28` entries retain their independent
 `--acknowledge-homing-override` requirement. Append expert flags after
 `bash -c "$installer" --`; the common owned migration needs no replacement flag.
 
@@ -383,21 +383,28 @@ an unsafe status to complete installation.
   sensor drivers and an unincluded pre-existing `accel_homing.cfg` fail before
   config writes. Unsupported config structure requires manual resolution.
 
-Standard Klipper/Kalico `[safe_z_home]` is accepted without an acknowledgement
-flag. Its section and existing probe/Z settings are preserved. This includes
-Cartographer configurations that use the built-in safe Z homing path.
-Calibration/test/chart workflows verify the active built-in handler and its
+Standard Klipper/Kalico `[safe_z_home]` or `[homing_override]` is accepted without
+an acknowledgement flag. The section, complete override script and existing
+probe/Z settings are preserved. The two built-in sections cannot coexist.
+This includes Cartographer configurations that use the built-in safe Z path.
+Calibration/test/chart/accuracy workflows verify the active built-in handler and its
 underlying stock `G28`, then call that stock handler for X or Y only so the
-wrapper's `z_hop` is not invoked. Normal `G28` continues through the existing
-safe Z handler, whose configured hop may occur before a later X/Y motion-policy
-refusal. The workflow preflight does not intercept public `G28` or change Z
-settings. See [the source contract](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
+safe Z hop, override G-code and forced `set_position_*` setup are skipped.
+This also skips override current/enable hooks, `SYNC_MOTORS` and Z/Beacon actions;
+prepare suitable XY test currents/enables and nozzle clearance independently.
+Normal `G28` continues through its existing handler and complete script in the
+configured order. A public safe Z hop or override script may run before a later
+X/Y motion-policy refusal. Workflow preflight does not intercept public `G28`
+or change Z settings. See [the source contract](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
-`[homing_override]` and `G28` macros still require manual review before
-installation. After adapting their behavior you can explicitly acknowledge
+Custom `[gcode_macro G28]` entries still require manual review before
+installation. After adapting their behavior, explicitly acknowledge
 that review with `--acknowledge-homing-override`; this does not validate a
-custom path. Workflows still reject these paths and unknown wrapper chains,
-including a custom handler beneath or above `safe_z_home`.
+custom path or enable workflows. Workflows still reject G28 macros, replaced
+handlers and nested/unknown wrapper chains, including a custom handler beneath
+or above either built-in wrapper. Runtime acceptance requires exact built-in
+identities, a stock predecessor, matching G28 registrations and an inactive
+override script; configuration presence alone is insufficient.
 
 ## Prepare calibration after the host-process restart
 
