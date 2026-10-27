@@ -60,13 +60,17 @@ discovery, with travel spread below 1.5 mm.
 If asked to recenter, repeat the preparation and the **same command** to resume.
 After physically validating both axes, use the printer's normal homing controls.
 
-## Useful commands
+## Mainsail / Fluidd console commands
+
+Enter these commands in the **printer console** in Mainsail or Fluidd.
 
 TEST, CHARTS and ACCURACY need the same manual preparation as calibration.
 
 | Printer-console command | Purpose |
 | --- | --- |
 | `ACCEL_HOMING_STATUS` | Show settings, progress and results. |
+| `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` | Calibrate X; saves X and restarts Klipper. |
+| `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` | Calibrate Y; saves Y and restarts Klipper. |
 | `ACCEL_HOMING_CALIBRATE_NOISE` | Optional stationary measurement after preparation, before calibration; no movement. |
 | `ACCEL_HOMING_TEST CENTERED=1` | Test X and Y. |
 | `ACCEL_HOMING_CHARTS_GENERATE AXIS=X CENTERED=1` | Chart X; use `AXIS=Y` or omit `AXIS` for both. |
