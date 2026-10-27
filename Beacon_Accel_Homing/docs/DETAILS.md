@@ -301,7 +301,9 @@ not obtain or retain the required stationary reference before arming.
 After the error, run `ACCEL_HOMING_STATUS`. It retains the baseline result and
 phase, quiet-window sample count and duration, X/Y/Z peak-to-peak variation and
 quiet limit, plus sample/batch ages and the allowed sample age. Fresh samples
-can repeatedly reset the quiet window before it spans `baseline_time`.
+can repeatedly shorten the quiet window before it spans `baseline_time`.
+The retained `quiet_resets` counter counts range violations that require
+discarding an old prefix; it no longer means the whole candidate was cleared.
 The retained `impact_threshold_g` identifies the threshold used for that
 reference. A failed calibration restores the ordinary homing thresholds, so
 the current X/Y thresholds can differ from the trial recorded in the baseline
@@ -319,7 +321,15 @@ any settling delay after enabling motors, then collects a new sensor reference.
 setting it to zero keeps the quiet-data check.
 
 The reference needs at least 50 fresh contiguous samples spanning
-`baseline_time` (0.1 s by default). Native Beacon permits peak-to-peak
+`baseline_time` (0.1 s by default). Its rolling collector retains useful recent
+samples when an older extreme makes the accumulated range too wide. It removes
+only the oldest prefix needed to satisfy the range limit, then keeps enough
+history to span the full duration. Every retained sample participates in the
+XYZ extrema, mean and motion-proof envelope; no in-window outlier is filtered.
+Readiness is checked again immediately before arming. The hard 65,536-sample
+capacity fails with `baseline_overflow` if exceeded.
+
+Native Beacon permits peak-to-peak
 variation on every sensor axis up to
 `max(0.20 * threshold, min(0.5 g, threshold))`. The 0.5 g floor allows a 0.5 g
 calibration candidate to acquire its reference; lower manual thresholds also
@@ -366,6 +376,12 @@ no data produces `no_baseline`
 before the pass starts. The validated reference is frozen before arming;
 there is no interval or minimum travel that ignores an early real impact.
 See [the preparation contract](COMPATIBILITY.md#pre-motion-stationary-preparation).
+
+Generic warmup may discard expired backlog before the acquisition cutoff is
+established. Obsolete pending samples and timestamp continuity are cleared
+with that backlog, preventing the deliberate discard from looking like a
+missing-sample gap. The gap checks on retained samples and all measured or
+armed intervals remain active.
 
 This is a software noise check, not proof of contact or a guarantee against
 every false home. A driver's hold-to-run current change at the first step can

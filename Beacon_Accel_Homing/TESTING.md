@@ -1,8 +1,41 @@
 # Offline verification
 
+## Rolling quiet references and warmup continuity — 2026-10-27
+
+The package passed **647 tests** with:
+
+```bash
+python -B -m unittest discover -s Beacon_Accel_Homing/tests -v
+```
+
+The final run completed in 10.732 seconds with no failures, errors or skips.
+`git diff --check` also passed. No printer or printer service was accessed.
+
+Ten rolling-reference tests include a reproduced overlapping-window failure,
+2,550 per-sample comparisons with an independent suffix-search oracle, tied
+extrema, retained boundary samples, count/duration limits, mean and noise-bound
+membership, capacity failure, and stale/new-noise invalidation before arming.
+Both supported generic batch interfaces retain first-sample raw impact
+detection. A 65,536-sample capacity overflow is latched and reported before
+trigger dispatch; it never silently shortens the required reference.
+
+Five new warmup tests reproduce continuous 3200 Hz data falsely reported as
+gapped after its stale prefix was intentionally discarded. They cover both
+helper interfaces, obsolete pending singleton data, entirely old batches,
+fresh-history and retained-row gaps, malformed rows, driver errors, and
+previously latched faults. Actual measured windows and armed moves retain
+their original gap and freshness checks.
+
+Existing baseline fixtures now evaluate the exact retained window's mean and
+maximum deviations, and use the existing 1 ns duration tolerance at a trimmed
+boundary. The default 0.7 g floor, 100 ms duration, impact thresholds and
+motion-proof policy are unchanged. These regressions establish software
+defects and their correction, not the precise cause of every printer log or
+successful physical homing under arbitrary vibration.
+
 ## Generic quiet-baseline floor of 0.7 g — 2026-10-27
 
-The package passed **632 tests** with:
+At commit `d58a18c`, the package passed **632 tests** with:
 
 ```bash
 python -m unittest discover -s Beacon_Accel_Homing/tests -v
@@ -55,8 +88,8 @@ The integrated run exposed an unrelated existing updater fixture with a
 malformed simulated `ExecStart`. Its literal command now includes systemctl's
 `path=... ; argv[]=...` structure. The production updater is unchanged.
 
-That revision changed no quiet-baseline limit, impact threshold, calibration-candidate policy,
-homing freshness limit or motor behavior changed. The suite verifies the
+That revision left quiet-baseline limits, impact thresholds, calibration-candidate
+policy, homing freshness limits and motor behavior unchanged. The suite verifies the
 software boundary correction and diagnostics; it does not establish that a
 particular printer's physical noise or delivery timing is acceptable.
 

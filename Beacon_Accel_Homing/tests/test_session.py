@@ -175,7 +175,7 @@ class SessionTest(unittest.TestCase):
         obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [endstop]))
         obj._handle_move_begin(types.SimpleNamespace(get_mcu_endstops=lambda: [object()]))
         self.assertEqual(len(obj.toolhead.waits), 1)
-        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first, 0.1)
+        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first + 1e-9, 0.1)
 
     def test_home_start_outside_g28_fails_before_the_trsync_starts(self):
         obj = make_homing()

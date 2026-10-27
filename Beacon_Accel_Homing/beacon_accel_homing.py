@@ -38,6 +38,7 @@ MM_PER_S2_PER_G = 9806.65
 WATCHDOG_INTERVAL = 0.010
 STREAM_START_TIMEOUT = 0.5
 BASELINE_MIN_SAMPLES = 50
+BASELINE_MAX_SAMPLES = 65536  # bounded pre-arm history, never silently evicted
 IMPACT_WINDOW = 0.015      # s after the onset in which the impact peak is kept
 IDLE_CLEANUP = 3.0         # s, closes a homing session left open by an error
 SECOND_TOUCH_TOLERANCE = 1.5   # mm, only used if a second touch is configured
@@ -61,6 +62,7 @@ AXES = {"x": 0, "y": 1}
 FAILURES = {
     "no_data": "no fresh accelerometer data",
     "no_baseline": "no fresh quiet accelerometer baseline before the move",
+    "baseline_overflow": "stationary baseline exceeded its bounded sample capacity",
     "travel": "no impact within the expected travel",
     "frozen": "accelerometer readings did not change while the steps ran",
     "scale": "another Beacon accelerometer client changed the range during homing",
@@ -83,7 +85,7 @@ def validate_threshold(value, name, error, full_scale=None):
 
 
 class QuietReference:
-    """Constant-size stationary-window statistics, protected by the owner lock."""
+    """Exact bounded quiet suffix, protected by the owner lock."""
 
     def __init__(self, axis, cutoff, duration, limit, threshold_g=None):
         self.axis, self.cutoff, self.duration, self.limit = axis, cutoff, duration, limit
@@ -92,6 +94,10 @@ class QuietReference:
         self.count = 0
         self.totals = [0.0, 0.0, 0.0]
         self.low = self.high = None
+        self._samples = collections.deque()
+        self._minimum = [collections.deque() for _ in range(3)]
+        self._maximum = [collections.deque() for _ in range(3)]
+        self.overflow = False
         # Diagnostic summaries only; none of these fields admit a baseline.
         self.accepted = self.pre_cutoff = self.resets = 0
         self.observed_low = self.observed_high = None
@@ -100,33 +106,68 @@ class QuietReference:
         self.oldest_batch_age = self.newest_batch_age = None
 
     def add(self, when, values):
+        values = tuple(values)
         self.accepted += 1
+        self.last = when
         self.observed_low = (list(values) if self.observed_low is None else
                              [min(a, b) for a, b in zip(self.observed_low, values)])
         self.observed_high = (list(values) if self.observed_high is None else
                               [max(a, b) for a, b in zip(self.observed_high, values)])
-        low = list(values) if self.low is None else [min(a, b) for a, b in zip(self.low, values)]
-        high = list(values) if self.high is None else [max(a, b) for a, b in zip(self.high, values)]
-        if any(b - a > self.limit for a, b in zip(low, high)):
-            # A transient or a change between otherwise flat batches starts a
-            # new candidate; the entire new quiet interval must follow it.
+        if self.overflow:
+            return "baseline_overflow"
+        self._samples.append((self.accepted, when, values))
+        self.totals = [a + b for a, b in zip(self.totals, values)]
+        for value, minimum, maximum in zip(values, self._minimum, self._maximum):
+            while minimum and minimum[-1][1] >= value:
+                minimum.pop()
+            while maximum and maximum[-1][1] <= value:
+                maximum.pop()
+            minimum.append((self.accepted, value))
+            maximum.append((self.accepted, value))
+        if any(high[0][1] - low[0][1] > self.limit
+               for low, high in zip(self._minimum, self._maximum)):
+            # Keep the longest contiguous suffix that is quiet on every axis.
+            # Resetting to only the new sample would discard valid overlapping
+            # windows whenever an old extremum is the sole offending sample.
             self.resets += 1
+            while any(high[0][1] - low[0][1] > self.limit
+                      for low, high in zip(self._minimum, self._maximum)):
+                self._drop_first()
+        # History older than a complete qualifying window is redundant. Keep
+        # its boundary sample: dropping it must still leave both the minimum
+        # count and the full duration, with the same tolerance as baseline().
+        while (len(self._samples) > BASELINE_MIN_SAMPLES
+               and when - self._samples[1][1] + 0.000000001 >= self.duration):
+            self._drop_first()
+        if len(self._samples) > BASELINE_MAX_SAMPLES:
+            # At most one extra sample is held while pruning. Never silently
+            # evict history needed to prove a complete window, or recover this
+            # acquisition after its bounded capacity has been exceeded.
+            self.overflow = True
+            self._samples.clear()
+            for queue in self._minimum + self._maximum:
+                queue.clear()
             self.first, self.count = None, 0
             self.totals = [0.0, 0.0, 0.0]
-            low = high = list(values)
-        if self.first is None:
-            self.first = when
-        self.last = when
-        self.count += 1
-        self.totals = [a + b for a, b in zip(self.totals, values)]
-        self.low, self.high = low, high
+            self.low = self.high = None
+            return "baseline_overflow"
+        self.first, self.count = self._samples[0][1], len(self._samples)
+        self.low = [queue[0][1] for queue in self._minimum]
+        self.high = [queue[0][1] for queue in self._maximum]
         span = self.last - self.first
         if (span, self.count) > (self.best_span, self.best_count):
             self.best_count, self.best_span = self.count, span
-            self.best_peak_to_peak = tuple(b - a for a, b in zip(low, high))
+            self.best_peak_to_peak = tuple(b - a for a, b in zip(self.low, self.high))
+
+    def _drop_first(self):
+        number, _when, values = self._samples.popleft()
+        self.totals = [a - b for a, b in zip(self.totals, values)]
+        for queue in self._minimum + self._maximum:
+            if queue[0][0] == number:
+                queue.popleft()
 
     def baseline(self):
-        if (self.count < BASELINE_MIN_SAMPLES or self.first is None
+        if (self.overflow or self.count < BASELINE_MIN_SAMPLES or self.first is None
                 or self.last - self.first + 0.000000001 < self.duration):
             return None
         return tuple(value / self.count for value in self.totals)
@@ -176,7 +217,7 @@ def describe(r):
 
 
 def describe_reference(status):
-    """Bounded, machine-axis diagnostic; raw sensor samples are never retained."""
+    """Bounded, machine-axis diagnostic; raw sensor samples are not included."""
     def xyz(values):
         return "/".join("%.3f" % values[axis] for axis in ("x", "y", "z"))
     def age(value):
@@ -1099,7 +1140,9 @@ class BeaconAccelHoming:
                             and any(abs(value) * self.session_scale["scale"] / 1000.0
                                     >= self.full_scale_g for value in values))):
                     return "invalid_data"
-                reference.add(when, values)
+                reference_error = reference.add(when, values)
+                if reference_error is not None:
+                    return reference_error
         return None
 
     def _handle_move_end(self, hmove):

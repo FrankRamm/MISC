@@ -128,7 +128,7 @@ class GenericPreparationTest(unittest.TestCase):
         self.begin(obj, endstop)
         reference = obj.preparation
         self.assertGreaterEqual(reference.count, 321)
-        self.assertGreaterEqual(reference.last - reference.first, 0.1)
+        self.assertGreaterEqual(reference.last - reference.first + 1e-9, 0.1)
         self.assertEqual(len(obj.recent), 10)
         self.assertAlmostEqual(reference.baseline()[0], 20.0)
         self.assertIsNone(obj.sensor_fault)
@@ -280,7 +280,7 @@ class BaselineFloorTest(unittest.TestCase):
         obj.session_axes["x"].info = info(speed=speed, retract=0, second=speed)
         obj._prepare_reference()
         self.assertGreaterEqual(obj.preparation.count, 321)
-        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first, 0.1)
+        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first + 1e-9, 0.1)
         self.assertAlmostEqual(obj.baseline_status["quiet_limit_g"], 0.2)
         when = obj.backend.last_sample_time + 16 / 3200.0
         stepper = RampStepper(when, accel, speed)
@@ -525,6 +525,7 @@ class RaisedBaselineFloorTest(unittest.TestCase):
         endstop = FakeEndstop(axis)
         obj.session_axes[axis] = FakeRail(endstop, info(speed=50, retract=0, second=50))
         number = [0]
+        obj.fixture_reference_rows = []
         def flow():
             start = (obj.preparation.cutoff if obj.backend.last_sample_time is None
                      else obj.backend.last_sample_time) + 1 / 3200.0
@@ -536,6 +537,7 @@ class RaisedBaselineFloorTest(unittest.TestCase):
                 values[2] += 1.0
                 rows.append((start + offset / 3200.0,) + tuple(value * G for value in values))
             number[0] += 16
+            obj.fixture_reference_rows.extend(rows)
             obj.backend.helper.emit({"data": rows})
         obj.reactor.on_pause = flow
         return obj, endstop
@@ -545,8 +547,19 @@ class RaisedBaselineFloorTest(unittest.TestCase):
         obj.session_axes[endstop.axis].info = info(speed=speed, retract=0, second=speed)
         obj._prepare_reference()
         self.assertGreaterEqual(obj.preparation.count, 321)
-        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first, 0.1)
+        self.assertGreaterEqual(obj.preparation.last - obj.preparation.first + 1e-9, 0.1)
         self.assertAlmostEqual(obj.baseline_status["quiet_limit_g"], 0.7)
+        # Driver timestamps are rounded to microseconds. Select the independently
+        # emitted rows belonging to the retained reference, whose odd sample
+        # count need not leave an alternating waveform's mean at its midpoint.
+        retained = [row for row in obj.fixture_reference_rows
+                    if obj.preparation.first - 1e-6 <= row[0] <= obj.preparation.last + 1e-6]
+        self.assertEqual(len(retained), obj.preparation.count)
+        means = [sum(row[index + 1] / G for row in retained) / len(retained)
+                 for index in range(3)]
+        obj.fixture_reference_envelope = tuple(
+            max(abs(row[index + 1] / G - mean) for row in retained)
+            for index, mean in enumerate(means))
         when = obj.backend.last_sample_time + 16 / 3200.0
         stepper = RampStepper(when, accel, speed)
         endstop.get_steppers = lambda: [types.SimpleNamespace(
@@ -556,6 +569,8 @@ class RaisedBaselineFloorTest(unittest.TestCase):
         obj.arm(attempt)
         self.assertAlmostEqual(attempt.limit_raw * attempt.count_g, obj.threshold_g[endstop.axis])
         self.assertIsNotNone(attempt.proof_noise)
+        for index, mean in enumerate(means):
+            self.assertAlmostEqual(attempt.bases[index] * attempt.count_g, mean)
         return attempt
 
     def test_reported_ranges_qualify_full_duration_without_changing_impact_threshold(self):
@@ -570,7 +585,8 @@ class RaisedBaselineFloorTest(unittest.TestCase):
                     self.assertAlmostEqual(diagnostic["impact_threshold_g"], threshold)
                     for index, (axis, spread) in enumerate(zip("xyz", (0.581, 0.392, 0.258))):
                         self.assertAlmostEqual(diagnostic["observed_peak_to_peak_g"][axis], spread)
-                        self.assertAlmostEqual(attempt.proof_noise[index] * attempt.count_g, spread / 2.0)
+                        self.assertAlmostEqual(attempt.proof_noise[index] * attempt.count_g,
+                                               obj.fixture_reference_envelope[index])
                     self.assertEqual(endstop.trigger_log.messages, [])
                     self.assertEqual(obj.toolhead.moves, [])
 
@@ -625,7 +641,9 @@ class RaisedBaselineFloorTest(unittest.TestCase):
                         obj, endstop = self.machine(threshold=threshold, asymmetric=asymmetric)
                         attempt = self.prepare_arm(obj, endstop)
                         if asymmetric:
-                            self.assertAlmostEqual(attempt.proof_noise[0] * attempt.count_g, 0.581 * 0.75)
+                            self.assertAlmostEqual(attempt.proof_noise[0] * attempt.count_g,
+                                                   obj.fixture_reference_envelope[0])
+                            self.assertGreater(attempt.proof_noise[0] * attempt.count_g, 0.581 / 2.0)
                         number = 0
                         while number < 512 and not attempt.done:
                             first = obj.backend.last_sample_time + 1 / 3200.0
@@ -877,6 +895,108 @@ class GenericTriggerTest(unittest.TestCase):
             feed(obj, samples(10.060 + n * 0.005))
         self.assertEqual(attempt.reason, "frozen")
         self.assertEqual(trigger.messages, [[HOST]])
+
+
+class WarmupContinuityTest(unittest.TestCase):
+    """Discarded warmup history must not create or conceal a retained-data gap."""
+
+    def seeded(self, legacy=False, singleton=False):
+        obj = generic(legacy=legacy)
+        rows = samples(9.990, size=1 if singleton else 16, x=2.0)
+        feed(obj, rows)
+        return obj, rows[-1][0]
+
+    def test_continuous_delayed_batch_starts_new_retained_sequence(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, previous = self.seeded(legacy)
+                # Every source interval is 0.3125 ms. Warmup intentionally
+                # discards the prefix older than 10.010 s; comparing its fresh
+                # suffix with 9.9946875 s formerly fabricated a sample_gap.
+                rows = samples(previous + 1 / 3200.0, size=106)
+                obj.reactor.now = 10.030
+                cutoff = obj.reactor.now - obj.backend.max_age
+                obj.backend.helper.emit({"data": rows})
+                retained = [row for row in rows if row[0] >= cutoff]
+                self.assertIsNone(obj.sensor_fault)
+                self.assertAlmostEqual(obj.backend.observed_rate, 3200.0)
+                self.assertEqual(len(obj.recent[-1]), 3 * len(retained))
+                self.assertEqual(obj.backend.last_sample_time, rows[-1][0])
+                # The former warmup fault poisoned an otherwise empty reference.
+                obj.session_axes = {"x": None}
+                stationary_stream(obj)
+                obj._prepare_reference()
+                self.assertIsNone(obj.sensor_fault)
+                self.assertIsNotNone(obj.preparation.baseline())
+
+    def test_stale_pending_singleton_is_discarded_before_fresh_batch(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, previous = self.seeded(legacy, singleton=True)
+                self.assertEqual(len(obj.backend.pending), 1)
+                obj.reactor.now = 10.030
+                rows = samples(10.0105)
+                obj.backend.helper.emit({"data": rows})
+                self.assertIsNone(obj.sensor_fault)
+                self.assertEqual(obj.backend.pending, [])
+                self.assertEqual(len(obj.recent[-1]), 3 * len(rows))
+                self.assertEqual(obj.backend.last_xyz, rows[-1][1:])
+                self.assertEqual(obj.backend.unchanged_since, rows[0][0])
+
+    def test_all_old_batch_clears_obsolete_tracking_without_refreshing_data(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                obj, previous = self.seeded(legacy)
+                receipt = obj.last_batch
+                obj.reactor.now = 10.030
+                obj.backend.helper.emit({"data": samples(previous + 1 / 3200.0)})
+                self.assertIsNone(obj.sensor_fault)
+                self.assertIsNone(obj.backend.last_sample_time)
+                self.assertIsNone(obj.backend.last_xyz)
+                self.assertIsNone(obj.backend.unchanged_since)
+                self.assertEqual(obj.backend.pending, [])
+                self.assertEqual(obj.last_batch, receipt)
+                obj.reactor.now = 10.035
+                obj.backend.helper.emit({"data": samples(10.016)})
+                self.assertIsNone(obj.sensor_fault)
+                self.assertEqual(obj.last_batch, 10.035)
+
+    def test_old_prefix_cannot_clear_fresh_history_or_a_gap_between_retained_rows(self):
+        for legacy in (False, True):
+            for stale_history in (False, True):
+                with self.subTest(legacy=legacy, stale_history=stale_history):
+                    obj, previous = self.seeded(legacy)
+                    if stale_history:
+                        obj.reactor.now = 10.030
+                        # Include an old row between two retained groups. A
+                        # reset at every discarded row would conceal this gap.
+                        rows = (samples(9.998, size=2) + samples(10.011, size=2)
+                                + samples(9.8, size=1) + samples(10.016))
+                    else:
+                        obj.reactor.now = 10.005
+                        rows = samples(9.98, size=2) + samples(previous + 0.002)
+                    obj.backend.helper.emit({"data": rows})
+                    self.assertEqual(obj.sensor_fault, "sample_gap")
+
+    def test_warmup_drain_preserves_latched_faults_and_rejects_invalid_data(self):
+        for legacy in (False, True):
+            for mode in ("latched", "shape", "nonfinite", "errors", "overflows"):
+                with self.subTest(legacy=legacy, mode=mode):
+                    obj, previous = self.seeded(legacy)
+                    obj.reactor.now = 10.030
+                    rows, fields = samples(10.011), {}
+                    if mode == "latched":
+                        obj.backend._fail("sample_gap")
+                    elif mode == "shape":
+                        rows.insert(0, (9.8, 0.0, G))
+                    elif mode == "nonfinite":
+                        rows.insert(0, (9.8, float("nan"), 0.0, G))
+                    else:
+                        fields[mode] = 1
+                    obj.backend.helper.emit({"data": rows, **fields})
+                    expected = ("sample_gap" if mode == "latched" else "invalid_data"
+                                if mode in ("shape", "nonfinite") else "data_error")
+                    self.assertEqual(obj.sensor_fault, expected)
 
 
 class NoiseWindowBoundaryTest(unittest.TestCase):

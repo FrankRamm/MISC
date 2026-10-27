@@ -189,8 +189,25 @@ Acquisition has a `baseline_time + 0.5 s` deadline measured after queued setup
 and settling finish. Persistent vibration or no sample flow fails with
 `no_baseline` before trigger dispatch is armed. Stale, future, nonmonotonic,
 gapped, clipped, saturated or scale-changed data also aborts preparation.
-The reference is accumulated in constant storage; `baseline_batches` does
-not determine whether this new interval is long enough.
+The reference uses a bounded rolling interval. A range violation removes only
+the oldest prefix needed to leave a contiguous suffix within the XYZ limits.
+Older samples are otherwise removed only when the remaining samples still
+span the complete duration and include at least 50 samples. The sample at or
+just before the duration boundary is retained, including its extrema. The
+mean and motion-proof noise envelope use exactly the same retained samples.
+New data can invalidate readiness before arming; a prior ready window is not
+latched. No in-window outlier is ignored or averaged out of the range check.
+
+Storage is capped at 65,536 samples. If the required interval cannot fit, the
+acquisition fails with `baseline_overflow` instead of silently evicting data
+or permitting a shorter interval. `baseline_batches` does not determine
+whether this interval is long enough.
+
+Before acquisition begins, the generic warmup path drains expired buffered
+data. Timestamp continuity and pending data discarded by that age cutoff are
+discarded together; the first retained sample must not be compared against an
+obsolete timestamp. Gaps between retained samples and all gaps during actual
+baseline acquisition, stationary-noise capture or an armed move remain fatal.
 
 The quiet limits are engineering policies checked by synthetic fixtures;
 they are not physically validated boundaries between vibration and contact.

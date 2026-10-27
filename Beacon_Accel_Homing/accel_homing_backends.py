@@ -289,6 +289,11 @@ class ConfiguredAccelBackend:
         if reference is None and self.owner.attempt is None and not noise_session:
             warmup_cutoff = self.owner.main_mcu.estimated_print_time(
                 self.owner.reactor.monotonic()) - self.max_age
+            if self.last_sample_time is not None and self.last_sample_time < warmup_cutoff:
+                # This history is outside the same interval being drained.
+                # Comparing a retained row with it would report our own trim
+                # as missing samples. Reset once, before checking retained rows.
+                self.prepare_reference()
         for row in rows:
             if len(row) != 4:
                 return self._fail("invalid_data")
