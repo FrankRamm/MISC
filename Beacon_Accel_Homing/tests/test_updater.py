@@ -62,6 +62,25 @@ class UpdaterFixture(unittest.TestCase):
         self.refresh()
         return backup
 
+    def legacy_plan(self):
+        """Reproduce the old include-layout journal without migrating it."""
+        plan = self.updater_plan()
+        include = self.moon_config.parent / updater.INCLUDE
+        suffix = updater.main_suffix(False, True)
+        context = {key: value for key, value in plan["context"].items() if key != "layout"}
+        context.update(include_file=str(include), append=base64.b64encode(suffix).decode())
+        receipt = (json.dumps(dict(version=1, instance=updater.instance_key(self.selected),
+                                   commit=self.commit, **context), sort_keys=True, indent=2) + "\n").encode()
+        plan["context"] = context
+        plan["changes"] = {
+            include: dict(kind="file", data=updater.stanza(plan["repo"])),
+            self.moon_config: dict(kind="file", data=self.moon_config.read_bytes() + suffix),
+            plan["receipt"]: dict(kind="file", data=receipt),
+        }
+        for path, change in plan["changes"].items():
+            change["expected"] = installer.snapshot(path)
+        return plan
+
     def test_live_moonraker_paths_follow_argv_environment_and_verified_owner_home(self):
         owner = self.home / "moonraker-owner"
         default_data = owner / "printer_data"
@@ -228,23 +247,36 @@ class UpdaterFixture(unittest.TestCase):
         self.assertEqual(identity["instance"]["config"], str(self.moon_config))
         self.assertEqual(identity["instance"]["path_environment"], found["path_environment"])
 
-    def test_exact_git_transport_and_owned_include_are_journalled_without_env_or_hooks(self):
+    def test_exact_git_transport_is_journalled_directly_without_include_env_or_hooks(self):
         plan = self.updater_plan()
-        text = plan["changes"][self.moon_config.parent / updater.INCLUDE]["data"].decode()
+        text = plan["changes"][self.moon_config]["data"].decode()
         self.assertIn("type: git_repo\nchannel: dev", text)
         self.assertIn("primary_branch: codex/universal-accel-homing", text)
         self.assertIn("managed_services: klipper", text)
         self.assertNotIn("install_script", text)
         self.assertNotIn("requirements", text)
         self.assertNotIn("virtualenv", text)
+        self.assertEqual(plan["context"]["layout"], "direct")
+        self.assertNotIn("include_file", plan["context"])
+        self.assertNotIn(self.moon_config.parent / updater.INCLUDE, plan["changes"])
         self.assertTrue(all("expected" in value for value in plan["changes"].values()))
         self.assertNotEqual(updater.managed_path(self.selected), updater.managed_path(
             {**self.selected, "config": self.home / "other.cfg"}))
         backup = self.install_config(plan)
         manifest = json.loads((backup / "manifest.json").read_text())
         allowed = updater.validate_record(manifest, self.selected, installer.uninstall_api())
-        self.assertEqual(set(allowed), {self.moon_config, self.moon_config.parent / updater.INCLUDE,
-                                       self.config.parent / updater.RECEIPT})
+        self.assertEqual(set(allowed), {self.moon_config, self.config.parent / updater.RECEIPT})
+
+    def test_new_direct_registration_adds_one_missing_base_and_preserves_original_bytes(self):
+        original = self.moon_config.read_bytes().replace(b"[update_manager]\n", b"")
+        original += b"[unrelated]\nkeep: yes\n# operator comment\n"
+        self.moon_config.write_bytes(original)
+        self.refresh()
+        plan = self.updater_plan()
+        rendered = plan["changes"][self.moon_config]["data"]
+        self.assertEqual(rendered, original + updater.direct_suffix(plan["repo"], True, True))
+        self.assertEqual(rendered.count(b"[update_manager]\n"), 1)
+        self.assertEqual(rendered.count(b"[update_manager accel_homing]\n"), 1)
 
     def test_skipped_or_failed_activation_retries_even_when_configuration_unchanged(self):
         first = self.updater_plan()
@@ -258,37 +290,105 @@ class UpdaterFixture(unittest.TestCase):
         updater.record_activation(first, self.selected, installer.uninstall_api(), backup, "restarted")
         repeated = self.updater_plan()
         self.assertFalse(repeated["restart_needed"])
-        self.assertEqual(self.moon_config.read_text().count("[include accel_homing_update.cfg]"), 1)
+        self.assertEqual(self.moon_config.read_text().count("[update_manager accel_homing]"), 1)
+        self.assertFalse((self.moon_config.parent / updater.INCLUDE).exists())
 
-    def test_conflicting_stanza_and_multiple_prospective_wildcard_matches_are_rejected(self):
+    def test_conflicting_manual_stanzas_and_duplicate_registration_or_base_are_rejected(self):
         original = self.moon_config.read_text()
-        self.moon_config.write_text(original + "[update_manager accel_homing]\npath: /foreign\n")
-        self.refresh()
-        with self.assertRaisesRegex(installer.InstallError, "conflicting"):
-            self.updater_plan()
-        self.moon_config.write_text(original + "[include *update.cfg]\n[include accel_*.cfg]\n")
-        (self.moon_config.parent / "otherupdate.cfg").write_text("[other]\n")
+        manual = updater.stanza(updater.managed_path(self.selected)).decode()
+        cases = ("[update_manager accel_homing]\npath: /foreign\n",
+                 manual + "install_script: install.sh\n",
+                 manual + "malformed continuation\n",
+                 manual.replace("managed_services: klipper", " managed_services: klipper"),
+                 manual.replace("[update_manager accel_homing]", "[UPDATE_MANAGER ACCEL_HOMING]"),
+                 manual.replace("[update_manager accel_homing]", "[ update_manager accel_homing ]"),
+                 manual + "managed_services: klipper\n",
+                 manual + manual,
+                 "[update_manager]\n",
+                 "enable_auto_refresh: True\nenable_auto_refresh: False\n")
+        for suffix in cases:
+            with self.subTest(suffix=suffix):
+                self.moon_config.write_text(original + suffix)
+                self.refresh()
+                with self.assertRaises(installer.InstallError):
+                    self.updater_plan()
+
+    def test_new_direct_registration_does_not_create_a_file_matched_by_existing_wildcards(self):
+        self.moon_config.write_text(self.moon_config.read_text() + "[include *update.cfg]\n[include accel_*.cfg]\n")
+        (self.moon_config.parent / "otherupdate.cfg").write_text("[existing]\n")
         (self.moon_config.parent / "accel_other.cfg").write_text("[another]\n")
         self.refresh()
-        with self.assertRaisesRegex(installer.InstallError, "multiple includes"):
-            self.updater_plan()
+        plan = self.updater_plan()
+        self.assertIn(self.moon_config, plan["changes"])
+        self.assertNotIn(self.moon_config.parent / updater.INCLUDE, plan["changes"])
+        self.assertNotIn(b"[include accel_homing_update.cfg]", plan["changes"][self.moon_config]["data"])
 
-    def test_one_wildcard_covers_generated_file_without_a_duplicate_include(self):
-        self.moon_config.write_text(self.moon_config.read_text() + "[include *update.cfg]\n")
-        (self.moon_config.parent / "otherupdate.cfg").write_text("[existing]\n")
+    def test_concurrent_moonraker_main_edit_is_not_adopted_or_overwritten(self):
+        plan = self.updater_plan()
+        current = self.moon_config.read_bytes() + b"[operator]\nkeep: yes\n"
+        self.moon_config.write_bytes(current)
+        with self.assertRaisesRegex(installer.InstallError, "changed after planning"):
+            installer.apply_plan(plan["changes"], self.config, selected=self.selected, updater=plan)
+        self.assertEqual(self.moon_config.read_bytes(), current)
+        self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
+
+    def test_matching_manual_main_entry_is_preserved_through_rerun_and_uninstall(self):
+        manual = self.moon_config.read_bytes() + b"\n# operator updater\n" + updater.stanza(
+            updater.managed_path(self.selected)).split(b"\n", 1)[1]
+        self.moon_config.write_bytes(manual)
         self.refresh()
         plan = self.updater_plan()
         self.assertNotIn(self.moon_config, plan["changes"])
-        self.assertIn(self.moon_config.parent / updater.INCLUDE, plan["changes"])
+        self.assertEqual(plan["context"]["append"], "")
+        self.install_config(plan)
+        self.assertEqual(self.updater_plan()["changes"], {})
+        current = manual + b"\n[unrelated]\nkeep: yes\n"
+        self.moon_config.write_bytes(current)
+        self.refresh()
+        with mock.patch.object(installer, "proc_instances", return_value=[]), \
+                mock.patch.object(installer, "service_instances", return_value=[]):
+            restore = installer.make_uninstall_plan(self.selected)
+            installer.apply_uninstall_plan(restore, self.selected)
+        self.assertEqual(self.moon_config.read_bytes(), current)
+        self.assertFalse((self.config.parent / updater.RECEIPT).exists())
 
-    def test_concurrent_new_updater_file_is_not_adopted_or_overwritten(self):
-        plan = self.updater_plan()
-        path = self.moon_config.parent / updater.INCLUDE
-        path.write_text("operator file appeared after planning\n")
-        with self.assertRaisesRegex(installer.InstallError, "changed after planning"):
-            installer.apply_plan(plan["changes"], self.config, selected=self.selected, updater=plan)
-        self.assertEqual(path.read_text(), "operator file appeared after planning\n")
-        self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
+    def test_owned_direct_append_edit_cannot_be_adopted_as_a_manual_entry(self):
+        self.install_config(self.updater_plan())
+        changed = self.moon_config.read_bytes().replace(
+            b"# Managed by the accelerometer homing installer.", b"# operator changed this owned comment")
+        self.moon_config.write_bytes(changed)
+        self.refresh()
+        with self.assertRaisesRegex(installer.InstallError, "owned Moonraker.*changed/missing"):
+            self.updater_plan()
+        self.assertEqual(self.moon_config.read_bytes(), changed)
+
+    def test_existing_legacy_include_journal_upgrades_and_uninstalls_without_migration(self):
+        original = self.moon_config.read_bytes()
+        legacy = self.legacy_plan()
+        backup = self.install_config(legacy)
+        manifest = json.loads((backup / "manifest.json").read_text())
+        allowed = updater.validate_record(manifest, self.selected, installer.uninstall_api())
+        self.assertEqual(set(allowed), {self.moon_config, self.moon_config.parent / updater.INCLUDE,
+                                       self.config.parent / updater.RECEIPT})
+        installed = self.moon_config.read_bytes()
+        self.assertEqual(self.updater_plan()["changes"], {})
+        self.commit = "b" * 40
+        self.marker()
+        upgrade = self.updater_plan()
+        self.assertNotIn("layout", upgrade["context"])
+        self.assertEqual(set(upgrade["changes"]), {self.config.parent / updater.RECEIPT})
+        self.install_config(upgrade)
+        self.assertEqual(self.moon_config.read_bytes(), installed)
+        self.assertEqual((self.moon_config.parent / updater.INCLUDE).read_bytes(), updater.stanza(legacy["repo"]))
+        unrelated = b"\n[unrelated]\nkeep: yes\n"
+        self.moon_config.write_bytes(installed + unrelated)
+        self.refresh()
+        with mock.patch.object(installer, "proc_instances", return_value=[]), \
+                mock.patch.object(installer, "service_instances", return_value=[]):
+            restore = installer.make_uninstall_plan(self.selected)
+            installer.apply_uninstall_plan(restore, self.selected)
+        self.assertEqual(self.moon_config.read_bytes(), original + unrelated)
+        self.assertFalse((self.moon_config.parent / updater.INCLUDE).exists())
 
     def test_no_moonraker_ambiguous_and_wrong_explicit_instance_do_not_guess(self):
         for instances, explicit in (([], None), ([self.moon, {**self.moon, "pid": 78}], None),
@@ -327,7 +427,7 @@ class UpdaterFixture(unittest.TestCase):
         self.assertFalse((self.config.parent / updater.RECEIPT).exists())
         manifest = json.loads((backup / "manifest.json").read_text())
         malicious = copy.deepcopy(manifest)
-        malicious["updater"]["include_file"] = str(self.home / "unowned.cfg")
+        malicious["updater"]["managed_repo"] = str(self.home / "unowned-repo")
         with self.assertRaisesRegex(installer.InstallError, "ownership"):
             updater.validate_record(malicious, self.selected, installer.uninstall_api())
 
@@ -404,7 +504,8 @@ class UpdaterFixture(unittest.TestCase):
         self.assertEqual(events, ["candidate", "plotting", "publish", "transaction", "moonraker", "klipper"])
         for name in installer.MODULES:
             self.assertEqual(links[self.extras / name]["target"], str(updater.managed_path(self.selected) / "Beacon_Accel_Homing" / name))
-        self.assertTrue((self.moon_config.parent / updater.INCLUDE).is_file())
+        self.assertIn("[update_manager accel_homing]", self.moon_config.read_text())
+        self.assertFalse((self.moon_config.parent / updater.INCLUDE).exists())
 
     def test_main_moonraker_activation_failure_keeps_installed_files_and_never_activates_klipper(self):
         with self.main_fixture(activation_error=True) as (events, links):
@@ -412,7 +513,8 @@ class UpdaterFixture(unittest.TestCase):
                 installer.main([])
         self.assertEqual(events, ["candidate", "plotting", "publish", "transaction", "moonraker"])
         self.assertEqual(len(links), len(installer.MODULES))
-        self.assertTrue((self.moon_config.parent / updater.INCLUDE).is_file())
+        self.assertIn("[update_manager accel_homing]", self.moon_config.read_text())
+        self.assertFalse((self.moon_config.parent / updater.INCLUDE).exists())
 
     def test_main_transaction_failure_restores_source_before_any_activation(self):
         with self.main_fixture(transaction_error=True) as (events, links):
@@ -654,7 +756,7 @@ class UpdaterFixture(unittest.TestCase):
 
     def test_migration_rejects_owned_updater_include_or_receipt_drift(self):
         with self.migration_links() as (links, write):
-            plan = self.updater_plan()
+            plan = self.legacy_plan()
             changes = self.plan()[0]
             changes.update(plan["changes"])
             installer.apply_plan(changes, self.config, writer=write, selected=self.selected, updater=plan)
