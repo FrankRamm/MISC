@@ -83,6 +83,18 @@ z_hop: 15
 z_hop_speed: 8
 move_to_previous: True
 """
+HOMING_OVERRIDE = """# Preserve the operator's complete normal homing sequence
+[homing_override]
+axes: xyz
+set_position_z: 0
+gcode:
+    SET_TMC_CURRENT STEPPER=stepper_x CURRENT=0.7
+    SET_STEPPER_ENABLE STEPPER=stepper_x ENABLE=1
+    SYNC_MOTORS
+    G28 X Y
+    G28 Z
+    BEACON_AUTO_CALIBRATE
+"""
 
 
 class HostFixture(unittest.TestCase):
@@ -802,12 +814,63 @@ class HostFixture(unittest.TestCase):
         with self.assertRaisesRegex(installer.InstallError, "Cartographer/scanner"):
             self.plan()
 
-    def test_custom_homing_overrides_and_macros_still_require_acknowledgement(self):
-        for section in ("homing_override", "gcode_macro G28"):
-            self.config.write_text(CONFIG + "\n[" + section + "]\ngcode:\n    G28\n")
-            with self.assertRaisesRegex(installer.InstallError, "Custom homing path"):
-                self.plan()
-            self.plan("--acknowledge-homing-override")
+    def test_custom_g28_macros_still_require_acknowledgement(self):
+        macro = "\n[gcode_macro G28]\nrename_existing: G28_BASE\ngcode:\n    SYNC_MOTORS\n    G28_BASE {rawparams}\n"
+        self.config.write_bytes((CONFIG + macro + SAVED).encode())
+        before = self.config.read_bytes(), self.axes.read_bytes()
+        with mock.patch.object(installer.Section, "replace") as replace, \
+                mock.patch.object(installer.Section, "disable") as disable, \
+                self.assertRaisesRegex(installer.InstallError, "Custom homing path.*gcode_macro g28"):
+            self.plan()
+        replace.assert_not_called()
+        disable.assert_not_called()
+        changes, _, _ = self.plan("--acknowledge-homing-override")
+        self.assertIn(macro.encode(), changes[self.config]["data"])
+        self.assertTrue(changes[self.config]["data"].endswith(SAVED.encode()))
+        self.assertEqual((self.config.read_bytes(), self.axes.read_bytes()), before)
+
+    def test_standard_homing_override_needs_no_acknowledgement_and_preserves_the_complete_script(self):
+        for placement in ("main", "include"):
+            with self.subTest(placement=placement):
+                override_path = self.config.parent / "normal-homing.cfg"
+                if placement == "main":
+                    self.config.write_bytes((CONFIG + "\n" + HOMING_OVERRIDE + SAVED).encode())
+                else:
+                    override_path.write_bytes(HOMING_OVERRIDE.encode())
+                    self.config.write_bytes((CONFIG + "\n[include normal-homing.cfg]\n" + SAVED).encode())
+                paths = (self.config, self.axes) if placement == "main" else (self.config, self.axes, override_path)
+                before = {path: path.read_bytes() for path in paths}
+                changes, messages, _ = self.plan()
+                if placement == "main":
+                    self.assertIn(HOMING_OVERRIDE.encode(), changes[self.config]["data"])
+                else:
+                    self.assertNotIn(override_path, changes)
+                    self.assertIn(b"[include normal-homing.cfg]", changes[self.config]["data"])
+                self.assertTrue(changes[self.config]["data"].endswith(SAVED.encode()))
+                self.assertTrue(any("Preserved [homing_override]" in message and
+                                    "bypass all override G-code" in message for message in messages))
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
+
+    def test_safe_z_home_and_homing_override_conflict_even_after_acknowledgement(self):
+        self.config.write_bytes((CONFIG + SAFE_Z_HOME + "\n" + HOMING_OVERRIDE + SAVED).encode())
+        before = self.config.read_bytes(), self.axes.read_bytes()
+        for flags in ((), ("--acknowledge-homing-override",)):
+            with self.subTest(flags=flags), \
+                    mock.patch.object(installer.Section, "replace") as replace, \
+                    mock.patch.object(installer.Section, "disable") as disable, \
+                    self.assertRaisesRegex(installer.InstallError, "cannot be used together"):
+                self.plan(*flags)
+            replace.assert_not_called()
+            disable.assert_not_called()
+        self.assertEqual((self.config.read_bytes(), self.axes.read_bytes()), before)
+
+    def test_duplicate_homing_override_sections_fail_without_changes(self):
+        self.config.write_bytes((CONFIG + HOMING_OVERRIDE + "\n" + HOMING_OVERRIDE + SAVED).encode())
+        before = self.config.read_bytes(), self.axes.read_bytes()
+        with self.assertRaisesRegex(installer.InstallError, "exactly one \\[homing_override\\]"):
+            self.plan()
+        self.assertEqual((self.config.read_bytes(), self.axes.read_bytes()), before)
 
     def test_safe_z_home_with_cartographer_and_accelerometer_needs_no_bypass_flag(self):
         probe_home, saved = self.cartographer_safe_z_fixture()
@@ -825,10 +888,9 @@ class HostFixture(unittest.TestCase):
         self.assertFalse((self.config.parent / ".accel_homing_backups").exists())
 
     def test_safe_z_home_does_not_exempt_custom_g28_and_duplicate_sections(self):
-        for section in ("homing_override", "gcode_macro G28"):
-            self.config.write_text(CONFIG + SAFE_Z_HOME + "\n[" + section + "]\ngcode:\n    G28\n")
-            with self.assertRaisesRegex(installer.InstallError, "Custom homing path"):
-                self.plan()
+        self.config.write_text(CONFIG + SAFE_Z_HOME + "\n[gcode_macro G28]\ngcode:\n    G28\n")
+        with self.assertRaisesRegex(installer.InstallError, "Custom homing path"):
+            self.plan()
         self.config.write_text(CONFIG + SAFE_Z_HOME + "\n" + SAFE_Z_HOME)
         with self.assertRaisesRegex(installer.InstallError, "exactly one \\[safe_z_home\\]"):
             self.plan()
