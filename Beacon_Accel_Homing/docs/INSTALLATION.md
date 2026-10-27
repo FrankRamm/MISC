@@ -150,6 +150,15 @@ after explicit review, and custom G28 overrides retain their independent
 `--acknowledge-homing-override` requirement. Append expert flags after
 `bash -c "$installer" --`; the common owned migration needs no replacement flag.
 
+Automatic migration validates the complete recorded history, current module
+links and owned updater files. It does not require today's `printer.cfg` to be
+reversible to its pre-install text: later sections, manual settings and saved
+calibration can remain while the current installation plan checks its changes.
+Changed/foreign links, invalid history and conflicting updater files still
+stop migration. Actual uninstall retains its separate inverse-merge and
+later-edit protections; migration does not bypass those protections or require
+an indiscriminate `--replace-existing-links` retry.
+
 Normal updates retain the ignored private `.plot-deps/` cache and stable module
 targets. Moonraker does not rerun the installer; releases requiring installer,
 config or dependency changes need the short installer again. **Hard Recovery**
