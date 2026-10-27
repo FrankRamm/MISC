@@ -32,41 +32,14 @@ For later code updates, use **accel_homing → Update** in Mainsail/Fluidd
 while idle. Keep the printed source directory. For custom hosts, migration
 options and recovery, see [installation details](docs/INSTALLATION.md).
 
-## Moonraker update configuration
+## Automatic Moonraker updates
 
-The installer already registers `accel_homing_update.cfg` in the matching
-`moonraker.conf`. Keep that arrangement: a wildcard include may already load
-the file. Add this explicit include only if no existing include covers it:
-
-```ini
-[include accel_homing_update.cfg]
-```
-
-The generated file contains this entry, shown for reference. **Replace the
-entire placeholder `path` with its real absolute value from that file or
-installer output.**
-
-```ini
-[update_manager accel_homing]
-type: git_repo
-channel: dev
-path: <ABSOLUTE_SERVICE_USER_HOME>/.local/share/accel-homing/managed/<INSTANCE_KEY>/repo
-origin: https://github.com/FrankRamm/MISC.git
-primary_branch: codex/universal-accel-homing
-is_system_service: False
-managed_services: klipper
-```
-
-Do not duplicate this block inline or relocate the installer-owned entry.
-Keep only one `[update_manager accel_homing]` across all includes and one
-base `[update_manager]` section; add the base only if missing.
-
-The path must be the existing managed checkout used by the installed module
-links. An immutable cached release cannot receive Git updates; rerun the short
-installer above to migrate an older snapshot installation. Pasting this entry
-alone does not migrate its links. After manual changes, restart the matching
-**Moonraker while idle**, then use **accel_homing → Update** in Mainsail/Fluidd.
-See [updater details](docs/INSTALLATION.md#native-moonraker-updater).
+The install command above finds the matching Moonraker configuration, creates
+the updater file/include and chooses its internal checkout path and identifier.
+It restarts the detected services automatically. **No API keys, tokens, path
+substitutions or pasted configuration are needed.** For later code updates,
+use **accel_homing → Update** in Mainsail/Fluidd while idle. The same installer
+migrates older recorded snapshot installations to this automatic setup.
 
 ## Setup
 
@@ -188,6 +161,37 @@ with `channel: dev`; current Mainsail/Fluidd support this without repository
 tags. Their usual update confirmation may still appear. Moonraker pulls code
 and restarts its associated Klipper service; it does not rerun `install.sh`.
 The private PNG renderer dependencies survive normal updates.
+
+### Generated Moonraker configuration (reference only)
+
+The installer writes `accel_homing_update.cfg` with the entry below. This is
+generated reference information, **not configuration to paste or fill in**.
+The ellipses abbreviate its automatically selected absolute path; the actual
+generated file contains the complete value. The internal directory identifier
+is computed for the selected installation; it is not an API key or user input.
+
+```ini
+[update_manager accel_homing]
+type: git_repo
+channel: dev
+path: …/.local/share/accel-homing/managed/…/repo
+origin: https://github.com/FrankRamm/MISC.git
+primary_branch: codex/universal-accel-homing
+is_system_service: False
+managed_services: klipper
+```
+
+The installer also registers this include in the matched `moonraker.conf`
+unless an existing wildcard already covers the file:
+
+```ini
+[include accel_homing_update.cfg]
+```
+
+It ensures the base `[update_manager]` section exists and avoids duplicate
+registration. The generated entry stays in its installer-owned file. Native
+updates use the stable checkout linked by the installed modules, not the
+immutable download cache. See [updater details](docs/INSTALLATION.md#native-moonraker-updater).
 
 Known installer-owned snapshot links migrate using transaction history.
 Foreign links still require explicit review and `--replace-existing-links`;
