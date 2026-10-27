@@ -1,8 +1,8 @@
 {
-  "stage": "completed reviewed offline validation for flat atomic PNG publication and delayed directory watches",
+  "stage": "historical executed 558-test suite; current migration fix and regression source reviewed without execution",
   "timestamp_utc": "2026-10-27T01:14:24.567475+00:00",
   "source_base_commit": "65731b4f70786dd38402a5a28ee2b20c644a10f3",
-  "final_validation": true,
+  "final_validation": false,
   "python_version": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26300-SP0",
   "tests_run": 558,
@@ -952,5 +952,12 @@
     "current_staging_prefix": ".accel_homing_png_",
     "reported_warning_errno_observed": false,
     "old_warning_recovery": "Operator restarts matching Moonraker while idle if warning remains after update; inspect log exception if it recurs"
+  },
+  "current_revision_notice": {
+    "scope": "Migration ownership validation separated from live uninstall restoration",
+    "validation": "Static source review only; current regression sources and implementation were not executed",
+    "current_fix_tests_executed": false,
+    "printer_installation_or_service_actions_executed": false,
+    "previous_counts_log_and_source_digests": "Retained unchanged as historical evidence for the earlier executed revision"
   }
 }
