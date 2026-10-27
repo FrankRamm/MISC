@@ -3,8 +3,8 @@
 [Back to the quick start](../README.md).
 
 This reference covers advanced settings, workflow behavior and source evidence.
-Installation and Moonraker registration are automatic; the generated configuration
-below is for inspection, not manual setup.
+Installation and Moonraker registration are automatic; the configuration below
+documents the entry written by the installer.
 
 ## Installation, activation and restoration details
 
@@ -32,13 +32,14 @@ tags. Their usual update confirmation may still appear. Moonraker pulls code
 and restarts its associated Klipper service; it does not rerun `install.sh`.
 The private PNG renderer dependencies survive normal updates.
 
-### Generated Moonraker configuration (reference only)
+### Moonraker configuration
 
-The installer writes `accel_homing_update.cfg` with the entry below. This is
-generated reference information, **not configuration to paste or fill in**.
-The ellipses abbreviate its automatically selected absolute path; the actual
-generated file contains the complete value. The internal directory identifier
-is computed for the selected installation; it is not an API key or user input.
+For new registrations, the installer writes the entry below directly in the
+matched `moonraker.conf`. The ellipses abbreviate the automatically selected
+absolute path; the actual configuration contains the complete value printed as
+**Managed update source**. The directory identifier is computed for the selected
+installation. Use the [README block](../README.md#moonraker-updates) for manual
+setup, with that complete path rather than the abbreviated example.
 
 ```ini
 [update_manager accel_homing]
@@ -51,17 +52,13 @@ is_system_service: False
 managed_services: klipper
 ```
 
-The installer also registers this include in the matched `moonraker.conf`
-unless an existing wildcard already covers the file:
-
-```ini
-[include accel_homing_update.cfg]
-```
-
 It ensures the base `[update_manager]` section exists and avoids duplicate
-registration. The generated entry stays in its installer-owned file. Native
-updates use the stable checkout linked by the installed modules, not the
-immutable download cache. See [updater details](INSTALLATION.md#native-moonraker-updater).
+registration. Existing installations using `accel_homing_update.cfg` keep that
+file and include without migration. A matching entry added manually to the main
+configuration is reused and preserved on uninstall; conflicting or duplicate
+entries stop installation. Native updates use the stable checkout linked by the
+installed modules, not the immutable download cache.
+See [updater details](INSTALLATION.md#native-moonraker-updater).
 
 Known installer-owned snapshot links migrate using transaction history.
 Foreign links still require explicit review and `--replace-existing-links`;

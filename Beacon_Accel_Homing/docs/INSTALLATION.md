@@ -206,10 +206,15 @@ literal `{data_path}` and leaves other template expressions unsupported.
 See Moonraker's [socket default](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/components/klippy_connection.py#L63-L65)
 and [path resolution](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/confighelper.py#L433-L443).
 
-The generated include is `accel_homing_update.cfg`, containing
-`[update_manager accel_homing]`. The installer records its ownership separately
-and rechecks conflicting includes/stanzas before writes. The dedicated repo
-and private plotting cache remain outside printer configuration backups.
+New registrations add `[update_manager accel_homing]` directly to the matched
+`moonraker.conf`. Existing installations with the generated
+`accel_homing_update.cfg` keep their file and include without migration. The
+installer records only its own configuration changes and rechecks conflicting
+includes/stanzas before writes. A matching main-file entry added manually is
+reused and preserved on uninstall; use the complete **Managed update source**
+path printed by the installer for the [README block](../README.md#moonraker-updates).
+The dedicated repo and private plotting cache remain outside printer
+configuration backups.
 
 When updater activation is required, the verified Moonraker service restarts
 first, then the existing Klipper activation runs. A separate
