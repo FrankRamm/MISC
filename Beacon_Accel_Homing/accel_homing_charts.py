@@ -2,6 +2,7 @@
 """Render completed PNGs in an isolated process; keep provenance in memory."""
 import collections
 import datetime
+import errno
 import hashlib
 import json
 import math
@@ -244,30 +245,63 @@ def _capture_data(capture, record):
 
 def _publish(directory, label, clock, data, check_running=None):
     _check_png(data, decode_pixels=False)
+    _check_running(check_running)
     destination = Path(directory).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     stem = label + "_" + clock["filename_time"]
-    with tempfile.TemporaryDirectory(prefix=".accel_homing_png_", dir=str(destination)) as temporary:
-        staged = Path(temporary)
+    # Moonraker adds watches to new directories asynchronously. Keep this root
+    # durable and publish files only; a directory created then renamed/removed
+    # here can disappear before its queued watch registration runs.
+    descriptor, temporary = tempfile.mkstemp(prefix=".accel_homing_png_", suffix=".tmp",
+                                              dir=str(destination))
+    identity = os.fstat(descriptor)
+    identity = (identity.st_dev, identity.st_ino)
+    def owned(path):
+        try:
+            current = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        return (current.st_dev, current.st_ino) == identity
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
         for collision in range(100):
-            name = stem if collision == 0 else stem + "_%02d" % collision
-            published = destination / name
-            if os.path.lexists(published):
-                continue
-            filename = name + ".png"
-            candidate = staged / filename
-            candidate.write_bytes(data)
             _check_running(check_running)
+            name = stem if collision == 0 else stem + "_%02d" % collision
+            published = destination / (name + ".png")
             try:
-                os.rename(temporary, published)
-            except OSError:
-                if os.path.lexists(published):
-                    candidate.unlink()
+                # Staging and final files share a directory/filesystem. link()
+                # atomically exposes completed bytes and refuses an existing
+                # name, unlike POSIX rename(). TMPDIR cannot relocate staging.
+                os.link(temporary, published)
+            except OSError as exc:
+                if exc.errno == errno.EEXIST or os.path.lexists(published):
                     continue
+                raise OSError("Atomic no-overwrite PNG publication requires same-directory "
+                              "hard links: %s" % exc) from exc
+            try:
+                # Moonraker completes a CREATE event on CLOSE_WRITE for that
+                # name. A link of an already-closed inode supplies CREATE only.
+                # Open/close the owned final name without creating, truncating
+                # or writing bytes, before cancellation can skip completion.
+                flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+                completion = os.open(published, flags)
+                try:
+                    current = os.fstat(completion)
+                    if (current.st_dev, current.st_ino) != identity:
+                        raise OSError(errno.ESTALE, "PNG publication path changed before completion")
+                finally:
+                    os.close(completion)
+            except Exception:
+                if owned(published):
+                    os.unlink(published)
                 raise
             _check_running(check_running)
-            return str(published / filename)
-    raise ValueError("PNG chart filename collisions exceeded their bounded limit")
+            return str(published)
+        raise ValueError("PNG chart filename collisions exceeded their bounded limit")
+    finally:
+        if owned(temporary):
+            os.unlink(temporary)
 
 
 def write_capture(directory, run_id, axis, capture, record, simulated=False,
@@ -308,8 +342,7 @@ def _capture_reference(directory, paths, run_id, axis, record, simulated, check_
         raise ValueError("Accuracy PNG capture path does not match its receipt")
     candidate = Path(path).expanduser().resolve(strict=True)
     if not candidate.is_file() or candidate.suffix.lower() != ".png" \
-            or candidate.parent.parent != directory \
-            or candidate.name != candidate.parent.name + ".png":
+            or candidate.parent != directory:
         raise ValueError("Accuracy PNG capture path does not belong to this output directory")
     if candidate.stat().st_size > _MAX_PNG_BYTES:
         raise ValueError("Accuracy PNG capture exceeds its size limit")

@@ -58,6 +58,15 @@ receipts, PNG path/hash/CRC, bounded extrema-preserving traces and collision-saf
 publication are checked. Chart directories contain PNG files only; there are
 no CSV/JSON/SVG/HTML sidecars or full-resolution raw-data exports.
 
+Delayed-watcher fixtures verify that only the durable chart root becomes a
+watched directory; completed PNGs are published directly beneath it. Nine
+regressions cover delayed directory-watch registration, a racing filename,
+cancellation before/after publication, unsupported hard links, bounded
+collision exhaustion and the final filename's create/close-write events.
+Completion errors remove only owned files and preserve foreign replacements.
+Temporary staging is a same-directory regular file removed on success/failure.
+No live Moonraker watcher was exercised.
+
 The representative three-window chart retained outside this source package is
 **SIMULATED / NOT PRINTER MEASUREMENT**. Matplotlib/Agg rendered it in an
 isolated worker. The three signed XYZ panels share a vertical scale; the
@@ -97,9 +106,8 @@ installation, config idempotence, backup/rollback, full-history restore,
 failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
-claiming a host integration test. All three shell entry points passed bash -n
-without execution; bootstrap.sh adds the completeness guard while install.sh
-and uninstall.sh retain their base bytes. No native Linux systemd/Unix-socket
+claiming a host integration test. All three shell entry points retain their source-base bytes and passed
+bash -n without execution. No native Linux systemd/Unix-socket
 integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
@@ -115,7 +123,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The final combined offline verification run discovered **549 tests: 548 passed,
+The final combined offline verification run discovered **558 tests: 557 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -279,10 +287,10 @@ existing shared/X/Y values below 3 g through initial installation and update
 in either section. The next-float fixture uses portable struct operations;
 Python 3.8 runtime compatibility was not exercised.
 
-The recorded run used CPython 3.13.5 on Windows: **549 tests in 13.669 seconds**
-(13.93458 seconds subprocess wall time). The full UTF-8 unittest output is
+The recorded run used CPython 3.13.5 on Windows: **558 tests in 14.285 seconds**
+(14.56137 seconds subprocess wall time). The full UTF-8 unittest output is
 retained in `validation/tests.txt` as its exact binary-captured bytes, without
-newline conversion: **93,664 bytes and 554 CRLF pairs**. The JSON report hashes
+newline conversion: **95,452 bytes and 563 CRLF pairs**. The JSON report hashes
 that stored log and all **25 Python sources both before and after** the run;
 the two source snapshots match. All **40 package files** were also identical
 between the snapshots taken during the suite; this summary, the new log and
