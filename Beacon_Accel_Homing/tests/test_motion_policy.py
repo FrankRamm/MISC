@@ -90,6 +90,190 @@ def stream_ramp(obj, attempt, duration=0.150, direction=1, parked=False,
     return obj.reactor.monotonic()
 
 
+class GenericBoundedEvidenceTests(unittest.TestCase):
+    """Preserve actual pre-deadline lower bounds across report/command phases."""
+
+    rate = 3200.0
+
+    def machine(self, spread=0.32, direction=1):
+        from test_backends import RaisedBaselineFloorTest
+        obj, endstop = RaisedBaselineFloorTest().machine(
+            threshold=1.5, spreads=(spread, 0.04, 0.02))
+        obj.workflows.session = {"mode": "calibration", "state": "running", "axis": "x"}
+        obj.workflows.in_home, obj.workflows.home_axis = True, "x"
+        obj.toolhead.get_max_velocity = lambda: (500.0, 5000.0)
+        obj.session_axes["x"].info = info(speed=50.0, retract=0, second=50.0)
+        obj._prepare_reference()
+        when = obj.backend.last_sample_time + 16 / self.rate
+        stepper = SignedRamp(when, 5000.0, 50.0, direction)
+        stepper.get_past_mcu_position = mock.Mock(wraps=stepper.get_past_mcu_position)
+        endstop.get_steppers = lambda: [stepper]
+        attempt = obj.prepare(endstop, when)
+        stepper.get_past_mcu_position.assert_not_called()
+        self.assertIsNone(attempt.motion_deadline)
+        self.assertIsNone(attempt.proof_step_positions)
+        self.assertEqual(attempt.proof_history, [])
+        self.assertAlmostEqual(attempt.proof_deadline - when, 0.055)
+        obj.arm(attempt)
+        return obj, attempt, endstop
+
+    def stream(self, obj, attempt, phase=16, acceleration=None, direction=1,
+               watch_from=0.0, duration=0.13, age=0.001):
+        if acceleration is None:
+            acceleration = lambda elapsed: direction * 5000.0 if 0 <= elapsed < 0.010 else 0.0
+        number, size, observations = 0, 15 + phase, []
+        while not attempt.done and not attempt.motion_seen and number / self.rate < duration:
+            rows = []
+            for index in range(size):
+                offset = number + index - 15
+                elapsed = offset / self.rate
+                noise = 0.0002 * G * (1 if offset % 2 else -1)
+                rows.append((attempt.arm_time + elapsed, acceleration(elapsed) + noise, 0.0, G))
+            feed(obj, rows, age=age)
+            if attempt.proof_state is not None:
+                endpoint = obj.clock_to_time(attempt.proof_state[3])
+                lower, _upper = obj._motion_speed_bounds(attempt, attempt.proof_state)
+                observations.append((endpoint, lower))
+            if obj.reactor.now - attempt.arm_time >= watch_from:
+                obj._watchdog(obj.reactor.now)
+            number += size
+            size = 16
+        return observations
+
+    def test_same_real_ramp_proves_motion_at_both_report_phases(self):
+        for phase in (8, 16):
+            for direction in (-1, 1):
+                with self.subTest(phase=phase, direction=direction):
+                    obj, attempt, endstop = self.machine(direction=direction)
+                    self.stream(obj, attempt, phase=phase, direction=direction)
+                    self.assertTrue(attempt.motion_seen)
+                    self.assertTrue(attempt.moving)
+                    self.assertEqual(attempt.proof_method, "full_arm_peak")
+                    self.assertGreaterEqual(attempt.proof_speed_peak, 25.0)
+                    self.assertLessEqual(attempt.proof_speed_peak_time, attempt.proof_deadline)
+                    self.assertTrue(attempt.proof_command_eligible)
+                    self.assertFalse(attempt.gap)
+                    self.assertIsNone(obj.sensor_fault)
+                    self.assertIsNone(attempt.reason)
+                    self.assertEqual(endstop.trigger_log.messages, [])
+                    self.assertLess(obj.reactor.now, attempt.proof_deadline)
+
+    def test_stationary_noise_bias_and_insufficient_margin_still_fail(self):
+        cases = ((0.32, "parked"), (0.32, "noise"), (0.32, "bias"),
+                 (0.581, "ramp"), (1.313, "ramp"))
+        for spread, profile in cases:
+            with self.subTest(spread=spread, profile=profile):
+                obj, attempt, endstop = self.machine(spread)
+                acceleration = (None if profile == "ramp" else
+                                (lambda elapsed: 0.0) if profile == "parked" else
+                                (lambda elapsed: 0.8 * attempt.proof_noise[0] * attempt.count_g * G)
+                                if profile == "bias" else
+                                (lambda elapsed: 0.15 * G * (1 if round(elapsed * self.rate) % 2 else -1)))
+                self.stream(obj, attempt, acceleration=acceleration)
+                self.assertFalse(attempt.motion_seen)
+                self.assertFalse(attempt.moving)
+                self.assertLess(attempt.proof_speed_peak, 25.0)
+                self.assertEqual(attempt.reason, "no_motion")
+                self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+                self.assertLessEqual(obj.reactor.now, attempt.proof_deadline + 0.005)
+
+    def test_peak_needs_half_full_speed_and_command_eligibility(self):
+        for profile in ("small_impulse", "uncommanded_ramp"):
+            with self.subTest(profile=profile):
+                obj, attempt, endstop = self.machine()
+                acceleration = None
+                if profile == "small_impulse":
+                    # Four subthreshold samples exceed half the first eligible
+                    # 25 mm/s command, but never half the full 50 mm/s plan.
+                    acceleration = lambda elapsed: 14000.0 if 0 <= elapsed < 4 / self.rate else 0.0
+                else:
+                    attempt.steppers = [SignedRamp(attempt.arm_time + 0.2, 5000.0, 50.0, 1)]
+                self.stream(obj, attempt, phase=4, acceleration=acceleration)
+                if profile == "small_impulse":
+                    self.assertGreater(attempt.proof_speed_peak, 12.5)
+                    self.assertLess(attempt.proof_speed_peak, 25.0)
+                else:
+                    self.assertGreater(attempt.proof_speed_peak, 25.0)
+                    self.assertFalse(attempt.proof_command_eligible)
+                self.assertFalse(attempt.motion_seen)
+                self.assertEqual(attempt.reason, "no_motion")
+                self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+    def test_peak_cutoff_uses_sample_endpoint_and_cannot_be_minted_after_deadline(self):
+        obj, attempt, endstop = self.machine()
+        def late_impulse(elapsed):
+            return 14000.0 if 0.060 <= elapsed < 0.080 else -14000.0 if 0.080 <= elapsed < 0.100 else 0.0
+        # Defer the watchdog only in this fixture. A post-deadline jolt and its
+        # reversal leave no current lower bound when it runs; a wrongly minted
+        # late peak would otherwise rescue this failed startup.
+        observations = self.stream(obj, attempt, acceleration=late_impulse, watch_from=0.110)
+        self.assertGreater(max(lower for _when, lower in observations), 25.0)
+        self.assertEqual(attempt.proof_speed_peak, 0.0)
+        self.assertIsNone(attempt.proof_speed_peak_time)
+        self.assertEqual(attempt.reason, "no_motion")
+        self.assertEqual(endstop.trigger_log.messages, [[HOST]])
+
+        obj, attempt, endstop = self.machine()
+        observations = self.stream(obj, attempt,
+                                   acceleration=lambda elapsed: 14000.0 if 0.040 <= elapsed < 0.050 else 0.0,
+                                   watch_from=0.060, age=0.011)
+        self.assertGreater(obj.reactor.now, attempt.proof_deadline)
+        self.assertTrue(attempt.motion_seen)
+        self.assertGreater(attempt.proof_speed_peak, 25.0)
+        self.assertLessEqual(attempt.proof_speed_peak_time, attempt.proof_deadline)
+        self.assertIsNone(attempt.reason)
+        self.assertEqual(endstop.trigger_log.messages, [])
+
+    def test_generic_failure_diagnostics_are_coherent_bounded_and_survive_cleanup(self):
+        obj, attempt, endstop = self.machine(spread=1.313)
+        self.stream(obj, attempt)
+        self.assertEqual(attempt.reason, "no_motion")
+        snapshot = attempt.proof_state
+        expected_raw = obj._measured_speed(attempt, snapshot)
+        original_bounds, original_sums = obj._motion_speed_bounds, attempt.sums
+        def concurrent_sums(current, state):
+            result = original_bounds(current, state)
+            current.sums = [1e9, 1e9, 1e9]
+            return result
+        with mock.patch.object(obj, "_motion_speed_bounds", side_effect=concurrent_sums):
+            obj._motion_state(attempt)
+        attempt.sums = original_sums
+        self.assertAlmostEqual(attempt.proof_raw, expected_raw)
+        obj.disarm()
+        obj._end_session()
+        obj.workflows.session = None
+        obj.workflows.in_home, obj.workflows.home_axis = False, None
+        proof = obj.get_status(obj.reactor.now)["last"]["x"]["motion_proof"]
+        self.assertEqual(proof["backend"], "klipper_batch")
+        self.assertEqual(proof["method"], "full_arm_lower")
+        self.assertEqual(proof["result"], "insufficient_bound")
+        self.assertAlmostEqual(proof["raw_speed_mm_s"], expected_raw, places=5)
+        self.assertGreater(proof["raw_speed_mm_s"], 0.9 * attempt.effective_speed)
+        self.assertEqual(proof["lower_speed_mm_s"], 0.0)
+        self.assertGreater(proof["upper_speed_mm_s"], proof["raw_speed_mm_s"])
+        self.assertEqual(proof["deadline_after_arm_ms"], 55.0)
+        self.assertGreaterEqual(proof["request_after_arm_ms"], 55.0)
+        self.assertLessEqual(proof["request_after_arm_ms"], 60.0)
+        self.assertEqual(proof["first_sample_after_arm_ms"], 0.0)
+        self.assertIsNone(proof["first_step_after_arm_ms"])
+        self.assertIsNone(proof["history_capacity"])
+        self.assertEqual(proof["noise_bound_xyz_g"], tuple(round(value * attempt.count_g, 6)
+                                                         for value in attempt.proof_noise))
+        self.assertNotIn("samples", proof)
+        json.dumps(proof, allow_nan=False)
+        proof["noise_bound_xyz_g"] = (999.0, 999.0, 999.0)
+        self.assertLess(obj.get_status(obj.reactor.now)["last"]["x"]["motion_proof"]["noise_bound_xyz_g"][0], 1.0)
+        messages = []
+        obj.cmd_STATUS(types.SimpleNamespace(respond_info=messages.append))
+        summary = next(message for message in messages if "X motion proof" in message)
+        self.assertIn("raw/lower/upper", summary)
+        self.assertIn("noise XYZ", summary)
+        self.assertNotIn("first step", summary)
+        self.assertNotIn("history", summary)
+        with self.assertRaisesRegex(CommandError, "raw/lower/upper.*deadline.*55.000"):
+            obj.finish(endstop, attempt, HOST)
+
+
 class GenericNoMotionPolicyTests(unittest.TestCase):
     def test_parked_stop_with_varying_noise_fails_first_and_repeated_home(self):
         obj, attempt, trigger = prepared_generic()

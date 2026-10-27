@@ -196,9 +196,12 @@ class AccelHomingWorkflows:
                                                 minval=0.05, maxval=0.40)
         self.reposition_speed = config.getfloat("workflow_reposition_speed", 50.0,
                                                 minval=1.0, maxval=150.0)
+        self.calibration_settle_time = config.getfloat("calibration_settle_time", 0.25,
+                                                        minval=0.0, maxval=2.0)
         if not all(math.isfinite(value) for value in (
                 self.start_threshold, self.threshold_step, self.max_threshold,
-                self.confirm_timeout, self.travel_tolerance, self.reposition_speed)):
+                self.confirm_timeout, self.travel_tolerance, self.reposition_speed,
+                self.calibration_settle_time)):
             raise config.error("Accelerometer homing workflow settings must be finite")
         start_args = self.printer.get_start_args() if hasattr(self.printer, "get_start_args") else {}
         main_config = start_args.get("config_file")
@@ -564,7 +567,8 @@ class AccelHomingWorkflows:
         if session is not None:
             if session["mode"] == "calibration":
                 result = dict(result, **{key: session[key] for key in (
-                    "start_threshold_g", "threshold_step_g", "quiet_range_enforced")})
+                    "start_threshold_g", "threshold_step_g", "quiet_range_enforced",
+                    "calibration_settle_time_s")})
             session["finishing"] = True
             session["finish_result"] = result.get("result")
         try:
@@ -688,7 +692,8 @@ class AccelHomingWorkflows:
                             "SAVE_CONFIG", 1, minval=0, maxval=1)))}
         if mode == "calibration":
             self.session.update(calibration_grid, candidate=calibration_grid["start_threshold_g"],
-                                quiet_range_enforced=False)
+                                quiet_range_enforced=False,
+                                calibration_settle_time_s=self.calibration_settle_time)
             seed = None if calibration_grid["explicit_calibration_grid"] else self._consume_noise_seed(axis)
             if seed is not None:
                 self.session["candidate"] = seed
@@ -696,8 +701,9 @@ class AccelHomingWorkflows:
                                                "start_threshold_g": seed}
             self._info("%s calibration starts at %.6g g with %.6g g steps; stationary peak-to-peak "
                        "quietness check disabled for these trials; fresh valid reference samples "
-                       "and ten-home qualification remain required" % (
-                           axis.upper(), self.session["candidate"], self.session["threshold_step_g"]))
+                       "and ten-home qualification remain required; returns settle for %.3f s" % (
+                           axis.upper(), self.session["candidate"], self.session["threshold_step_g"],
+                           self.session["calibration_settle_time_s"]))
 
     def _wait_center(self, reason):
         self._restore()
@@ -729,6 +735,7 @@ class AccelHomingWorkflows:
         return {"sensor": self.owner.noise_sensor_context(),
                 "calibration_start_threshold": self.start_threshold,
                 "calibration_step": self.threshold_step,
+                "calibration_settle_time_s": self.calibration_settle_time,
                 "calibration_max_threshold": self.max_threshold,
                 "axes": {axis: self._model_context(axis)
                          for axis in AXES if axis in self.owner.rails_by_axis}}
@@ -1209,8 +1216,28 @@ class AccelHomingWorkflows:
         coordinates = [None, None, None]
         coordinates[AXES[axis]] = center
         info = self.owner.rails_by_axis[axis].get_homing_info()
-        self.owner.toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
-        self.owner.toolhead.wait_moves()
+        toolhead = self.owner.toolhead
+        if session["mode"] != "calibration":
+            toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
+            toolhead.wait_moves()
+            self._check_running(session)
+            return
+        try:
+            # Match the homing acceleration cap during calibration returns,
+            # then allow ringdown to decay before acquiring the next reference.
+            self.owner._limit_accel()
+            self._check_running(session)
+            toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
+            self._check_running(session)
+            toolhead.wait_moves()
+            self._check_running(session)
+            if session["calibration_settle_time_s"]:
+                toolhead.dwell(session["calibration_settle_time_s"])
+                self._check_running(session)
+                toolhead.wait_moves()
+                self._check_running(session)
+        finally:
+            self.owner._restore_accel()
         self._check_running(session)
 
     def _calibrate_trials(self):
@@ -1327,6 +1354,7 @@ class AccelHomingWorkflows:
                     "calibration_start_threshold_g": session["start_threshold_g"],
                     "calibration_step_g": session["threshold_step_g"],
                     "calibration_quiet_range_enforced": session["quiet_range_enforced"],
+                    "calibration_settle_time_s": session["calibration_settle_time_s"],
                     "physical_position_verified": False}
         if session.get("noise_seed") is not None:
             metadata["stationary_noise_seed"] = dict(session["noise_seed"])
@@ -1646,7 +1674,8 @@ class AccelHomingWorkflows:
             active["repeatability_limit_mm"] = REPEATABILITY_LIMIT_MM
             if session["mode"] == "calibration":
                 active.update({key: session[key] for key in (
-                    "start_threshold_g", "threshold_step_g", "explicit_calibration_grid", "quiet_range_enforced")})
+                    "start_threshold_g", "threshold_step_g", "explicit_calibration_grid", "quiet_range_enforced",
+                    "calibration_settle_time_s")})
                 active["attempt_limit"] = self.max_attempts
         return {"model": self.model_name, "manual_threshold_overrides": sorted(self.manual_axes),
                 "active": active, "last_result": self.last_result,

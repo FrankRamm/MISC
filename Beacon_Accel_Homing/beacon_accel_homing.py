@@ -247,6 +247,24 @@ def describe_reference(status):
     return result
 
 
+def describe_motion_proof(proof):
+    """Short generic proof summary for a stopped move and STATUS."""
+    def value(name):
+        item = proof.get(name)
+        return "unknown" if item is None else "%.3f" % item
+    noise = proof.get("noise_bound_xyz_g")
+    noise = "none" if noise is None else "/".join(
+        "unknown" if item is None else "%.4f" % item for item in noise)
+    return ("motion proof %s (%s, %s); raw/lower/upper %s/%s/%s mm/s,"
+            " peak %s mm/s; command %s mm/s eligible %s;"
+            " sample/request/deadline %s/%s/%s ms after arm; noise XYZ %s g"
+            % (proof["result"], proof["backend"], proof["method"],
+               value("raw_speed_mm_s"), value("lower_speed_mm_s"), value("upper_speed_mm_s"),
+               value("full_arm_peak_mm_s"), value("commanded_speed_mm_s"), proof["command_eligible"],
+               value("evaluated_sample_after_arm_ms"), value("request_after_arm_ms"),
+               value("deadline_after_arm_ms"), noise))
+
+
 def homing_warnings(name, info):
     """Rail settings known to weaken detection. Advice only, never an error."""
     warnings = []
@@ -293,9 +311,11 @@ class Attempt:
         self.pending_noise = (0.0, 0.0, 0.0)
         self.bases = None           # resting reading of all three sensor axes
         self.sums = [0.0, 0.0, 0.0]  # integrated readings since the pass started
-        self.proof_noise = None    # raw-axis uncertainty, only expanded quiet references
+        self.proof_noise = None    # measured uncertainty for calibration/expanded references
         self.proof_state = None    # atomic (sums, sample count, dt, end clock) for that proof
-        self.proof_speed_peak = 0.0  # conservative native lower bound, before the startup deadline
+        self.proof_speed_peak = 0.0  # conservative lower bound, before the startup deadline
+        self.proof_speed_peak_time = None
+        self.proof_deadline = None  # configured-sensor deadline; no native step-history policy
         self.motion_deadline = None  # expanded native references must prove motion or pressed
         self.proof_history = []     # bounded coherent (time, sample count, XYZ prefix sums)
         self.proof_prefix = (0.0, 0.0, 0.0)
@@ -310,6 +330,7 @@ class Attempt:
         self.proof_scan_event = None
         self.proof_scan_comparisons = 0
         self.proof_lower = self.proof_upper = self.proof_commanded = None
+        self.proof_raw = None
         self.proof_command_eligible = False
         self.proof_measured_at = None
         self.proof_first_sample_time = self.proof_sample_time = None
@@ -1286,6 +1307,9 @@ class BeaconAccelHoming:
         attempt.last_samples = list(bases)
         attempt.effective_speed, attempt.effective_accel = speed, accel
         attempt.motion_deadline = motion_deadline
+        if self.backend is not None:
+            attempt.proof_deadline = print_time + self.backend.motion_startup_timeout(speed, accel)
+            attempt.proof_method = "full_arm_lower" if proof_noise is not None else "raw_integral"
         if motion_deadline is not None:
             try:
                 attempt.proof_step_positions = tuple(
@@ -1328,9 +1352,11 @@ class BeaconAccelHoming:
         if result >= mcu.MCU_trsync.REASON_COMMS_TIMEOUT:
             raise self.printer.command_error("Communication timeout during homing")
         if attempt is not None and attempt.reason in FAILURES:
+            detail = ("; " + describe_motion_proof(self._motion_proof_status(attempt))
+                      if attempt.reason == "no_motion" else "")
             raise self.printer.command_error(
-                "beacon_accel_homing: %s on %s, homing stopped"
-                % (FAILURES[attempt.reason], endstop.axis.upper()))
+                "beacon_accel_homing: %s on %s, homing stopped%s"
+                % (FAILURES[attempt.reason], endstop.axis.upper(), detail))
         if result != mcu.MCU_trsync.REASON_ENDSTOP_HIT or attempt is None:
             return 0.0
         return self.trigger_time(attempt)
@@ -1348,7 +1374,7 @@ class BeaconAccelHoming:
         if attempt.record is not None:
             attempt.record["moving"] = attempt.moving
             attempt.record["motion_seen"] = attempt.motion_seen or attempt.moving
-            if attempt.motion_deadline is not None:
+            if attempt.motion_deadline is not None or self.backend is not None:
                 attempt.record["motion_proof"] = self._motion_proof_status(attempt)
         if attempt.reason == "pressed":
             return attempt.arm_time
@@ -1365,10 +1391,12 @@ class BeaconAccelHoming:
             speed = max(speed, abs(moved) * stepper.get_step_dist() / window)
         return speed
 
-    def _measured_speed(self, attempt):
+    def _measured_speed(self, attempt, proof_state=None):
         """Speed of the toolhead in any direction, integrated from all three axes."""
-        scale = attempt.count_g * MM_PER_S2_PER_G * attempt.sample_dt
-        return sum((v * scale) ** 2 for v in attempt.sums) ** 0.5
+        sums, dt = ((attempt.sums, attempt.sample_dt) if proof_state is None else
+                    (proof_state[0], proof_state[2]))
+        scale = attempt.count_g * MM_PER_S2_PER_G * dt
+        return sum((v * scale) ** 2 for v in sums) ** 0.5
 
     def _motion_speed_bounds(self, attempt, proof_state):
         """Integrated speed bounds if disturbance stays within the pre-arm envelope."""
@@ -1508,9 +1536,10 @@ class BeaconAccelHoming:
             _sums, _integrated_count, _dt, end_clock = proof_state
             measured_at = self.clock_to_time(end_clock)
             measured, measured_upper = self._motion_speed_bounds(attempt, proof_state)
+            attempt.proof_raw = self._measured_speed(attempt, proof_state)
+            attempt.proof_lower, attempt.proof_upper = measured, measured_upper
+            attempt.proof_measured_at = measured_at
             if self.backend is None:
-                attempt.proof_lower, attempt.proof_upper = measured, measured_upper
-                attempt.proof_measured_at = measured_at
                 self._scan_step_motion(attempt, measured_at,
                                        self.reactor.monotonic() if eventtime is None else eventtime)
                 if attempt.proof_step_error is not None or attempt.proof_overflow:
@@ -1519,6 +1548,9 @@ class BeaconAccelHoming:
             measured_at = self.clock_to_time(attempt.last_end_clock)
             measured = self._measured_speed(attempt)
             measured_upper = measured
+            if self.backend is not None:
+                attempt.proof_raw = attempt.proof_lower = attempt.proof_upper = measured
+                attempt.proof_measured_at = measured_at
         commanded = self._commanded_speed(attempt, measured_at - MOTION_LAG)
         # Workflow proof must also work when the configured rail or toolhead
         # velocity limit is below the legacy pressed-start cutoff.  A slightly
@@ -1534,20 +1566,19 @@ class BeaconAccelHoming:
         # Preserve valid early motion evidence across watchdog/report phases.
         # Unlike the instantaneous test, a historical lower bound must exceed
         # half the full effective speed, never half a later smaller command.
-        native_peak = (self.backend is None and attempt.proof_noise is not None
-                       and effective > 0.0
-                       and attempt.proof_speed_peak >= MOVING_RATIO * effective)
+        full_arm_peak = (attempt.proof_noise is not None and effective > 0.0
+                         and attempt.proof_speed_peak >= MOVING_RATIO * effective)
         native_interval = (self.backend is None and attempt.proof_noise is not None
                            and attempt.proof_interval_peak >= MOVING_RATIO * effective)
-        if self.backend is None and attempt.proof_noise is not None:
+        if self.backend is not None or attempt.proof_noise is not None:
             attempt.proof_commanded = proof_commanded
             attempt.proof_command_eligible = proof_commanded >= proof_min_speed
         if (proof_commanded >= proof_min_speed
-                and (measured >= MOVING_RATIO * proof_commanded or native_peak or native_interval)):
+                and (measured >= MOVING_RATIO * proof_commanded or full_arm_peak or native_interval)):
             attempt.motion_seen = True
-            if self.backend is None and attempt.proof_noise is not None:
+            if attempt.proof_noise is not None:
                 attempt.proof_method = ("step_epoch_interval" if native_interval else
-                                        "full_arm_peak" if native_peak else "full_arm_lower")
+                                        "full_arm_peak" if full_arm_peak else "full_arm_lower")
         if self.backend is not None:
             # A generic stream may prove motion at its actual homing speed,
             # but missing motion is never a successful pressed-start home.
@@ -1557,7 +1588,7 @@ class BeaconAccelHoming:
             return None
         if commanded < PRESSED_MIN_SPEED:
             return None
-        if measured >= MOVING_RATIO * commanded or native_peak or native_interval:
+        if measured >= MOVING_RATIO * commanded or full_arm_peak or native_interval:
             attempt.moving = True
             return False
         # An uncertain lower bound cannot establish a successful pressed home.
@@ -1572,6 +1603,14 @@ class BeaconAccelHoming:
                    if self.backend is None else self.backend.motion_startup_timeout(speed, accel))
         return speed, accel, timeout
 
+    def _motion_proof_deadline(self, attempt):
+        if attempt.motion_deadline is not None:
+            return attempt.motion_deadline
+        if attempt.proof_deadline is not None:
+            return attempt.proof_deadline
+        # Standalone replay attempts do not pass through prepare().
+        return attempt.arm_time + self._motion_startup_plan(attempt)[2]
+
     def _check_no_motion(self, attempt, print_time, eventtime=None):
         """Fail-closed startup check for configured or expanded native references.
 
@@ -1582,9 +1621,7 @@ class BeaconAccelHoming:
         self._motion_state(attempt, eventtime)
         if attempt.motion_seen or attempt.moving:
             return False
-        _speed, _accel, timeout = self._motion_startup_plan(attempt)
-        deadline = (attempt.motion_deadline if attempt.motion_deadline is not None
-                    else attempt.arm_time + timeout)
+        deadline = self._motion_proof_deadline(attempt)
         if print_time < deadline:
             return False
         self._fire(attempt, "no_motion", mcu.MCU_trsync.REASON_HOST_REQUEST)
@@ -1598,7 +1635,7 @@ class BeaconAccelHoming:
             attempt.done = True
             attempt.reason = reason
             attempt.endstop.trigger(code)
-        if attempt.motion_deadline is not None:
+        if attempt.motion_deadline is not None or self.backend is not None:
             # Diagnostics follow dispatch and cannot prevent the physical stop.
             try:
                 attempt.request_time = self.main_mcu.estimated_print_time(self.reactor.monotonic())
@@ -1786,8 +1823,8 @@ class BeaconAccelHoming:
                 attempt.bases = self._baseline()
             attempt.first_clock = start_clock
             attempt.sample_dt = interval / self.beacon_freq
-            if expanded_native:
-                attempt.proof_first_sample_time = start_time
+            if expanded_native or self.backend is not None:
+                attempt.proof_first_sample_time = self.clock_to_time(start_clock)
             if attempt.bases is None:
                 self._fire(attempt, "no_baseline", mcu.MCU_trsync.REASON_HOST_REQUEST)
                 return
@@ -1842,16 +1879,20 @@ class BeaconAccelHoming:
                 # Serial-reader and watchdog threads see one coherent sample
                 # count and sums. N*dt includes the first integrated sample.
                 attempt.proof_state = (tuple(sums), integrated_count, attempt.sample_dt, end_clock)
-                if expanded_native:
-                    attempt.proof_sample_time = end_time
-                if (expanded_native and not attempt.gap
-                        and self.clock_to_time(end_clock) <= attempt.motion_deadline):
+                attempt.proof_sample_time = self.clock_to_time(end_clock)
+                peak_deadline = (attempt.motion_deadline if expanded_native else attempt.proof_deadline)
+                if (not attempt.gap and peak_deadline is not None
+                        and attempt.proof_sample_time <= peak_deadline):
                     lower, _upper = self._motion_speed_bounds(attempt, attempt.proof_state)
-                    attempt.proof_speed_peak = max(attempt.proof_speed_peak, lower)
+                    if lower > attempt.proof_speed_peak:
+                        attempt.proof_speed_peak = lower
+                        attempt.proof_speed_peak_time = attempt.proof_sample_time
                 if expanded_native and not self._append_motion_history(attempt, raw, count, start_clock, interval):
                     self._fire(attempt, "proof_overflow", mcu.MCU_trsync.REASON_HOST_REQUEST)
                     return
             attempt.last_end_clock = end_clock
+            if self.backend is not None and attempt.proof_noise is None:
+                attempt.proof_sample_time = self.clock_to_time(end_clock)
             attempt.last_samples = [raw[-3], raw[-2], raw[-1]]
             if not direction:
                 # The stop decelerates the toolhead, so once it travels the
@@ -2289,7 +2330,7 @@ class BeaconAccelHoming:
             "backend": "beacon_raw" if self.backend is None else self.backend.kind,
             "trigger_after_arm_s": round(recorded_onset - attempt.arm_time, 4) if onset else None,
         }
-        if attempt.motion_deadline is not None:
+        if attempt.motion_deadline is not None or self.backend is not None:
             result["motion_proof"] = self._motion_proof_status(attempt)
         attempt.record = result
         self.last[attempt.axis] = result
@@ -2303,37 +2344,52 @@ class BeaconAccelHoming:
             return number(None if value is None else (value - attempt.arm_time) * 1000.0)
         first, sample = attempt.proof_first_sample_time, attempt.proof_sample_time
         interval = attempt.proof_interval
+        native = self.backend is None
+        deadline = self._motion_proof_deadline(attempt)
+        mapping = self.helper.config.axes_map if native else ((0, 1), (1, 1), (2, 1))
+        noise = (None if attempt.proof_noise is None else
+                 tuple(number(attempt.proof_noise[index] * attempt.count_g) for index, _sign in mapping))
         result = ("proved" if attempt.motion_seen or attempt.moving else
-                  "gap" if attempt.gap else "history_overflow" if attempt.proof_overflow else
-                  "step_history_error" if attempt.proof_step_error else
-                  "no_first_step" if attempt.proof_step_epoch is None else
+                  "gap" if attempt.gap else "history_overflow" if native and attempt.proof_overflow else
+                  "step_history_error" if native and attempt.proof_step_error else
+                  "no_first_step" if native and attempt.proof_step_epoch is None else
+                  "no_samples" if sample is None else
                   "command_not_eligible" if not attempt.proof_command_eligible else "insufficient_bound")
         return {
             "result": result, "method": attempt.proof_method,
+            "backend": "beacon_raw" if native else self.backend.kind,
             "gap": attempt.gap, "overflow": attempt.proof_overflow,
             "effective_speed_mm_s": number(attempt.effective_speed),
             "effective_accel_mm_s2": number(attempt.effective_accel),
+            "noise_bound_xyz_g": noise,
+            "arm_time_s": number(attempt.arm_time),
+            "sample_time_s": number(sample),
+            "evaluated_sample_time_s": number(attempt.proof_measured_at),
+            "deadline_time_s": number(deadline),
+            "request_time_s": number(attempt.request_time),
             "first_sample_after_arm_ms": elapsed(first),
             "first_step_after_arm_ms": elapsed(attempt.proof_step_epoch),
-            "step_epoch_precision_ms": STEP_EPOCH_PRECISION * 1000.0,
+            "step_epoch_precision_ms": STEP_EPOCH_PRECISION * 1000.0 if native else None,
             "sample_after_arm_ms": elapsed(sample),
             "evaluated_sample_after_arm_ms": elapsed(attempt.proof_measured_at),
-            "deadline_after_arm_ms": elapsed(attempt.motion_deadline),
+            "deadline_after_arm_ms": elapsed(deadline),
             "request_after_arm_ms": elapsed(attempt.request_time),
             "sample_age_at_request_ms": number(None if sample is None or attempt.request_time is None
                                                 else (attempt.request_time - sample) * 1000.0),
+            "raw_speed_mm_s": number(attempt.proof_raw),
             "lower_speed_mm_s": number(attempt.proof_lower),
             "upper_speed_mm_s": number(attempt.proof_upper),
             "full_arm_peak_mm_s": number(attempt.proof_speed_peak),
-            "step_epoch_peak_mm_s": number(attempt.proof_interval_peak),
+            "full_arm_peak_after_arm_ms": elapsed(attempt.proof_speed_peak_time),
+            "step_epoch_peak_mm_s": number(attempt.proof_interval_peak) if native else None,
             "commanded_speed_mm_s": number(attempt.proof_commanded),
             "command_eligible": attempt.proof_command_eligible,
             "interval_start_after_arm_ms": elapsed(None if interval is None else interval[0]),
             "interval_end_after_arm_ms": elapsed(None if interval is None else interval[1]),
-            "history_samples": attempt.proof_history_count,
-            "history_capacity": NATIVE_PROOF_HISTORY_SAMPLES,
-            "scan_comparisons": attempt.proof_scan_comparisons,
-            "scan_budget_per_event": NATIVE_PROOF_SCAN_BUDGET,
+            "history_samples": attempt.proof_history_count if native else None,
+            "history_capacity": NATIVE_PROOF_HISTORY_SAMPLES if native else None,
+            "scan_comparisons": attempt.proof_scan_comparisons if native else None,
+            "scan_budget_per_event": NATIVE_PROOF_SCAN_BUDGET if native else None,
             "step_history_error": attempt.proof_step_error,
         }
 
@@ -2389,6 +2445,9 @@ class BeaconAccelHoming:
         for axis, record in sorted(self.last.items()):
             proof = record.get("motion_proof")
             if proof is not None:
+                if proof.get("backend") != "beacon_raw":
+                    gcmd.respond_info("accel_homing: %s %s" % (axis.upper(), describe_motion_proof(proof)))
+                    continue
                 gcmd.respond_info("accel_homing: %s motion proof %s; "
                                   "V/A %s/%s, first step %s ms, gap %s; "
                                   "lower/upper %s/%s, arm/step peak %s/%s mm/s; "

@@ -1132,7 +1132,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(rig.home_calls[1]["successes"], 0)
         self.assertEqual(rig.scripts, ["G28 X"] * 11)
         self.assertEqual(rig.disabled, [])
-        self.assertEqual(rig.toolhead.dwells, [])
+        self.assertEqual(rig.toolhead.dwells, [.25] * 10)
         self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
         self.assertFalse(any("action:prompt_begin" in line for line in rig.output))
         self.assertFalse(any("TOKEN" in line for line in rig.output))
@@ -1325,6 +1325,216 @@ class CalibrationTests(unittest.TestCase):
         self.assertIsNone(rig.workflow.session)
         self.assertEqual(rig.owner.threshold_g["x"], 8.0)
         self.assertFalse(rig.capture_active)
+
+
+class CalibrationRecenterTests(unittest.TestCase):
+    def machine(self, axis="x", mode="calibration", settle=.25, live_accel=60000., cap=5000.):
+        rig = Rig({"calibration_settle_time": settle})
+        rig.toolhead.accel = live_accel
+        rig.owner.homing_accel = cap
+        rig.workflow._begin(GCmd(SAVE_CONFIG=0), mode, axis)
+        rig.workflow.session["state"] = "running"
+        rig.toolhead.kin.limits["xy".index(axis)] = rig.owner.rails_by_axis[axis].get_range()
+        return rig
+
+    def test_return_is_capped_waited_settled_and_restored_on_selected_axis(self):
+        for axis in ("x", "y"):
+            for live, cap, expected in ((60000., 5000., 5000.), (1000., 5000., 1000.),
+                                        (60000., 0., 60000.)):
+                with self.subTest(axis=axis, live=live, cap=cap):
+                    rig = self.machine(axis, live_accel=live, cap=cap)
+                    toolhead, events = rig.toolhead, []
+                    move, wait, dwell, set_accel = (toolhead.manual_move, toolhead.wait_moves,
+                                                   toolhead.dwell, toolhead.set_max_velocities)
+                    def moving(coordinates, speed):
+                        events.append(("move", toolhead.accel))
+                        move(coordinates, speed)
+                    def waiting():
+                        events.append(("wait", toolhead.accel))
+                        wait()
+                    def dwelling(seconds):
+                        events.append(("dwell", seconds, toolhead.accel))
+                        dwell(seconds)
+                    def acceleration(velocity, value, scv, mcr):
+                        events.append(("accel", value))
+                        set_accel(velocity, value, scv, mcr)
+                    with mock.patch.object(toolhead, "manual_move", side_effect=moving), \
+                            mock.patch.object(toolhead, "wait_moves", side_effect=waiting), \
+                            mock.patch.object(toolhead, "dwell", side_effect=dwelling), \
+                            mock.patch.object(toolhead, "set_max_velocities", side_effect=acceleration):
+                        rig.workflow._recenter(axis)
+                    expected_events = [("move", expected), ("wait", expected),
+                                       ("dwell", .25, expected), ("wait", expected)]
+                    if expected != live:
+                        expected_events = [("accel", expected)] + expected_events + [("accel", live)]
+                    self.assertEqual(events, expected_events)
+                    self.assertEqual(toolhead.accel, live)
+                    self.assertIsNone(rig.owner.saved_accel)
+                    coordinates = [None, None, None]
+                    coordinates["xy".index(axis)] = (150., 100.)["xy".index(axis)]
+                    self.assertEqual(toolhead.moves, [(coordinates, 50.)])
+
+    def test_noncalibration_returns_keep_live_acceleration_without_added_dwell(self):
+        for mode in ("test", "charts", "accuracy"):
+            with self.subTest(mode=mode):
+                rig = self.machine(mode=mode)
+                with mock.patch.object(rig.owner, "_limit_accel") as limit, \
+                        mock.patch.object(rig.owner, "_restore_accel") as restore:
+                    rig.workflow._recenter("x")
+                limit.assert_not_called()
+                restore.assert_not_called()
+                self.assertEqual(rig.toolhead.moves, [([150., None, None], 50.)])
+                self.assertEqual(rig.toolhead.dwells, [])
+                self.assertEqual(rig.toolhead.accel, 60000.)
+
+    def test_zero_settle_keeps_acceleration_cap_and_setting_is_bounded_and_reported(self):
+        rig = self.machine(settle=0.)
+        with mock.patch.object(rig.toolhead, "wait_moves", wraps=rig.toolhead.wait_moves) as wait:
+            rig.workflow._recenter("x")
+        self.assertEqual(wait.call_count, 1)
+        self.assertEqual(rig.toolhead.dwells, [])
+        self.assertEqual(rig.toolhead.accel_log, [5000., 60000.])
+        self.assertEqual(rig.workflow.get_status(0)["active"]["calibration_settle_time_s"], 0.)
+        for value in (-.001, 2.001, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                Rig({"calibration_settle_time": value})
+        self.assertEqual(Rig({"calibration_settle_time": 2.}).workflow.calibration_settle_time, 2.)
+        rig = Rig({"calibration_settle_time": .4})
+        rig.calibrate(save=0)
+        self.assertEqual(rig.toolhead.dwells, [.4] * 10)
+        self.assertEqual(rig.workflow.last_result["calibration_settle_time_s"], .4)
+        metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
+        self.assertEqual(metadata["calibration_settle_time_s"], .4)
+
+    def test_error_or_cancellation_at_return_yield_boundaries_prevents_next_trial(self):
+        for failure in ("error", "cancel"):
+            for stage in ("move", "return_wait", "dwell", "settle_wait"):
+                with self.subTest(failure=failure, stage=stage):
+                    rig = Rig()
+                    rig.toolhead.accel = 60000.
+                    inside, waits, reached = [False], [0], []
+                    recenter, move, wait, dwell, end_session = (rig.workflow._recenter,
+                        rig.toolhead.manual_move, rig.toolhead.wait_moves, rig.toolhead.dwell,
+                        rig.owner._end_session)
+                    def interrupt(here):
+                        reached.append(here)
+                        if here != stage:
+                            return
+                        if failure == "error":
+                            raise RuntimeError("synthetic return failure")
+                        rig.workflow.cmd_CANCEL(GCmd())
+                    def centering(axis):
+                        inside[0] = True
+                        try:
+                            return recenter(axis)
+                        finally:
+                            inside[0] = False
+                    def moving(coordinates, speed):
+                        move(coordinates, speed)
+                        if inside[0]:
+                            interrupt("move")
+                    def waiting():
+                        wait()
+                        if inside[0]:
+                            waits[0] += 1
+                            interrupt("return_wait" if waits[0] == 1 else "settle_wait")
+                    def dwelling(seconds):
+                        dwell(seconds)
+                        if inside[0]:
+                            interrupt("dwell")
+                    def ending():
+                        end_session()
+                        # Real core _end_session also restores any active cap;
+                        # _recenter's finally must remain safe after this.
+                        rig.owner._restore_accel()
+                    with mock.patch.object(rig.workflow, "_recenter", side_effect=centering), \
+                            mock.patch.object(rig.toolhead, "manual_move", side_effect=moving), \
+                            mock.patch.object(rig.toolhead, "wait_moves", side_effect=waiting), \
+                            mock.patch.object(rig.toolhead, "dwell", side_effect=dwelling), \
+                            mock.patch.object(rig.owner, "_end_session", side_effect=ending), \
+                            self.assertRaises(RuntimeError if failure == "error" else CommandError):
+                        rig.calibrate(save=0)
+                    order = ["move", "return_wait", "dwell", "settle_wait"]
+                    self.assertEqual(reached, order[:order.index(stage) + 1])
+                    self.assertEqual(rig.scripts, ["G28 X"])
+                    self.assertEqual(rig.toolhead.moves, [([150., None, None], 50.)])
+                    self.assertEqual(rig.toolhead.accel, 60000.)
+                    self.assertIsNone(rig.owner.saved_accel)
+                    self.assertEqual(rig.toolhead.accel_log, [5000., 60000.])
+                    self.assertIsNone(rig.workflow.session)
+                    self.assertEqual(rig.configfile.saved, {})
+
+    def test_synthetic_settling_reduces_decaying_reference_without_accepting_persistent_noise(self):
+        # Tie the actual recenter dwell/wait lifecycle to the actual generic
+        # reference and motion checks. This models ringdown, not printer data.
+        from test_backends import generic, feed
+        from test_motion_policy import SignedRamp
+        from test_session import FakeRail, info
+        from harness import FakeEndstop
+        g, rate = 9806.65, 3200.
+        outcomes = {}
+        for profile in ("healthy", "decaying", "persistent"):
+            for settling in (0., .25):
+                rig = self.machine(settle=settling)
+                queued_until = [10.]  # Synthetic completed recenter time.
+                def waiting():
+                    rig.reactor.now = queued_until[0]
+                def dwelling(seconds):
+                    queued_until[0] += seconds
+                with mock.patch.object(rig.toolhead, "wait_moves", side_effect=waiting), \
+                        mock.patch.object(rig.toolhead, "dwell", side_effect=dwelling):
+                    rig.workflow._recenter("x")
+                self.assertEqual(rig.reactor.now, 10. + settling)
+                obj = generic()
+                obj.threshold_g["x"] = 1.5
+                obj.toolhead.get_max_velocity = lambda: (500., 5000.)
+                obj.reactor.now = rig.reactor.now
+                obj.workflows.session = {"mode": "calibration", "state": "running", "axis": "x"}
+                obj.workflows.in_home, obj.workflows.home_axis = True, "x"
+                endstop = FakeEndstop("x")
+                obj.session_axes["x"] = FakeRail(endstop, info(speed=50., retract=0, second=50.))
+                def vibration(when):
+                    elapsed = when - 10.
+                    amplitude = .02 if profile == "healthy" else .70
+                    if profile == "decaying":
+                        amplitude *= math.exp(-elapsed / .080)
+                    return amplitude * math.sin(2 * math.pi * 80 * elapsed)
+                def reference_batch():
+                    first = (obj.preparation.cutoff if obj.backend.last_sample_time is None
+                             else obj.backend.last_sample_time) + 1 / rate
+                    obj.backend.helper.emit({"data": [
+                        (first + j / rate, vibration(first + j / rate) * g, 0., g) for j in range(16)]})
+                obj.reactor.on_pause = reference_batch
+                obj._prepare_reference()
+                bound = obj.baseline_status["motion_proof_noise_bound_g"]["x"]
+                self.assertGreaterEqual(obj.preparation.last - obj.preparation.first + 1e-9, .1)
+                obj.reactor.on_pause = None
+                arm = round(obj.backend.last_sample_time + 1 / rate, 6)
+                endstop.get_steppers = lambda: [SignedRamp(arm, 5000., 50., 1)]
+                attempt = obj.prepare(endstop, arm)
+                obj.arm(attempt)
+                for number in range(0, 480, 16):
+                    rows = []
+                    for j in range(16):
+                        offset = (number + j) / rate
+                        when = arm + offset
+                        acceleration = 5000. if offset < .010 else 0.
+                        rows.append((when, acceleration + vibration(when) * g, 0., g))
+                    feed(obj, rows, age=.001)
+                    obj._watchdog(obj.reactor.monotonic())
+                    if attempt.done:
+                        break
+                self.assertIsNone(obj.sensor_fault)
+                self.assertFalse(attempt.gap)
+                outcomes[profile, settling] = (attempt.motion_seen, attempt.reason, bound)
+        for settling in (0., .25):
+            self.assertEqual(outcomes["healthy", settling][:2], (True, None))
+            self.assertEqual(outcomes["persistent", settling][:2], (False, "no_motion"))
+        self.assertEqual(outcomes["decaying", 0.][:2], (False, "no_motion"))
+        self.assertEqual(outcomes["decaying", .25][:2], (True, None))
+        self.assertGreater(outcomes["decaying", 0.][2], .5)
+        self.assertLess(outcomes["decaying", .25][2], .1)
+        self.assertAlmostEqual(outcomes["persistent", 0.][2], outcomes["persistent", .25][2])
 
 
 class CalibrationGridTests(unittest.TestCase):

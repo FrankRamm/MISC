@@ -1,5 +1,45 @@
 # Offline verification
 
+## Generic startup evidence and calibration return settling — 2026-10-27
+
+The package passed **675 tests** with:
+
+```bash
+python -B -m unittest discover -s Beacon_Accel_Homing/tests -v
+```
+
+The integrated run completed in 9.603 seconds with no failures, errors or
+skips. `git diff --check` also passed. No printer or printer service was
+accessed.
+
+The generic motion regression replays the same timestamped ramp under two
+report phases. Previously one phase lost its conservative early speed evidence
+before the commanded-speed comparison became eligible. Both now prove motion
+using a retained lower-bound peak, subject to the existing command eligibility
+and half-full-speed requirement. Samples dated after the original startup
+deadline cannot create that historical peak. Stationary noise, bounded bias,
+insufficient-margin ramps, and a peak with no eligible command still fail.
+Native motion, first-sample contact and calibration data-fault tests also pass.
+
+Calibration return tests cover both selected axes, the existing acceleration
+cap without increasing a lower live setting, the default 0.25-second dwell,
+zero dwell, zero cap, configuration bounds, status and saved metadata. Errors
+and cancellation at each yielding stage restore acceleration and prevent the
+next trial. A paired synthetic decaying-vibration replay fails immediately
+after the return and proves motion after the dwell; persistent vibration still
+fails with or without the dwell.
+
+New diagnostic tests retain coherent raw/lower/upper speed measurements,
+immutable mapped noise bounds, command eligibility, peak timing and stop-request
+timing through cleanup and status reporting. Generic diagnostics do not imply
+the presence of native first-step history.
+
+These checks establish the reproduced software defect and the behavior of the
+correction. They do not establish the exact cause of the reported printer
+failure or physical homing success. The settling interval can reduce transient
+return vibration, but persistent noise can still prevent movement from being
+verified. Calibration remains at a 1.0 g default start and 0.25 g default step.
+
 ## Calibration references and selected threshold grids — 2026-10-27
 
 The package passed **665 tests** with:

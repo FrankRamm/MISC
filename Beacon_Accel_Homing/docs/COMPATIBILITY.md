@@ -448,6 +448,15 @@ cap before reaching the configured threshold ceiling or completing validation;
 this change does not add automatic attempts.
 One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
+Calibration temporarily caps that return at `homing_accel` without raising a
+lower live value; zero leaves it unchanged. After `manual_move` and
+`wait_moves` complete, it queues `calibration_settle_time` (default 0.25 s,
+finite 0-2 s) and waits for that dwell to finish before the next acquisition.
+Zero disables only this extra wait. Session identity is checked after yielding
+operations, and acceleration is restored in `finally` after success, failure
+or cancellation. The cap/wait apply only to calibration returns; other
+workflow return behavior and all homing thresholds remain unchanged.
+
 Each accepted home must exceed 10 mm of commanded travel and fall within the
 configured tolerance of expected center-to-stop travel (20% by default).
 These geometry checks apply to the discovery and each validation.
@@ -600,6 +609,27 @@ drift leaves automatic detection bidirectional.
 The applied bounds appear in status as
 `baseline.motion_proof_noise_bound_g` (an X/Y/Z mapping, or `None` when not
 applied) and in the console as `motion-proof noise bound XYZ ... g`.
+
+Generic references with a measured noise envelope also retain the greatest
+coherent full-arm lower-speed bound observed at an eligible batch endpoint
+no later than their original startup deadline. When the existing lagged
+commanded-speed check becomes eligible, this peak can qualify only if it is
+at least `0.5 * effective_homing_speed`. The instantaneous comparison is still
+available. This closes a report-phase case in which a valid early lower bound
+was observed before command eligibility and then lost as accumulated
+uncertainty grew. No lower bound is reconstructed from raw speed alone, no
+smaller later command reduces the historical threshold, and a late report
+endpoint cannot create a qualifying historical peak. Data/gap checks remain
+active. This does not add native-style first-step scanning to generic sensors.
+
+Generic attempts retain a constant-size `motion_proof` result through errors
+and cleanup. It records raw/lower/upper integrated speed, retained lower-speed
+peak, commanded-speed eligibility, effective speed/acceleration, measured XYZ
+noise bounds, sample timing and startup deadline. Generic results do not
+classify their absent native step-history fields as a missing-step failure.
+The `no_motion` exception includes a concise numerical summary, and STATUS
+retains the fuller record. Diagnostics do not change the stop decision.
+
 Raw baseline-relative acceleration, impact thresholds, manual direction
 overrides, first-impact eligibility and the startup deadline are unchanged.
 Native Beacon uses the separate expanded-reference policy above.

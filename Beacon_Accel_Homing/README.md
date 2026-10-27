@@ -64,6 +64,10 @@ spread below 1.5 mm. Calibration skips the stationary peak-to-peak quietness
 gate, while still collecting a fresh resting offset and enforcing sensor-data
 and motion checks.
 
+Between accepted calibration trials, the selected axis returns to center with
+the configured `homing_accel` cap, then settles for 0.25 s before the next
+reference is collected. `calibration_settle_time` controls that stationary wait.
+
 1. Keep the printer idle and unpaused. **Center XY by hand and leave both
    axes unhomed in Klipper.** Keep Z supported and ensure nozzle/bed clearance:
    workflows skip Z hops and override G-code. Prepare suitable XY currents/enables separately.

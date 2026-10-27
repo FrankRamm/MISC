@@ -291,6 +291,22 @@ Updating does not replace a saved model's threshold; recalibrate to produce a
 new model. Starting or resuming
 calibration requires both XY axes to be unhomed; it never marks manually
 centered coordinates as homed.
+
+After an accepted discovery or validation home, calibration returns only the
+tested axis to center. That move now uses the existing `homing_accel` cap and
+preserves a lower live acceleration; `homing_accel: 0` leaves acceleration
+unchanged. After the return finishes, `calibration_settle_time` queues a
+stationary wait before the next reference. It defaults to **0.25 s**, accepts
+finite values from **0 to 2 s**, and zero disables the extra wait. The original
+acceleration is restored on completion, cancellation or failure. Other workflow
+return moves retain their existing behavior.
+
+This separates acquisition from the immediate aftermath of an automatic
+return. Waiting for queued steps alone does not establish that mechanical
+ringing has decayed. A settling wait can help transient vibration; it cannot
+resolve persistent vibration or certify the physical cause of a particular
+`no_motion` failure. Active status, calibration results and new model metadata
+record the selected settling time.
 Qualification requires over 10 mm of commanded travel and agreement within
 20% of expected center-to-stop travel by default. After a separate qualifying
 discovery, ten consecutive geometry-qualified validation homes at the same
@@ -471,6 +487,22 @@ Very noisy or slow cases can fail with
 `no_motion`; that failure does not raise speed or thresholds automatically.
 This adjustment has synthetic validation only and still needs supervised
 physical testing.
+
+The generic path retains a conservative speed peak from an eligible report
+endpoint before the existing startup deadline. Once the ordinary lagged
+step-history comparison is eligible, that peak can establish motion only if
+it reached at least **half the full effective homing speed**. This preserves
+valid early evidence when its later instantaneous lower bound has fallen due
+to accumulated noise uncertainty. The peak is not compared against half of a
+later, smaller commanded speed. The current-bound test remains available;
+raw impact thresholds, data faults and the startup deadline are unchanged.
+
+Generic `no_motion` errors and STATUS now retain the actual motion-proof
+diagnostics: raw integrated speed, conservative lower/upper bounds, retained
+peak, commanded-speed eligibility, configured effective speed/acceleration,
+noise envelope, sample timing and startup deadline. A large raw speed with a
+small lower bound indicates uncertainty in that estimate, not verified motion.
+The log's impact threshold and this motion proof are separate checks.
 
 The startup deadline remains calculated from effective speed, acceleration,
 sample age and reporting margin. Higher speeds or lower acceleration can
