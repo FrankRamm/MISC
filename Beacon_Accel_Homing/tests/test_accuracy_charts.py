@@ -1,9 +1,11 @@
 """Offline PNG tests. Every accelerometer sample is SIMULATED."""
 import base64
 import copy
+import errno
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import struct
 import sys
@@ -123,6 +125,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(set(paths), {"png"})
             image = Path(paths["png"])
             self.assertTrue(image.is_file())
+            self.assertEqual(image.parent, Path(temp).resolve())
             self.assertEqual(charts._check_png(image.read_bytes()), (24, 16))
             self.assertRegex(image.name, r"accel_homing_x_home_\d{8}_\d{6}_\d{6}UTC\.png")
             self.assertNotIn("UUID", image.name)
@@ -198,6 +201,219 @@ class PortablePNGTests(unittest.TestCase):
                 charts.write_capture(temp, "cancel", "x", capture, {}, renderer=RecordingRenderer(),
                                      check_running=check)
             self.assertEqual(list(Path(temp).iterdir()), [])
+
+    def test_publication_queues_only_a_durable_root_for_delayed_directory_watches(self):
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "config/accel_homing_charts"
+            destination.parent.mkdir()
+            directories, stages = [], []
+            mkdir, mkstemp = charts.os.mkdir, charts.tempfile.mkstemp
+            def observed_mkdir(path, *args, **kwargs):
+                result = mkdir(path, *args, **kwargs)
+                directories.append(Path(path).resolve())
+                return result
+            def observed_stage(*args, **kwargs):
+                self.assertEqual(Path(kwargs["dir"]).resolve(), destination)
+                result = mkstemp(*args, **kwargs)
+                stages.append(Path(result[1]))
+                return result
+            # TMPDIR/TEMP/TMP and the cached tempfile root deliberately point
+            # inside the watched output tree. Publication must ignore them.
+            with mock.patch.dict(os.environ, {key: str(destination) for key in ("TMPDIR", "TEMP", "TMP")}), \
+                    mock.patch.object(charts.tempfile, "tempdir", str(destination)), \
+                    mock.patch.object(charts.tempfile, "gettempdir", side_effect=AssertionError("implicit scratch root")), \
+                    mock.patch.object(charts.tempfile, "TemporaryDirectory", side_effect=AssertionError("transient directory")), \
+                    mock.patch.object(charts.tempfile, "mkstemp", side_effect=observed_stage), \
+                    mock.patch.object(charts.os, "mkdir", side_effect=observed_mkdir), \
+                    mock.patch.object(charts.os, "rename", side_effect=OSError(errno.EXDEV, "different scratch filesystem")) as rename:
+                images = [Path(charts._publish(destination, "accel_homing_x_home", clock, png_bytes()))
+                          for _index in range(2)]
+                rename.assert_not_called()
+            self.assertEqual(directories, [destination])
+            # Simulate Moonraker processing queued directory CREATE events
+            # only after both exports finished. Every directory still exists.
+            for directory in directories:
+                self.assertTrue(directory.is_dir())
+                self.assertEqual(len(list(directory.iterdir())), 2)
+            self.assertTrue(all(path.parent == destination for path in images + stages))
+            self.assertTrue(all(not stage.exists() for stage in stages))
+            self.assertTrue(all(path.is_file() and path.suffix == ".png" for path in destination.iterdir()))
+
+    def test_atomic_link_exposes_completed_bytes_and_never_clobbers_a_racing_filename(self):
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        image, existing = png_bytes(), png_bytes(width=12)
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp)
+            link, observed = charts.os.link, []
+            def race(stage, final):
+                stage, final = Path(stage), Path(final)
+                self.assertEqual(stage.parent, final.parent)
+                self.assertEqual(stage.read_bytes(), image)
+                self.assertEqual(stage.stat().st_dev, final.parent.stat().st_dev)
+                if not observed:
+                    final.write_bytes(existing)
+                observed.append(final)
+                result = link(stage, final)
+                self.assertEqual(final.read_bytes(), image)
+                return result
+            with mock.patch.object(charts.os, "link", side_effect=race), \
+                    mock.patch.object(charts.os, "rename", side_effect=AssertionError("overwrite-prone rename")):
+                result = Path(charts._publish(destination, "accel_homing_y_home", clock, image))
+            self.assertEqual(len(observed), 2)
+            self.assertEqual(observed[0].read_bytes(), existing)
+            self.assertEqual(result, observed[1])
+            self.assertTrue(result.name.endswith("_01.png"))
+            self.assertEqual(set(destination.iterdir()), set(observed))
+
+    def test_cancel_after_staging_cleans_the_file_without_a_transient_directory(self):
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        with tempfile.TemporaryDirectory() as temp:
+            destination, calls = Path(temp), []
+            def cancel():
+                calls.append(True)
+                if len(calls) == 2:
+                    files = list(destination.iterdir())
+                    self.assertEqual(len(files), 1)
+                    self.assertEqual(files[0].read_bytes(), png_bytes())
+                    self.assertTrue(files[0].is_file())
+                    raise RuntimeError("cancelled after staging")
+            with mock.patch.object(charts.os, "link") as publish:
+                with self.assertRaisesRegex(RuntimeError, "cancelled after staging"):
+                    charts._publish(destination, "accel_homing_x_home", clock, png_bytes(), cancel)
+                publish.assert_not_called()
+            self.assertEqual(list(destination.iterdir()), [])
+
+    def test_unsupported_atomic_links_fail_clearly_and_leave_no_temporary_artifacts(self):
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.object(charts.os, "link", side_effect=OSError(errno.EPERM, "hard links unsupported")), \
+                    mock.patch.object(charts.os, "rename") as rename:
+                with self.assertRaisesRegex(OSError, "hard links"):
+                    charts._publish(temp, "accel_homing_x_home", clock, png_bytes())
+                rename.assert_not_called()
+            self.assertEqual(list(Path(temp).iterdir()), [])
+
+    def test_cancel_after_atomic_link_keeps_completed_png_and_cleans_only_its_staging_file(self):
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        with tempfile.TemporaryDirectory() as temp:
+            destination, calls = Path(temp), []
+            def cancel():
+                calls.append(True)
+                if len(calls) == 3:
+                    raise RuntimeError("cancelled after complete publication")
+            with self.assertRaisesRegex(RuntimeError, "cancelled after complete publication"):
+                charts._publish(destination, "accel_homing_x_home", clock, png_bytes(), cancel)
+            files = list(destination.iterdir())
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].suffix, ".png")
+            self.assertEqual(files[0].read_bytes(), png_bytes())
+            self.assertEqual(charts._check_png(files[0].read_bytes()), (24, 16))
+
+    def test_final_name_create_close_write_pipeline_completes_before_late_cancellation(self):
+        # Model Moonraker schedule_file_event(CREATE) and complete_file_write
+        # (CLOSE_WRITE). No native inotify or printer/frontend is contacted.
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled), tempfile.TemporaryDirectory() as temp:
+                root, pending, notifications, events, descriptors = Path(temp), {}, [], [], {}
+                link, open_file, close_file = charts.os.link, charts.os.open, charts.os.close
+                def create(stage, final):
+                    result = link(stage, final)
+                    final = Path(final)
+                    self.assertEqual(final.read_bytes(), png_bytes())
+                    pending[final] = "create_file"
+                    events.append(("CREATE", final))
+                    return result
+                def opened(path, flags, *args, **kwargs):
+                    if Path(path).suffix == ".png":
+                        self.assertEqual(flags & (os.O_WRONLY | os.O_RDWR), os.O_WRONLY)
+                        self.assertFalse(flags & (os.O_CREAT | os.O_TRUNC | os.O_EXCL))
+                        if hasattr(os, "O_NOFOLLOW"):
+                            self.assertTrue(flags & os.O_NOFOLLOW)
+                    descriptor = open_file(path, flags, *args, **kwargs)
+                    if Path(path).suffix == ".png":
+                        descriptors[descriptor] = Path(path)
+                        self.assertEqual(Path(path).read_bytes(), png_bytes())
+                    return descriptor
+                def closed(descriptor):
+                    result = close_file(descriptor)
+                    path = descriptors.pop(descriptor, None)
+                    if path is not None:
+                        events.append(("CLOSE_WRITE", path))
+                        notifications.append((pending.pop(path), path))
+                        self.assertEqual(path.read_bytes(), png_bytes())
+                    return result
+                checks = []
+                def check():
+                    checks.append(True)
+                    if len(checks) == 3:
+                        self.assertEqual(pending, {})
+                        self.assertEqual(len(notifications), 1)
+                        if cancelled:
+                            raise RuntimeError("cancelled after final-name write completion")
+                with mock.patch.object(charts.os, "link", side_effect=create), \
+                        mock.patch.object(charts.os, "open", side_effect=opened), \
+                        mock.patch.object(charts.os, "close", side_effect=closed):
+                    if cancelled:
+                        with self.assertRaisesRegex(RuntimeError, "final-name write completion"):
+                            charts._publish(root, "accel_homing_x_home", clock, png_bytes(), check)
+                    else:
+                        charts._publish(root, "accel_homing_x_home", clock, png_bytes(), check)
+                self.assertEqual([kind for kind, _path in events], ["CREATE", "CLOSE_WRITE"])
+                self.assertEqual(pending, {})
+                self.assertEqual(len(notifications), 1)
+                self.assertEqual(set(root.iterdir()), {notifications[0][1]})
+
+    def test_final_name_completion_failure_raises_and_cleans_owned_png_and_staging(self):
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        with tempfile.TemporaryDirectory() as temp:
+            open_file, created = charts.os.open, []
+            def denied(path, flags, *args, **kwargs):
+                if Path(path).suffix == ".png":
+                    created.append(Path(path))
+                    self.assertEqual(Path(path).read_bytes(), png_bytes())
+                    self.assertFalse(flags & (os.O_CREAT | os.O_TRUNC))
+                    raise PermissionError(errno.EACCES, "completion open denied")
+                return open_file(path, flags, *args, **kwargs)
+            with mock.patch.object(charts.os, "open", side_effect=denied):
+                with self.assertRaisesRegex(PermissionError, "completion open denied"):
+                    charts._publish(temp, "accel_homing_x_home", clock, png_bytes())
+            self.assertEqual(len(created), 1)
+            self.assertEqual(list(Path(temp).iterdir()), [])
+
+    def test_completion_identity_mismatch_preserves_a_foreign_final_replacement(self):
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        foreign = png_bytes(width=12)
+        with tempfile.TemporaryDirectory() as temp:
+            link, replaced = charts.os.link, []
+            def replace_after_link(stage, final):
+                result = link(stage, final)
+                final = Path(final)
+                final.unlink()
+                final.write_bytes(foreign)
+                replaced.append(final)
+                return result
+            with mock.patch.object(charts.os, "link", side_effect=replace_after_link):
+                with self.assertRaisesRegex(OSError, "path changed before completion"):
+                    charts._publish(temp, "accel_homing_x_home", clock, png_bytes())
+            self.assertEqual(list(Path(temp).iterdir()), replaced)
+            self.assertEqual(replaced[0].read_bytes(), foreign)
+
+    def test_collision_exhaustion_preserves_existing_pngs_and_cleans_staging(self):
+        clock = {"filename_time": "20261027_010000_123456UTC"}
+        with tempfile.TemporaryDirectory() as temp:
+            root, previous = Path(temp), {}
+            for collision in range(100):
+                name = "accel_homing_x_home_" + clock["filename_time"]
+                name += "_%02d" % collision if collision else ""
+                path = root / (name + ".png")
+                path.write_bytes(png_bytes(width=12))
+                previous[path] = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "collisions exceeded"):
+                charts._publish(root, "accel_homing_x_home", clock, png_bytes())
+            self.assertEqual(set(root.iterdir()), set(previous))
+            self.assertTrue(all(path.read_bytes() == value for path, value in previous.items()))
 
     def test_png_integrity_rejects_crc_trailing_duplicate_header_and_oversize(self):
         image = png_bytes()
