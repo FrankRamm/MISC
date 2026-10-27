@@ -165,6 +165,17 @@ active update entry cannot silently be left pointing at an unused repository.
 defers activation. See [pinning a published commit](#pin-a-specific-published-commit)
 when you need a fixed initial version rather than branch tracking.
 
+### Warning about a chart directory watch
+
+After updating, a warning naming a temporary `.accel_homing...` directory may
+remain in Moonraker's memory. While the printer is idle, restart the matching
+Moonraker service from the frontend to clear that old warning and rebuild its
+watches. Restarting Klipper alone does not clear Moonraker's warning state.
+If the warning returns, inspect the corresponding exception in `moonraker.log`
+before changing inotify settings or watch limits: the warning alone does not
+identify its cause. See Moonraker's [directory watcher](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/components/file_manager/file_manager.py)
+and [warning state](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/server.py).
+
 ## Native Moonraker updater
 
 The installer discovers the Moonraker configuration connected to the selected
@@ -610,8 +621,11 @@ This must agree with the verified live Klipper process when one is present;
 the bootstrap interpreter is not substituted for it.
 
 All charts are completed PNG images with matching current UTC timestamps in
-their descriptive filenames and titles. No CSV/JSON/SVG/HTML chart sidecars
-are created. Images use bounded traces that retain positive/negative extrema;
+their descriptive filenames and titles, saved directly under the configured
+chart directory without per-output subdirectories. No CSV/JSON/SVG/HTML chart sidecars
+are created. Atomic publication requires hard-link support in that directory;
+an unsupported filesystem fails clearly instead of overwriting an output.
+Images use bounded traces that retain positive/negative extrema;
 there is no full-resolution raw-data export. An isolated worker renders the
 images and cleans its private OS-temporary files. A small real render runs
 before CHARTS/ACCURACY movement or stationary NOISE acquisition.
