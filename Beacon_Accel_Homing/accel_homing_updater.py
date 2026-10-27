@@ -30,6 +30,7 @@ BRANCH = "codex/universal-accel-homing"
 SECTION = "update_manager accel_homing"
 INCLUDE = "accel_homing_update.cfg"
 RECEIPT = ".accel_homing_updater.json"
+PATH_ENVIRONMENT = frozenset(("HOME", "MOONRAKER_DATA_PATH", "MOONRAKER_CONFIG_PATH"))
 
 
 def _fail(api, message):
@@ -45,36 +46,87 @@ def managed_path(selected):
     return Path.home() / ".local/share/accel-homing/managed" / instance_key(selected) / "repo"
 
 
-def _moon_command(argv, cwd, api, pid=None, service=None, scope=None, start=None):
+def _moon_index(argv):
     indexes = [i for i, value in enumerate(argv) if Path(value).name == "moonraker.py"]
     indexes += [i + 1 for i, value in enumerate(argv[:-1]) if value == "-m" and argv[i + 1] == "moonraker"]
-    if len(indexes) != 1:
+    return indexes[0] if len(indexes) == 1 else None
+
+
+def _path_environment(process):
+    # Retain only Moonraker's path defaults, never credentials or other env.
+    with (process / "environ").open("rb") as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("Moonraker path environment exceeds the discovery bound")
+    result = {}
+    allowed = {name.encode("ascii") for name in PATH_ENVIRONMENT}
+    for field in raw.split(b"\0"):
+        key, separator, value = field.partition(b"=")
+        if separator and key in allowed:
+            name = key.decode("ascii")
+            if name in result:
+                raise ValueError("ambiguous Moonraker path environment")
+            result[name] = value.decode("utf-8")
+    return result
+
+
+def _owner_home(uid):
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_dir
+    except (ImportError, KeyError):
         return None
-    options, iterator = {}, iter(argv[indexes[0] + 1:])
+
+
+def _expand_moon_path(value, environment, owner_home):
+    if not value.startswith("~"):
+        return value
+    if environment is None:
+        # Legacy literal stopped-unit discovery has no live environment proof.
+        return os.path.expanduser(value)
+    home = environment.get("HOME", owner_home)
+    if not home or not Path(home).is_absolute() or (value != "~" and not value.startswith("~/")):
+        raise ValueError("cannot establish Moonraker's user-home expansion")
+    return home.rstrip("/") + value[1:] or "/"
+
+
+def _moon_command(argv, cwd, api, pid=None, service=None, scope=None, start=None,
+                  path_environment=None, owner_home=None):
+    index = _moon_index(argv)
+    if index is None:
+        return None
+    environment = ({key: value for key, value in path_environment.items() if key in PATH_ENVIRONMENT}
+                   if path_environment is not None else None)
+    options, iterator = {}, iter(argv[index + 1:])
     for value in iterator:
         name, separator, inline = value.partition("=")
         if name in ("-d", "--datapath", "-c", "--configfile"):
-            options[name] = inline if separator else next(iterator, "")
-    raw_data = options.get("-d", options.get("--datapath"))
-    if not raw_data:
+            options["data" if name in ("-d", "--datapath") else "config"] = inline if separator else next(iterator, "")
+    # Moonraker server.main: argv overrides MOONRAKER_*; absent/empty data
+    # falls back to ~/printer_data, but an empty config is not a default.
+    defaults = environment or {}
+    raw_data = options.get("data", defaults.get("MOONRAKER_DATA_PATH"))
+    if not raw_data and environment is None:
         return None
-    data = api.canonical(raw_data, cwd)
-    raw_config = options.get("-c", options.get("--configfile"))
-    config = api.canonical(raw_config, cwd) if raw_config else data / "config/moonraker.conf"
     try:
+        data = api.canonical(_expand_moon_path(raw_data or "~/printer_data", environment, owner_home), cwd)
+        raw_config = options.get("config", defaults.get("MOONRAKER_CONFIG_PATH"))
+        config = (api.canonical(_expand_moon_path(raw_config, environment, owner_home), cwd)
+                  if raw_config is not None else data / "config/moonraker.conf")
         graph = api.ConfigGraph(config)
         server = graph.one("server")
         raw_socket = server.get("klippy_uds_address", str(data / "comms/klippy.sock"))
         if any(token in raw_socket for token in ("$", "%", "{", "}")):
             return None
-        socket = Path(raw_socket).expanduser()
+        socket = Path(_expand_moon_path(raw_socket, environment, owner_home))
         if not socket.is_absolute():
             return None
     except (api.InstallError, OSError, ValueError):
         return None
     return dict(config=config, data=data, socket=socket.resolve(), pid=pid,
                 service=service, service_scope=scope, start_time=start,
-                executable=argv[0], argv=list(argv), cwd=str(cwd), graph=graph)
+                executable=argv[0], argv=list(argv), cwd=str(cwd), graph=graph,
+                path_environment=environment, owner_home=owner_home)
 
 
 def moonraker_instances(api, proc_root=Path("/proc"), unit_directories=None):
@@ -84,18 +136,23 @@ def moonraker_instances(api, proc_root=Path("/proc"), unit_directories=None):
             if not process.name.isdigit():
                 continue
             try:
-                if hasattr(os, "getuid") and process.stat().st_uid != os.getuid():
+                uid = process.stat().st_uid
+                if hasattr(os, "getuid") and uid != os.getuid():
                     continue
                 raw = (process / "cmdline").read_bytes()
                 if len(raw) > 65536:
                     continue
                 argv = [part.decode("utf-8") for part in raw.split(b"\0") if part]
+                if _moon_index(argv) is None:
+                    continue
+                environment = _path_environment(process)
                 groups = (process / "cgroup").read_text() if (process / "cgroup").is_file() else ""
                 services = re.findall(r"/([^/\n]+\.service)(?:/|$)", groups)
                 fields = (process / "stat").read_text().rsplit(") ", 1)[1].split()
                 item = _moon_command(argv, (process / "cwd").resolve(), api, int(process.name),
                                      services[-1] if services else None,
-                                     "user" if "/user.slice/" in groups else "system", fields[19])
+                                     "user" if "/user.slice/" in groups else "system", fields[19],
+                                     path_environment=environment, owner_home=_owner_home(uid))
                 if item:
                     found.append(item)
             except (OSError, UnicodeError, ValueError, IndexError):
@@ -151,7 +208,8 @@ def discover_moonraker(selected, api, explicit=None, instances=None):
 
 def _fingerprint(moon):
     return {key: str(moon[key]) if isinstance(moon[key], Path) else moon.get(key)
-            for key in ("config", "data", "socket", "pid", "start_time", "service", "service_scope", "argv")}
+            for key in ("config", "data", "socket", "pid", "start_time", "service", "service_scope", "argv",
+                        "path_environment", "owner_home")}
 
 
 def assert_identity(moon, selected, api):
@@ -452,7 +510,9 @@ def service_identity(moon, selected, api, systemctl):
                 or any(not re.fullmatch(r"\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*\}", value) for value in variables)):
             _fail(api, "environment-based Moonraker unit needs a matching live main process")
     else:
-        effective = _moon_command(argv, properties.get("WorkingDirectory") or "/", api)
+        effective = _moon_command(argv, properties.get("WorkingDirectory") or "/", api,
+                                  path_environment=current.get("path_environment"),
+                                  owner_home=current.get("owner_home"))
         if effective is None or any(effective[key] != current[key] for key in ("config", "data", "socket", "executable")):
             _fail(api, "effective Moonraker service command differs from the selected instance")
     # Loaded definitions and live arguments are both retained; no env expansion.

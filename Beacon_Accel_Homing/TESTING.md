@@ -1,11 +1,20 @@
 # Offline verification
 
-**Current migration fix: source review only.** The separation of automatic
-link ownership validation from uninstall restoration, and its added regression
-source, were reviewed without executing tests, installers or printer actions.
-The **558-test executed run recorded below predates this fix**. Its log and
+**Current installation fixes: source review only.** The separation of automatic
+link ownership validation from uninstall restoration, live Moonraker path-default
+discovery, and their added regression source were reviewed without executing
+tests, installers or printer actions.
+The **558-test executed run recorded below predates these fixes**. Its log and
 source digests remain historical evidence; they do not certify the changed
-migration implementation. No current test pass is claimed.
+installation implementation. No current test pass is claimed.
+
+Path discovery follows the captured installed Moonraker argument parser:
+command-line paths override `MOONRAKER_DATA_PATH`/`MOONRAKER_CONFIG_PATH`, with
+the data default expanded using the verified process home. Only those path
+keys and `HOME` are retained from bounded same-user process environment reads.
+Four unexecuted regression methods cover path precedence/defaults, bounded
+environment filtering, socket/instance identity and loaded-service path reuse.
+The changed modules were not imported, compiled or run for this source review.
 
 All recorded verification uses synthetic Klipper objects, fake sensor
 batches, temporary config files and mocked status/download responses. No
