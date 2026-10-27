@@ -283,8 +283,26 @@ class UpdaterFixture(unittest.TestCase):
         self.assertIn("sudo systemctl restart -- moonraker-test.service", output.getvalue())
 
     def test_journal_owned_snapshot_links_migrate_without_authorizing_foreign_links(self):
+        with self.migration_links() as (links, write):
+            installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
+            arguments = installer.arguments([])
+            self.assertFalse(arguments.replace_existing_links)
+            migrated = updater.migration_args(self.selected, arguments, installer.uninstall_api())
+            self.assertTrue(migrated.replace_existing_links)
+            path = self.extras / installer.MODULES[0]
+            foreign = self.home / "foreign" / path.name
+            links[path] = {"kind": "symlink", "target": str(foreign)}
+            with self.assertRaisesRegex(installer.InstallError, "Managed link changed/missing"):
+                updater.migration_args(self.selected, arguments, installer.uninstall_api())
+            with self.assertRaisesRegex(installer.InstallError, "Review it"):
+                installer.make_plan(self.source, self.selected, arguments)
+
+    @contextlib.contextmanager
+    def migration_links(self):
+        """Keep migration fixtures independent of native symlink privileges."""
         links = {}
-        real_snapshot, real_write, real_symlink = installer.snapshot, installer.write_state, Path.is_symlink
+        real_snapshot, real_write = installer.snapshot, installer.write_state
+        real_exists, real_symlink, real_readlink = Path.exists, Path.is_symlink, os.readlink
         def module(path):
             return Path(path).parent == self.extras and Path(path).name in installer.MODULES
         def snapshot(path):
@@ -294,25 +312,228 @@ class UpdaterFixture(unittest.TestCase):
                 links[Path(path)] = dict(state)
             else:
                 real_write(path, state)
+        def exists(path):
+            return links.get(Path(path), {}).get("kind", "absent") != "absent" if module(path) else real_exists(path)
         def is_symlink(path):
             return links.get(Path(path), {}).get("kind") == "symlink" if module(path) else real_symlink(path)
+        def readlink(path, *args, **kwargs):
+            if module(path) and links.get(Path(path), {}).get("kind") == "symlink":
+                return links[Path(path)]["target"]
+            return real_readlink(path, *args, **kwargs)
         with mock.patch.object(installer, "snapshot", side_effect=snapshot), \
-                mock.patch.object(Path, "is_symlink", new=is_symlink):
+                mock.patch.object(Path, "exists", new=exists), \
+                mock.patch.object(Path, "is_symlink", new=is_symlink), \
+                mock.patch.object(os, "readlink", side_effect=readlink), \
+                mock.patch.object(installer, "proc_instances", return_value=[]), \
+                mock.patch.object(installer, "service_instances", return_value=[]):
+            yield links, write
+
+    def migration_snapshot(self, links):
+        paths = (self.config, self.axes, self.config.parent / installer.MANAGED,
+                 self.moon_config, self.moon_config.parent / updater.INCLUDE,
+                 self.config.parent / updater.RECEIPT, self.repo / ".git/info/exclude")
+        backups = self.config.parent / ".accel_homing_backups"
+        history = {str(path): path.read_bytes() for path in backups.rglob("*") if path.is_file()}
+        return ({str(path): installer.snapshot(path) for path in paths}, copy.deepcopy(links), history)
+
+    def assert_migration_refused(self, links, selected=None):
+        selected = self.selected if selected is None else selected
+        before = self.migration_snapshot(links)
+        with self.assertRaises(installer.InstallError):
+            arguments = updater.migration_args(selected, installer.arguments([]), installer.uninstall_api())
+            installer.make_plan(self.source, selected, arguments)
+        self.assertEqual(self.migration_snapshot(links), before)
+
+    def migration_upgrade(self, write):
+        previous = self.source
+        self.source = self.home / "next-snapshot"
+        shutil.copytree(previous, self.source)
+        return installer.apply_plan(self.plan("--replace-existing-links")[0], self.config,
+                                    writer=write, selected=self.selected)
+
+    def test_recorded_link_migration_preserves_reordered_config_manual_thresholds_and_saved_models(self):
+        with self.migration_links() as (links, write):
             installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
-            arguments = installer.arguments([])
-            self.assertFalse(arguments.replace_existing_links)
-            migrated = updater.migration_args(self.selected, arguments, installer.uninstall_api())
-            self.assertTrue(migrated.replace_existing_links)
+            text = self.config.read_text()
+            macro = "[gcode_macro PRINT_START]\ngcode:\n    M118 Leave this exact macro alone\n"
+            self.assertIn(macro, text)
+            text = text.replace(macro, "").replace("[printer]", macro + "\n[printer]")
+            text = text.replace("#*# x_threshold = 6.5", "#*# x_threshold = 9.2")
+            text += "#*# [accel_homing_model later]\n#*# y_threshold = 7.1\n"
+            self.config.write_text(text)
+            managed = self.config.parent / installer.MANAGED
+            managed.write_text(managed.read_text().replace("#x_threshold: 8.0", "x_threshold: 0.5")
+                               .replace("#y_threshold: 8.0", "y_threshold: 0.001"))
+            before = self.migration_snapshot(links)
+            arguments = updater.migration_args(self.selected, installer.arguments([]), installer.uninstall_api())
+            self.assertTrue(arguments.replace_existing_links)
+            changes = installer.make_plan(self.source, self.selected, arguments)[0]
+            self.assertNotIn(self.config, changes)
+            self.assertNotIn(self.axes, changes)
+            self.assertNotIn(managed, changes)
+            # The unchanged include's leading blank now follows [beacon], not
+            # the relocated macro. Full inverse restoration stays strict about
+            # that section context; code-link migration must not invoke it.
+            with self.assertRaisesRegex(installer.InstallError, "Managed section changed"):
+                installer.make_uninstall_plan(self.selected)
+            self.assertEqual(self.migration_snapshot(links), before)
+
+    def test_missing_original_source_does_not_block_code_migration_or_relax_uninstall(self):
+        with self.migration_links() as (links, write):
+            retired = self.home / "original-source"
+            retired.mkdir()
+            for name in installer.MODULES:
+                (retired / name).write_text("# original source\n")
+                links[self.extras / name] = {"kind": "symlink", "target": str(retired / name)}
+            installer.apply_plan(self.plan("--replace-existing-links")[0], self.config,
+                                 writer=write, selected=self.selected)
+            shutil.rmtree(retired)
+            before = self.migration_snapshot(links)
+            arguments = updater.migration_args(self.selected, installer.arguments([]), installer.uninstall_api())
+            self.assertTrue(arguments.replace_existing_links)
+            installer.make_plan(self.source, self.selected, arguments)
+            with self.assertRaisesRegex(installer.InstallError, "Original plugin source is missing"):
+                installer.make_uninstall_plan(self.selected)
+            self.assertEqual(self.migration_snapshot(links), before)
+
+    def test_migration_ownership_does_not_make_modified_managed_config_uninstallable(self):
+        with self.migration_links() as (links, write):
+            installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
+            self.axes.write_text(self.axes.read_text().replace("endstop_pin: accel_homing:x", "endstop_pin: !PA4"))
+            before = self.migration_snapshot(links)
+            arguments = updater.migration_args(self.selected, installer.arguments([]), installer.uninstall_api())
+            self.assertTrue(arguments.replace_existing_links)
+            with self.assertRaisesRegex(installer.InstallError, "Managed lines|Managed section"):
+                installer.make_uninstall_plan(self.selected)
+            self.assertEqual(self.migration_snapshot(links), before)
+
+    def test_migration_rejects_changed_missing_or_regular_file_module_states(self):
+        with self.migration_links() as (links, write):
+            installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
             path = self.extras / installer.MODULES[0]
-            foreign = self.home / "foreign" / path.name
-            links[path] = {"kind": "symlink", "target": str(foreign)}
-            refused = updater.migration_args(self.selected, arguments, installer.uninstall_api())
-            self.assertFalse(refused.replace_existing_links)
-            # Planning still refuses the unowned source. readlink is emulated
-            # because the fixture deliberately creates no native Windows link.
-            with mock.patch.object(installer.os, "readlink", return_value=str(foreign)):
-                with self.assertRaisesRegex(installer.InstallError, "Review it"):
-                    installer.make_plan(self.source, self.selected, refused)
+            original = dict(links[path])
+            states = ({"kind": "symlink", "target": str(self.home / "foreign" / path.name)},
+                      {"kind": "absent"},
+                      {"kind": "file", "data": base64.b64encode(b"operator module\n").decode(), "mode": 0o600})
+            for state in states:
+                with self.subTest(kind=state["kind"]):
+                    links[path] = state
+                    self.assert_migration_refused(links)
+            links[path] = original
+
+    def test_migration_rejects_ambiguous_unowned_and_semantically_tampered_journal_entries(self):
+        with self.migration_links() as (links, write):
+            backup = installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
+            path = backup / "manifest.json"
+            original = path.read_bytes()
+            for damage in ("duplicate", "outside_path", "config_edit"):
+                with self.subTest(damage=damage):
+                    manifest = json.loads(original)
+                    if damage == "duplicate":
+                        manifest["changes"].append(copy.deepcopy(manifest["changes"][0]))
+                    elif damage == "outside_path":
+                        entry = next(item for item in manifest["changes"] if Path(item["path"]).parent == self.extras)
+                        entry["path"] = str(self.home / "unowned.py")
+                    else:
+                        entry = next(item for item in manifest["changes"] if item["path"] == str(self.axes))
+                        data = base64.b64decode(entry["after"]["data"])
+                        entry["after"]["data"] = base64.b64encode(data.replace(b"run_current: 1.2", b"run_current: 9.9")).decode()
+                    path.write_text(json.dumps(manifest))
+                    self.assert_migration_refused(links)
+            path.write_bytes(original)
+
+    def test_migration_rejects_gapped_or_hash_changed_history(self):
+        with self.migration_links() as (links, write):
+            first = installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
+            self.migration_upgrade(write)
+            path = first / "manifest.json"
+            original = path.read_bytes()
+            manifest = json.loads(original)
+            manifest["created_utc"] = "changed after the following transaction recorded its parent"
+            path.write_text(json.dumps(manifest))
+            self.assert_migration_refused(links)
+            path.write_bytes(original)
+            withheld = self.home / "withheld-history"
+            first.rename(withheld)
+            try:
+                self.assert_migration_refused(links)
+            finally:
+                withheld.rename(first)
+
+    def test_migration_does_not_borrow_other_checkout_or_instance_ownership(self):
+        with self.migration_links() as (links, write):
+            installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
+            self.assert_migration_refused(links, {**self.selected, "repo": self.home / "other-klipper"})
+            other = self.config.parent / "other-printer.cfg"
+            other.write_bytes(self.config.read_bytes())
+            other_before = other.read_bytes()
+            before = self.migration_snapshot(links)
+            arguments = updater.migration_args({**self.selected, "config": other}, installer.arguments([]), installer.uninstall_api())
+            self.assertFalse(arguments.replace_existing_links)
+            self.assertEqual(other.read_bytes(), other_before)
+            self.assertEqual(self.migration_snapshot(links), before)
+
+    def test_migration_rejects_a_discontinuous_recorded_module_link_chain(self):
+        with self.migration_links() as (links, write):
+            installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
+            second = self.migration_upgrade(write)
+            path = second / "manifest.json"
+            manifest = json.loads(path.read_bytes())
+            entry = next(item for item in manifest["changes"] if Path(item["path"]).parent == self.extras)
+            entry["before"] = {"kind": "symlink", "target": str(self.home / "never-owned" / Path(entry["path"]).name)}
+            path.write_text(json.dumps(manifest))
+            self.assert_migration_refused(links)
+
+    def test_migration_rejects_owned_updater_include_or_receipt_drift(self):
+        with self.migration_links() as (links, write):
+            plan = self.updater_plan()
+            changes = self.plan()[0]
+            changes.update(plan["changes"])
+            installer.apply_plan(changes, self.config, writer=write, selected=self.selected, updater=plan)
+            self.refresh()
+            include = self.moon_config.parent / updater.INCLUDE
+            receipt = self.config.parent / updater.RECEIPT
+            for path in (include, receipt):
+                with self.subTest(path=path.name):
+                    original = path.read_bytes()
+                    if path == include:
+                        path.write_bytes(original + b"# later operator edit\n")
+                    else:
+                        value = json.loads(original)
+                        value["commit"] = "b" * 40
+                        path.write_text(json.dumps(value))
+                    self.refresh()
+                    self.assert_migration_refused(links)
+                    path.write_bytes(original)
+                    self.refresh()
+
+    def test_recorded_link_changed_after_migration_proof_is_not_adopted_during_planning(self):
+        with self.migration_links() as (links, write):
+            installer.apply_plan(self.plan()[0], self.config, writer=write, selected=self.selected)
+            arguments = updater.migration_args(self.selected, installer.arguments([]), installer.uninstall_api())
+            self.assertTrue(arguments.replace_existing_links)
+            path = self.extras / installer.MODULES[0]
+            links[path] = {"kind": "symlink", "target": str(self.home / "appeared-later" / path.name)}
+            before = self.migration_snapshot(links)
+            with self.assertRaisesRegex(installer.InstallError, "changed after migration ownership validation"):
+                installer.make_plan(self.source, self.selected, arguments)
+            self.assertEqual(self.migration_snapshot(links), before)
+
+    def test_unrecorded_absent_module_cannot_gain_foreign_link_authority_after_migration_proof(self):
+        with self.migration_links() as (links, write):
+            path = self.extras / installer.MODULES[-1]
+            changes = self.plan()[0]
+            changes.pop(path)
+            installer.apply_plan(changes, self.config, writer=write, selected=self.selected)
+            arguments = updater.migration_args(self.selected, installer.arguments([]), installer.uninstall_api())
+            self.assertTrue(arguments.replace_existing_links)
+            planned = installer.make_plan(self.source, self.selected, arguments)[0]
+            self.assertEqual(planned[path]["expected"], {"kind": "absent"})
+            links[path] = {"kind": "symlink", "target": str(self.home / "unowned-later" / path.name)}
+            before = self.migration_snapshot(links)
+            with self.assertRaisesRegex(installer.InstallError, "changed after migration ownership validation"):
+                installer.make_plan(self.source, self.selected, arguments)
+            self.assertEqual(self.migration_snapshot(links), before)
 
     def test_stopped_identity_is_verified_even_with_manual_restart_opt_out(self):
         stopped = {**self.moon, "pid": None, "start_time": None}
