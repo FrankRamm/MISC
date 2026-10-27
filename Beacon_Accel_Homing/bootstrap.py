@@ -13,7 +13,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 
-FILES = ("install.sh", "uninstall.sh", "bootstrap.py", "bootstrap.sh", "installer.py", "uninstaller.py", "accel_homing.py", "beacon_accel_homing.py",
+FILES = ("install.sh", "uninstall.sh", "bootstrap.py", "bootstrap.sh", "installer.py", "uninstaller.py", "accel_homing_updater.py", "accel_homing.py", "beacon_accel_homing.py",
          "accel_homing_backends.py", "accel_homing_workflows.py", "accel_homing_model.py",
          "accel_homing_charts.py", "LICENSE", "NOTICE", "README.md", "TESTING.md", "docs/INSTALLATION.md", "docs/COMPATIBILITY.md",
          "examples/accel_homing.cfg", "examples/beacon_accel_homing.cfg",

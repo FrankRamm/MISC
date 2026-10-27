@@ -388,6 +388,7 @@ def make_plan(selected, api):
         return dict(entries=[], history=[], records=[item["ref"] for item in records], config=config, repo=repo)
     extras, exclude = repo / "klippy/extras", repo / ".git/info/exclude"
     validated, baseline = [], None
+    updater_context, updater_paths = None, set()
     for record in active:
         manifest, directory = record["manifest"], record["directory"]
         if manifest.get("repo") is not None and _path(manifest["repo"], api) != repo:
@@ -411,6 +412,14 @@ def make_plan(selected, api):
             # Never use today's unchanged config as evidence of old saved models.
             baseline = {path: state for path, state in documents.items() if path in states}
         generated = config.parent / api.MANAGED
+        owned_updater = {}
+        if manifest.get("updater") is not None:
+            helper = api.load_updater()
+            if helper is None:
+                _fail(api, "Updater history requires its verified helper", directory)
+            owned_updater = helper.validate_record(manifest, selected, api)
+            updater_context = manifest["updater"]
+            updater_paths.update(owned_updater)
         for entry in manifest["changes"]:
             path, before, after = Path(entry["path"]), entry["before"], entry["after"]
             if path.parent == extras and path.name in api.MODULES:
@@ -433,6 +442,8 @@ def make_plan(selected, api):
                 if after["kind"] != "file" or not _generated(_bytes(after), path, api, strict=True):
                     _fail(api, "Invalid generated plugin config ownership: %s" % path, directory)
                 kind = "generated"
+            elif path in owned_updater:
+                kind = owned_updater[path]
             elif path in documents:
                 if before["kind"] != "file" or after["kind"] != "file":
                     _fail(api, "Unsafe config history: %s" % path, directory)
@@ -459,6 +470,10 @@ def make_plan(selected, api):
         if kind == "link":
             if not _same(live, after):
                 _fail(api, "Managed link changed/missing: %s" % path, directory)
+            virtual[path] = before
+        elif kind in ("moon_generated", "updater_receipt"):
+            if not _same(live, after):
+                _fail(api, "Owned updater file changed/missing: %s" % path, directory)
             virtual[path] = before
         elif kind == "generated":
             if live["kind"] != "file" or not _generated(_bytes(live), path, api):
@@ -491,7 +506,7 @@ def make_plan(selected, api):
     # has been checked. Non-plugin saved sections remain byte-for-byte current.
     for path in paths:
         state = virtual[path]
-        if state["kind"] != "file" or path == exclude:
+        if state["kind"] != "file" or path == exclude or path in updater_paths:
             continue
         current, saved = _split_saved(_bytes(state), api)
         if path not in (baseline or {}):
@@ -540,5 +555,6 @@ def make_plan(selected, api):
         _fail(api, "Installation history has no verifiable activation to restore", first["directory"])
     return dict(entries=entries, history=[item["ref"] for item in active],
                 records=[item["ref"] for item in records], config=config, repo=repo,
+                updater=updater_context,
                 expected={str(path): initial[path] if path in initial else final_documents[path]
                           for path in set(initial) | set(final_documents)})

@@ -18,24 +18,18 @@ correct physical homing.
 ## Install or update
 
 With the printer **idle**, run in the Linux host's **shell** as the existing
-Klipper service user. Install:
+Klipper service user:
 
 ```bash
-bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing'
-```
-
-Update an existing installation:
-
-```bash
-bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing --replace-existing-links'
+installer=$(curl -fsSL https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh) && bash -c "$installer"
 ```
 
 The installer detects the checkout, configuration and sensor, backs up changes
-and activates X/Y accelerometer endstops. It preserves configured homing speeds,
-thresholds and run currents; no speed or travel cap is added by default.
-It verifies the selected systemd service and idle state, then **automatically
-restarts that service**, requesting sudo if needed. It does not start homing.
-Keep the printed source directory: installed links depend on it. For selection,
+and activates X/Y accelerometer endstops plus the Moonraker update entry.
+It preserves configured speeds, thresholds and currents. The verified selected
+services restart automatically, requesting sudo if needed; no homing starts.
+For later code updates, use **accel_homing → Update** in Mainsail/Fluidd
+while idle. Keep the printed source directory. For custom hosts, migration
 options and recovery, see [installation details](docs/INSTALLATION.md).
 
 ## Setup
@@ -127,15 +121,15 @@ bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --re
 ```
 
 It restores pre-installation settings while preserving unrelated later edits.
-Review the result, then **manually restart the selected Klipper host process
-while idle**, using the printed service command. See [recovery details](docs/INSTALLATION.md#uninstall-and-restore-the-pre-installation-configuration).
+Review the result, then **manually restart the listed services while idle**.
+See [recovery details](docs/INSTALLATION.md#uninstall-and-restore-the-pre-installation-configuration).
 
 ## For the curious
 
 <details>
 <summary>Installation, activation and restoration details</summary>
 
-The Linux host needs Python 3.8+, `bash` and `curl`. Configure sensor firmware
+The Linux host needs Python 3.8+, `bash`, `curl` and Git for native updates. Configure sensor firmware
 and wiring first. Multiple instances or sensors require explicit selection.
 Installation disables conflicting sensorless settings and preserves existing
 saved configuration. An incompatible generic speed/timing plan is reported
@@ -144,15 +138,37 @@ travel limits remain active; optional
 [`--max-report-travel` and `--max-startup-travel`](docs/INSTALLATION.md#explicit-generic-travel-budgets)
 select those limits during installation or an update.
 
-`--replace-existing-links` backs up and repoints previous source links. Keep
-source directories under `~/.local/share/accel-homing/` and transaction backups
-for rollback. [Installation details](docs/INSTALLATION.md) cover manual
-selection, dry runs, verified downloads, pinning and backups.
+The short command buffers a successful complete response before Bash starts.
+Its final-marker guard rejects incomplete executable payloads; the bootstrap
+then verifies every package file against one immutable Git commit. Defaults
+already select this fork/branch; no `--repo`/`--ref` arguments are needed.
+Append expert options after `bash -c "$installer" --`, for example
+`--dry-run`, `--no-restart` or `--no-update-manager`.
 
-Installation and updates verify the selected systemd service and recheck that
-its instance is idle before restarting it. Append `--no-restart` to the final
-`bash "$t"` invocation to defer activation, then restart the selected host
-process while idle using the printed command. Printer-console `RESTART` or
+Installed modules link directly into a dedicated clean Git checkout under
+`~/.local/share/accel-homing/managed/`, so Moonraker's normal **Update** changes
+the code actually loaded by Klipper. It tracks `codex/universal-accel-homing`
+with `channel: dev`; current Mainsail/Fluidd support this without repository
+tags. Their usual update confirmation may still appear. Moonraker pulls code
+and restarts its associated Klipper service; it does not rerun `install.sh`.
+The private PNG renderer dependencies survive normal updates.
+
+Known installer-owned snapshot links migrate using transaction history.
+Foreign links still require explicit review and `--replace-existing-links`;
+custom homing overrides keep their separate acknowledgement requirement.
+Keep source directories and backups for rollback. Moonraker **Hard Recovery**
+may replace the checkout and discard ignored plotting dependencies: rerun the
+short installer afterward. Use it again when a release requires installer,
+configuration or dependency changes. [Installation details](docs/INSTALLATION.md)
+cover detection, verified downloads, pinning and recovery.
+
+Installation verifies the selected Klipper/Moonraker relationship and systemd
+services, rechecks that the printer is idle and activates the updater without
+manual configuration copying. `--no-restart` defers both required restarts;
+use the printed commands while idle. `--no-update-manager` selects legacy
+installation for new/unmanaged hosts without a supported Moonraker setup;
+an already registered managed updater refuses that opt-out.
+Printer-console `RESTART` or
 `FIRMWARE_RESTART` alone cannot reload already imported Python modules. See
 [restart requirements](docs/INSTALLATION.md#automatic-host-service-restart)
 for service detection, privilege checks and activation failures.
@@ -163,8 +179,10 @@ It removes configuration and calibration models introduced by this extension,
 preserving unrelated later edits and other saved models. Conflicting settings
 or incomplete backups stop restoration before configuration or link changes;
 the uninstaller identifies the file and backup to review. Downloads, charts
-and backups are retained. Uninstallation neither restarts Klipper nor moves
-the printer; review its output and restart the host process yourself while idle.
+and backups are retained. Uninstall and rollback leave activation to the
+operator. Restoring/removing owned updater configuration also requires the
+matching Moonraker restart, in addition to Klipper, so its loaded update entry
+matches disk. Review the output and restart the listed services while idle.
 
 </details>
 

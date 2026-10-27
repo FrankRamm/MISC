@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
-# Download completely with curl -f ... -o FILE && bash FILE; do not pipe to bash.
+# Buffer a successful complete download before bash; do not pipe curl to bash.
 set -euo pipefail
+accel_homing_require_complete() {
+    local installer_source
+    if [[ -n "${BASH_EXECUTION_STRING-}" ]]; then
+        installer_source=$BASH_EXECUTION_STRING
+    elif [[ -n "${BASH_SOURCE[0]-}" && -f "${BASH_SOURCE[0]}" ]]; then
+        installer_source=$(<"${BASH_SOURCE[0]}") || return 1
+    else
+        printf '%s\n' 'Bootstrap requires a complete buffered command or file; use the documented installer command.' >&2
+        return 1
+    fi
+    if [[ "$installer_source" != *$'\n# ACCEL_HOMING_BOOTSTRAP_COMPLETE_V1' ]]; then
+        printf '%s\n' 'Incomplete bootstrap; installation was not started.' >&2
+        return 1
+    fi
+}
 accel_homing_bootstrap() {
     if ! command -v python3 >/dev/null 2>&1; then
         printf '%s\n' 'Python 3.8 or newer is required.' >&2
@@ -57,5 +72,7 @@ except (OSError, ValueError, KeyError, SyntaxError) as error:
 PY
 }
 (
+    accel_homing_require_complete || exit 1
     accel_homing_bootstrap "$@"
 )
+# ACCEL_HOMING_BOOTSTRAP_COMPLETE_V1

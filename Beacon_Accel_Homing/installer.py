@@ -52,6 +52,14 @@ def load_uninstaller():
     return module
 
 
+def load_updater():
+    path = Path(__file__).resolve().with_name("accel_homing_updater.py")
+    spec = importlib.util.spec_from_file_location("accel_homing_installer_updater", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def uninstall_api():
     # Pass the current module's helpers explicitly, including in offline tests
     # which load installer.py under an isolated import name.
@@ -912,7 +920,7 @@ def save_manifest(directory, manifest):
     write_state(directory / "manifest.json", {"kind": "file", "mode": 0o600, "data": base64.b64encode(data).decode("ascii")})
 
 
-def apply_plan(changes, config, writer=write_state, selected=None, before_write=None):
+def apply_plan(changes, config, writer=write_state, selected=None, before_write=None, updater=None):
     if not changes:
         return None
     entries = []
@@ -932,6 +940,9 @@ def apply_plan(changes, config, writer=write_state, selected=None, before_write=
     metadata = dict(operation="install", repo=str(selected["repo"]) if selected else None,
                     parent=active[-1]["ref"] if active else None,
                     previous_uninstall=receipt["ref"] if receipt else None, context=context)
+    if updater is not None:
+        metadata["updater"] = updater["context"]
+        metadata["source_update"] = load_updater().source_metadata(updater)
     return execute_transaction(entries, config, metadata, writer, before_write)
 
 
@@ -1039,8 +1050,10 @@ def apply_uninstall_plan(plan, selected, writer=write_state):
     if not plan["entries"]:
         return None
     assert_uninstall_consumers(selected, plan)
-    return execute_transaction(plan["entries"], selected["config"],
-                               dict(operation="uninstall", repo=str(selected["repo"]), history=plan["history"]), writer)
+    metadata = dict(operation="uninstall", repo=str(selected["repo"]), history=plan["history"])
+    if plan.get("updater") is not None:
+        metadata["updater"] = plan["updater"]
+    return execute_transaction(plan["entries"], selected["config"], metadata, writer)
 
 
 def rollback(backup, dry_run=False, selected=None):
@@ -1054,6 +1067,11 @@ def rollback(backup, dry_run=False, selected=None):
         raise InstallError("Backup belongs to a different config: %s" % manifest["config"])
     if selected and manifest.get("repo") and canonical(manifest["repo"]) != selected["repo"]:
         raise InstallError("Backup belongs to a different checkout: %s" % manifest["repo"])
+    if manifest.get("updater") is not None:
+        if selected is None:
+            raise InstallError("Updater rollback requires the exact selected instance.")
+        load_updater().validate_record(manifest, selected, uninstall_api())
+    source_restore = load_updater().validate_source_rollback(manifest, selected, uninstall_api()) if manifest.get("source_update") else None
     for entry in manifest["changes"]:
         if not state_matches(Path(entry["path"]), entry["after"]):
             raise InstallError("%s changed after installation. Refusing to overwrite later edits; restore selected "
@@ -1067,6 +1085,8 @@ def rollback(backup, dry_run=False, selected=None):
                 raise InstallError("%s changed during rollback; preserving current contents" % entry["path"])
             write_state(Path(entry["path"]), entry["before"])
             done.append(entry)
+        if source_restore:
+            load_updater().restore_publication(source_restore, uninstall_api())
     except Exception as exc:
         errors = []
         for entry in reversed(done):
@@ -1092,6 +1112,8 @@ def arguments(argv=None):
     parser.add_argument("--service", default=os.environ.get("KLIPPER_SERVICE"), help="exact systemd instance")
     parser.add_argument("--klippy-socket", default=os.environ.get("KLIPPY_SOCKET"), help="read-only Klipper API socket (-a)")
     parser.add_argument("--klipper-python", help="exact selected Klipper venv interpreter when it cannot be detected; never bootstrap/global Python")
+    parser.add_argument("--no-update-manager", action="store_true", help="install without managed git source/Moonraker registration (offline/development opt-out)")
+    parser.add_argument("--moonraker-config", help="select the actual Moonraker config; must match this Klippy API socket")
     parser.add_argument("--accel-chip", help="full configured section, e.g. 'adxl345 toolhead'")
     parser.add_argument("--axes", default="x,y", help="x,y (default), x or y")
     parser.add_argument("--homing-speed", type=float,
@@ -1132,8 +1154,8 @@ def print_restart_advice(selected):
           "No restart, homing, firmware flashing, or calibration was performed.")
 
 
-def load_plotting():
-    path = Path(__file__).resolve().with_name("accel_homing_charts.py")
+def load_plotting(source=None):
+    path = (Path(source) if source is not None else Path(__file__).resolve().parent) / "accel_homing_charts.py"
     spec = importlib.util.spec_from_file_location("accel_homing_plotting_setup", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1197,7 +1219,7 @@ def inspect_plotting_python(selected, explicit=None):
     return details
 
 
-def prepare_plotting(selected, args, before_write=None):
+def prepare_plotting(selected, args, before_write=None, source=None):
     """Reuse Agg or atomically prepare private wheels, never mutate venv pins."""
     try:
         details = inspect_plotting_python(selected, getattr(args, "klipper_python", None))
@@ -1206,9 +1228,9 @@ def prepare_plotting(selected, args, before_write=None):
             raise
         print("PNG dependency preflight unresolved (dry run): %s" % exc)
         return {"available": False, "reason": str(exc)}
-    charts = load_plotting()
+    charts = load_plotting() if source is None else load_plotting(source)
     target = Path(charts.default_dependency_directory(details["prefix"], details["cache_tag"]))
-    owned_root = Path(__file__).resolve().parent / ".plot-deps"
+    owned_root = (Path(source).resolve() if source is not None else Path(__file__).resolve().parent) / ".plot-deps"
     try:
         relative = target.resolve().relative_to(owned_root)
         if not relative.parts:
@@ -1295,6 +1317,8 @@ def main(argv=None):
               "Source caches, charts and original backups were retained." % len(plan["history"]))
         print("Review the restored config.")
         print_restart_advice(selected)
+        if plan.get("updater") is not None:
+            load_updater().print_activation_advice(plan["updater"], selected, uninstall_api())
         print("Undo this uninstall (only while its restored files remain unchanged): bash %s --config %s --klipper-path %s --rollback %s" %
               tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "install.sh", selected["config"], selected["repo"], backup)))
         return 0
@@ -1306,8 +1330,31 @@ def main(argv=None):
         print(("Would restore: " if args.dry_run else "Restored: ") + args.rollback)
         if not args.dry_run:
             print_restart_advice(selected)
+            manifest = json.loads((canonical(args.rollback) / "manifest.json").read_text())
+            if manifest.get("updater") is not None:
+                load_updater().print_activation_advice(manifest["updater"], selected, uninstall_api())
         return 0
-    changes, messages, sensor = make_plan(Path(__file__).resolve().parent, selected, args)
+    source = Path(__file__).resolve().parent
+    updater_receipt = selected["config"].parent / ".accel_homing_updater.json"
+    if args.no_update_manager and (updater_receipt.exists() or updater_receipt.is_symlink()):
+        raise InstallError("This instance has a managed Moonraker updater. Uninstall its managed registration "
+                           "before switching to --no-update-manager; otherwise UI updates would target code "
+                           "that Klipper no longer loads. No printer files changed.")
+    updater_api = None if args.no_update_manager else load_updater()
+    updater = None
+    planning_args = updater_api.migration_args(selected, args, uninstall_api()) if updater_api else args
+    # Validate printer/custom-G28/foreign-link policy before source/cache writes.
+    changes, messages, sensor = make_plan(source, selected, planning_args)
+    if updater_api:
+        updater = updater_api.make_plan(source, selected, args, uninstall_api())
+        assert_uninstall_consumers(selected, {"entries": [
+            {"path": str(selected["repo"] / "klippy/extras" / name)} for name in MODULES]})
+        for module in MODULES:
+            link = selected["repo"] / "klippy/extras" / module
+            changes[link] = dict(kind="symlink", target=str(updater["source"] / module),
+                                 expected=changes.get(link, {}).get("expected", snapshot(link)))
+        changes.update(updater["changes"])
+        print("Managed update source: %s\nMoonraker config: %s" % (updater["repo"], updater["moon"]["config"]))
     print("Accelerometer: [%s] (physical mounting/orientation not inferred)" % sensor)
     for message in messages:
         print("Note: " + message)
@@ -1318,6 +1365,8 @@ def main(argv=None):
         print("Dry run: no writes, restart, or movement.")
         return 0
     restart = None if args.no_restart else prepare_restart(selected)
+    moon_restart = (updater_api.prepare_restart(updater["moon"], selected, uninstall_api())
+                    if updater and updater["restart_needed"] and not args.no_restart else None)
     def before_write():
         executable = selected.get("executable") or args.klipper_python
         if executable:
@@ -1326,16 +1375,55 @@ def main(argv=None):
             assert_restart_safe(selected, restart)
         else:
             print(assert_idle(selected))
-    prepare_plotting(selected, args, before_write)
+        if updater:
+            if moon_restart:
+                updater_api.assert_restart_safe(updater["moon"], selected, moon_restart, uninstall_api())
+            else:
+                updater_api.assert_identity(updater["moon"], selected, uninstall_api())
+    candidate = updater_api.prepare_source(updater, uninstall_api(), before_write) if updater else source
+    prepare_plotting(selected, args, before_write, source=candidate) if updater else prepare_plotting(selected, args, before_write)
+    if updater:
+        changes, _messages, _sensor = make_plan(candidate, selected, planning_args)
+        for module in MODULES:
+            path = selected["repo"] / "klippy/extras" / module
+            desired = dict(kind="symlink", target=str(updater["source"] / module))
+            desired["expected"] = changes.get(path, {}).get("expected", snapshot(path))
+            if state_matches(path, {key: value for key, value in desired.items() if key != "expected"}):
+                changes.pop(path, None)
+            else:
+                changes[path] = desired
+        changes.update(updater["changes"])
     backup = None
+    try:
+        if updater:
+            updater_api.publish_source(updater, uninstall_api(), before_write)
+        if changes:
+            options = {"updater": updater} if updater else {}
+            backup = apply_plan(changes, selected["config"], selected=selected, before_write=before_write, **options)
+    except Exception as exc:
+        if updater:
+            try:
+                updater_api.restore_publication(updater, uninstall_api())
+            except Exception as recovery:
+                raise InstallError("Installer file transaction failed and prior source restoration also failed. "
+                                   "Retained source backup: %s. Original cause: %s. Recovery: %s" %
+                                   (updater.get("source_backup"), exc, recovery))
+        raise
     if changes:
-        backup = apply_plan(changes, selected["config"], selected=selected, before_write=before_write)
         print("Installed. Backup: %s" % backup)
         print("Review the config and sensor mounting/orientation.")
         print("Restore: bash %s --config %s --klipper-path %s --rollback %s" %
               tuple(shlex.quote(str(v)) for v in (Path(__file__).resolve().parent / "install.sh", selected["config"], selected["repo"], backup)))
     else:
         print("Already installed; no installation files changed.")
+    if updater and updater["restart_needed"]:
+        if moon_restart:
+            updater_api.activate(updater, selected, moon_restart, uninstall_api(), backup)
+        else:
+            updater_api.record_activation(updater, selected, uninstall_api(), backup, "skipped", reason="--no-restart")
+            print("Moonraker updater entry is written but not loaded (--no-restart). Restart the matching "
+                  "Moonraker service once from its UI/service manager; refreshing the browser alone does not load it.")
+            updater_api.print_activation_advice(updater["context"], selected, uninstall_api())
     if restart:
         activate_install(selected, restart, backup)
     else:

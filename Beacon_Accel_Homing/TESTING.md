@@ -26,7 +26,24 @@ python -m unittest discover -s Beacon_Accel_Homing/tests -p test_installer.py -v
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_workflows.py -v
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_accuracy_workflow.py -v
 python -m unittest discover -s Beacon_Accel_Homing/tests -p test_accuracy_charts.py -v
+python -m unittest discover -s Beacon_Accel_Homing/tests -p test_bootstrap_short.py -v
 ```
+
+`test_bootstrap_short` uses fake shell `curl` and `python3` functions. Its nine
+offline fixtures verify that a failed download cannot start Python even after
+printing a full valid script, successful truncated executable prefixes fail
+the final-marker guard, complete string/file launches preserve optional flags,
+and unsupported direct piping is refused. A comment/function-definitions-only
+prefix is a no-op and never invokes installation. No real network, installer,
+printer API, package manager or service operation is executed by those fixtures.
+The original pinned Git-blob/full-payload/cache tests remain in `BootstrapFixture`.
+
+Native-updater fixtures cover source anchoring/publication, isolated ownership,
+Moonraker include conflicts and service identity, activation order/retries,
+legacy-mode boundaries and restoration advice. One fixture uses real Git only
+inside disposable local repositories to verify sparse tracked publication,
+private-cache retention and rollback. It uses no public network or user repo;
+all Moonraker/printer/service/pip behavior remains synthetic or mocked.
 
 The chart module's focused command includes the stationary-noise fixtures.
 Those fixtures check three separate one-second windows, independent XYZ means,
@@ -80,9 +97,10 @@ installation, config idempotence, backup/rollback, full-history restore,
 failed-write recovery, concurrent-edit rejection and later-edit protection.
 Full restore/link-history checks run with isolated link-state emulation.
 Actual symlink creation must still be exercised on a Linux host before
-claiming a host integration test. All three shell entry points are byte-identical to the source base
-`253f85e1df1b85ff89aebf3237552a30a4e6edc2`, so their syntax checks were not repeated. No native
-Linux systemd/Unix-socket integration run was performed here.
+claiming a host integration test. All three shell entry points passed bash -n
+without execution; bootstrap.sh adds the completeness guard while install.sh
+and uninstall.sh retain their base bytes. No native Linux systemd/Unix-socket
+integration run was performed here.
 
 The need for a full host-process restart follows inspected upstream
 import/restart source, documented in
@@ -97,7 +115,7 @@ tested. Configuration-only edits retain console `RESTART` and normal
 calibration `SAVE_CONFIG` behavior.
 
 The restart coverage includes **15 `test_installer.RestartFixture` tests**.
-The final combined offline verification run discovered **523 tests: 522 passed,
+The final combined offline verification run discovered **549 tests: 548 passed,
 zero failures/errors, and the same one Windows symlink skip**. The portable
 machine-readable report and complete referenced log are together under
 [`validation/VALIDATION.json`](validation/VALIDATION.json) and
@@ -261,15 +279,15 @@ existing shared/X/Y values below 3 g through initial installation and update
 in either section. The next-float fixture uses portable struct operations;
 Python 3.8 runtime compatibility was not exercised.
 
-The recorded run used CPython 3.13.5 on Windows: **523 tests in 12.025 seconds**
-(12.29249 seconds subprocess wall time). The full UTF-8 unittest output is
+The recorded run used CPython 3.13.5 on Windows: **549 tests in 13.669 seconds**
+(13.93458 seconds subprocess wall time). The full UTF-8 unittest output is
 retained in `validation/tests.txt` as its exact binary-captured bytes, without
-newline conversion: **88,841 bytes and 528 CRLF pairs**. The JSON report hashes
-that stored log and all **22 Python sources both before and after** the run;
-the two source snapshots match. All **37 package files** were also identical
+newline conversion: **93,664 bytes and 554 CRLF pairs**. The JSON report hashes
+that stored log and all **25 Python sources both before and after** the run;
+the two source snapshots match. All **40 package files** were also identical
 between the snapshots taken during the suite; this summary, the new log and
-the validation report were written afterward. The package inventory contains **37 files**,
-with **22 immutable bootstrap payload files**; no private user log
+the validation report were written afterward. The package inventory contains **40 files**,
+with **23 immutable bootstrap payload files**; no private user log
 or raw hardware samples are included.
 
 Motor-enable and fresh-reference checks include **26 tests** in
@@ -479,7 +497,7 @@ engineering ranges do not certify hardware safety. No current printer
 settings were changed and no private user log or raw measurements were
 included in this package.
 
-All **22 production and test Python files** listed in
+All **25 production and test Python files** listed in
 `validation/VALIDATION.json` passed Python 3.8
 grammar parsing on the current Python 3.13 host. No Python 3.8 runtime was
 executed; syntax parsing alone does not establish complete runtime compatibility.
