@@ -9,21 +9,24 @@ required before contribution upstream. This is not an endorsed upstream release.
 
 ## Download and install with one command
 
-Prerequisites: the existing Linux Klipper service user, Python 3.8+, `bash`, `curl`,
+Prerequisites: the existing Linux Klipper service user, Python 3.8+, `bash`, `curl`, Git,
 an installed Klipper/Kalico/compatible checkout, and an already
 configured supported accelerometer. The default activation also requires a
 verifiable systemd service and permission to restart it; the installer requests
 your sudo password when needed. Run the command as the service user, without
-prefixing the complete installation with `sudo`. No Git checkout is required.
+prefixing the complete installation with `sudo`. The installer creates the
+dedicated Git checkout; no manual clone or Moonraker stanza copying is needed.
 
 Run this single line as that service user on the Linux printer host:
 
 ```bash
-bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing'
+installer=$(curl -fsSL https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh) && bash -c "$installer"
 ```
 
-The shell downloads the complete bootstrap to a temporary file before
-executing it. A failed curl cannot start installation. The bootstrap resolves
+Command substitution buffers the complete successful response before Bash
+starts; `&&` prevents execution after a failed curl. The bootstrap checks its
+final completeness marker before invoking Python. Direct `curl | bash` is
+unsupported. Defaults already select this fork/branch. The bootstrap resolves
 the testing branch once to a full commit SHA, then downloads every required
 plugin/installer source file, license, NOTICE, examples, documentation and
 offline validation report at that commit. It verifies file sizes and Git blob
@@ -32,10 +35,12 @@ cache hashes before invoking the installer. Any failed or incomplete download
 aborts before plugin/config installation.
 
 The installer activates the plugin section and X/Y endstops, not just plugin
-links. It still refuses ambiguous hosts, accelerometers and unsafe/custom
+links. It also registers a native updater with the Moonraker instance connected
+to this Klippy socket. It still refuses ambiguous hosts, accelerometers and unsafe/custom
 homing configuration until explicitly resolved. After installation succeeds,
 it rechecks the selected instance and **automatically restarts its verified
-systemd service**. It does not start homing or calibration. Review the resulting
+Klipper service**, and activates changed updater configuration by restarting
+the verified Moonraker service. It does not start homing or calibration. Review the resulting
 config and mounting before either.
 
 Console `RESTART` and `FIRMWARE_RESTART` do not reload already imported Python
@@ -84,12 +89,15 @@ To install without restarting or starting the service:
 bash /path/to/Beacon_Accel_Homing/install.sh --no-restart
 ```
 
-For a hosted installation, append `--no-restart` to the final `bash "$t"`
-invocation in the download command. After reviewing the result, restart the
+For a hosted installation, append `-- --no-restart` after `bash -c "$installer"`.
+This opts out of both automatic activations. After reviewing the result, restart the
 selected host process yourself while idle, using the printed service command
 or that instance's actual process manager. An unsupported manager requires
 this option. Dry runs, full uninstall and explicit rollback never restart or
 start the service automatically.
+When uninstall/rollback restores or removes owned updater configuration, also
+restart the matching Moonraker service manually. A Klipper restart alone does
+not remove the update entry already loaded in Moonraker memory.
 
 Installing the same unchanged package/config creates no managed config/link
 edits or new transaction backup, but still restarts the verified service by
@@ -102,58 +110,110 @@ there is no backup) records the activation result without changing transaction
 history hashes. A failed activation is not a successful deployment; review the
 reported failure before retrying or rolling back.
 
-Sources remain under
-`~/.local/share/accel-homing/FrankRamm--MISC-<full-commit-SHA>/`, with the exact
-path and commit printed. Keep that directory: installed module links point
-into it. Changed cached sources are rejected. `--install-dir` chooses another
-persistent source directory. Both bootstrap entry points default to this
-fork/branch; they do not fall back to upstream `main`.
+Verified bootstrap snapshots remain under
+`~/.local/share/accel-homing/FrankRamm--MISC-<full-commit-SHA>/`; changed cache
+contents are rejected. `--install-dir` changes that download-cache location.
+The default installer anchors a separate clean, per-instance repository at the
+verified source commit under `~/.local/share/accel-homing/managed/<instance>/repo`.
+Installed links point into its `Beacon_Accel_Homing/` folder, so subsequent Git
+updates change the actual loaded modules. Keep printed source paths and backups.
+Both bootstrap entry points retain the testing fork/branch defaults.
 
 The testing branch can change. Use a full commit SHA for a repeatable install;
 see [pinning a published commit](#pin-a-specific-published-commit).
 
-For an already extracted checkout or complete package, no download is needed:
+For an extracted/local development tree without the verified bootstrap's
+`.source.json`, use the legacy mode; native registration requires that verified
+source marker and refuses an unproven local tree:
 
 ```bash
-bash /path/to/Beacon_Accel_Homing/install.sh
+bash /path/to/Beacon_Accel_Homing/install.sh --no-update-manager
 ```
 
-Use the actual source path reported by bootstrap, or your extracted folder,
-in the local commands below.
+Use the cached verified source path reported by bootstrap for native install
+commands. When using an extracted/local development tree instead, append
+`--no-update-manager` to local `install.sh` commands, including dry run. That
+mode cannot replace an already registered managed installation in place.
 
 ## Update an existing installation
 
-Each downloaded commit has its own immutable source directory. Updating an
-installed version therefore requires reviewing the new release and explicitly
-allowing its module links to replace the previous targets:
+After initial installation, use this plugin's native **Update** action in
+Mainsail/Fluidd while the printer is idle. Moonraker updates the dedicated clean
+repository on `codex/universal-accel-homing` (`channel: dev`) and restarts its
+associated Klipper service. The frontend's ordinary confirmation may appear.
+Current supported frontends can display dev updates without a repository tag.
 
-```bash
-bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/codex/universal-accel-homing/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref codex/universal-accel-homing --replace-existing-links'
-```
+Run the same short installer command once to migrate an older recorded
+snapshot installation. Existing installer history must prove ownership before
+links migrate automatically. Foreign links retain `--replace-existing-links`
+after explicit review, and custom G28 overrides retain their independent
+`--acknowledge-homing-override` requirement. Append expert flags after
+`bash -c "$installer" --`; the common owned migration needs no replacement flag.
 
-`--replace-existing-links` backs up the existing link targets and repoints them
-to the verified new source. Keep all source directories and transaction backups
-for rollback. Without this option, a different existing link target is refused
-before any installation writes; a completed download alone does not update
-the installed plugin. A successful update automatically restarts the verified
-selected service after the same fresh idle and identity checks as installation.
-Append `--no-restart` to defer that activation to a manual host-process restart.
+Normal updates retain the ignored private `.plot-deps/` cache and stable module
+targets. Moonraker does not rerun the installer; releases requiring installer,
+config or dependency changes need the short installer again. **Hard Recovery**
+may replace the checkout and remove ignored plotting dependencies; rerun the
+installer after that operation. Preserve local edits outside the managed repo:
+modified/foreign repositories are refused rather than reset by this installer.
 
-For a pinned update, use the same reviewed full commit SHA in the download URL
-and `--ref`, retaining `--replace-existing-links`; see
-[pinning a published commit](#pin-a-specific-published-commit).
+For new/unmanaged hosts without a correlated supported Moonraker, append
+`-- --no-update-manager` to retain legacy snapshot installation and manual
+updates. It is refused for an already registered managed installation, so an
+active update entry cannot silently be left pointing at an unused repository.
+`-- --no-restart`
+defers activation. See [pinning a published commit](#pin-a-specific-published-commit)
+when you need a fixed initial version rather than branch tracking.
+
+## Native Moonraker updater
+
+The installer discovers the Moonraker configuration connected to the selected
+Klippy socket and registers the updater automatically in the same managed
+transaction as the module links. It activates changed updater configuration
+through the verified Moonraker service; no manual stanza copying is required.
+Ambiguous/foreign instances or conflicting updater settings stop installation
+before printer configuration is replaced. `--moonraker-config` can select a
+candidate, but it still must match the chosen Klippy instance.
+
+The generated include is `accel_homing_update.cfg`, containing
+`[update_manager accel_homing]`. The installer records its ownership separately
+and rechecks conflicting includes/stanzas before writes. The dedicated repo
+and private plotting cache remain outside printer configuration backups.
+
+When updater activation is required, the verified Moonraker service restarts
+first, then the existing Klipper activation runs. A separate
+`moonraker-activation.json` receipt in the transaction backup records pending,
+restarted, failed or skipped activation. A normal rerun retries an earlier
+pending/failed/`--no-restart` activation even when the stanza already exists.
+Configuration on disk alone does not prove it was loaded. A new matching host
+process proves service activation, not frontend/update-manager readiness;
+no live frontend or printer activation was exercised by the offline tests.
+
+The generated entry uses `type: git_repo`, `channel: dev`, the dedicated repo
+root as `path`, `origin: https://github.com/FrankRamm/MISC.git`,
+`primary_branch: codex/universal-accel-homing` and `managed_services: klipper`.
+Moonraker resolves that service alias to its associated actual Klipper unit;
+numbered unit names must not be pasted into `managed_services`.
+
+`install_script` is not an execution hook: Moonraker only parses it for system
+dependencies. No such option, shared Klipper `env` or requirements override is
+added. The installer prepares private PNG dependencies in the stable checkout;
+ordinary Git updates retain them. See the inspected
+[Moonraker configuration](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/docs/configuration.md)
+and [application updater](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/components/update_manager/app_deploy.py)
+contracts. The dev branch follows future commits rather than a GitHub release.
 
 ## Inspect without writes
 
 ```bash
-bash /path/to/Beacon_Accel_Homing/install.sh --dry-run
+bash /path/to/Beacon_Accel_Homing/install.sh --no-update-manager --dry-run
 ```
 
 Dry run validates the package, target, includes, sensors, conflicts and planned
 paths. It creates no backup, links or config files and queries no printer API.
 It does not prove firmware API compatibility or physical suitability. A real
 installation repeats preflight and checks live idle state before writes.
-For a hosted dry run, append `--dry-run` to the final `bash "$t"` invocation
+For a hosted dry run, append `-- --dry-run` after `bash -c "$installer"`
 in the download command. This still downloads the verified source cache;
 printer configuration and plugin paths are left unchanged.
 
@@ -511,16 +571,22 @@ published commit SHA you have selected from the testing fork. Use the same SHA
 in the download URL and `--ref`; a branch name is not an immutable version:
 
 ```bash
-bash -c 'set -euo pipefail; t=$(mktemp); trap "rm -f \"$t\"" EXIT; curl -fL --retry 3 "https://raw.githubusercontent.com/FrankRamm/MISC/FULL_40_CHARACTER_COMMIT_SHA/Beacon_Accel_Homing/bootstrap.sh" -o "$t"; bash "$t" --repo FrankRamm/MISC --ref FULL_40_CHARACTER_COMMIT_SHA'
+installer=$(curl -fsSL https://raw.githubusercontent.com/FrankRamm/MISC/FULL_40_CHARACTER_COMMIT_SHA/Beacon_Accel_Homing/bootstrap.sh) && bash -c "$installer" -- --ref FULL_40_CHARACTER_COMMIT_SHA --no-update-manager
 ```
 
-For an existing installation, append `--replace-existing-links` to that final
-`bash "$t"` command after reviewing the selected release, as in the update
-command above. This option preserves the old targets in the transaction backup.
+This reproducible example is for a fresh installation; it disables native
+branch updates to retain the selected snapshot. This legacy
+mode does not automatically authorize a link-source change: after explicit
+review, append `--replace-existing-links` after the final `--` when needed.
+It preserves previous targets in the transaction backup. An already registered
+native updater refuses `--no-update-manager`, even with the replacement flag;
+uninstall its managed registration before selecting a fixed snapshot. This is
+not an in-place opt-out.
 
-No Git dependency, automatic update manager or motion is added. Installation
-and updates use the automatic host-service restart described above unless
-`--no-restart` is selected.
+The default native updater uses Git and a stable clean checkout. The legacy
+`--no-update-manager` path retains immutable snapshots instead. Neither starts
+motion. Installation uses the guarded host-service activation described above
+unless `--no-restart` is selected.
 
 The offline download fixtures in `tests/test_installer.py` verify branch
 resolution, complete downloads, integrity checks, retained credits and

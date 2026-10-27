@@ -56,6 +56,42 @@ and [Kalico restart loop](https://github.com/KalicoCrew/kalico/blob/0057b6a15317
 Configuration-only threshold edits can still use console `RESTART`, and
 calibration `SAVE_CONFIG` retains its normal configuration restart.
 
+## Moonraker update transport
+
+The initial short command buffers the complete successful `curl` response
+before Bash executes it. A final completeness marker is checked from the
+command string or completed file before the Python bootstrap starts. Direct
+unbuffered `curl | bash` is unsupported. The existing bootstrap still resolves
+one immutable commit and verifies the complete payload's Git blob sizes/hashes.
+
+Native updates require a dedicated clean Git checkout whose module files are
+the actual symlink targets. An immutable snapshot alone cannot provide that.
+The installer registers the correlated Moonraker instance with `type: git_repo`,
+`channel: dev`, the exact origin and `primary_branch: codex/universal-accel-homing`.
+`managed_services: klipper` is the supported alias, resolved by Moonraker to
+its associated Klippy unit; arbitrary numbered unit names are not substituted.
+Current Mainsail/Fluidd can expose commit-based dev updates without a repository
+tag, while retaining their normal UI confirmation and service permissions; see
+the inspected [Mainsail update entry](https://github.com/mainsail-crew/mainsail/blob/03a4d7b1d70b6df1061c8e1d998620320c126627/src/components/panels/Machine/UpdatePanel/Entry.vue)
+and [Fluidd version status](https://github.com/fluidd-core/fluidd/blob/738ff932030588adb65684f49be4db893ad03216/src/components/settings/VersionStatus.vue).
+
+This follows inspected Moonraker
+[configuration](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/docs/configuration.md)
+and [application updater](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/components/update_manager/app_deploy.py)
+contracts: `install_script` is a deprecated dependency-text parser and is not
+executed. The generated updater therefore has no installer hook or shared
+Klipper `env`/requirements override. Normal code updates retain the ignored,
+private PNG dependency cache. Hard Recovery may replace that cache; rerun the
+installer afterward. Releases requiring installer/config/dependency changes
+also need that explicit installer step.
+
+Initial source anchoring, ownership-aware migration and Moonraker configuration
+changes share the installer transaction and selected-instance checks. The first
+updater activation restarts the verified Moonraker service automatically when
+needed; `--no-restart` opts out. Future updates use Moonraker's native Git/service
+path. These contracts have offline fixtures; no live updater, service restart
+or physical printer was exercised here.
+
 ## safe_z_home and X/Y-only workflows
 
 The standard Klipper/Kalico `[safe_z_home]` is supported without the installer's
