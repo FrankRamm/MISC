@@ -201,17 +201,51 @@ disconnect aborts the measurement. Generic reporting changes are restored and
 only the measurement's sensor subscription is stopped. There is no hidden
 motor-enable or motion test in this command.
 
-Each window's own XYZ mean is removed. Reports preserve every raw and signed
-baseline-subtracted sample in CSV and record duration, timestamps, count,
-sensor/scale/map context, absolute peak, RMS and peak-to-peak values in JSON.
-Standalone SVG and offline HTML contain the three signed XYZ plots; display
-reduction retains positive/negative extrema while CSV keeps full resolution.
+Each window's own XYZ mean is removed. A single PNG contains all three signed
+XYZ plots on a common vertical scale, absolute peaks, RMS and starting
+candidates. Exact duration, timestamps, count, sensor/scale/map context,
+absolute peak, RMS and peak-to-peak values remain in memory/status. The image
+uses a bounded envelope that retains positive and negative extrema; it does
+not export every raw sample. Intermediate windows remain in memory and create
+no files.
 Run/iteration identity and disjoint timestamps are checked. A successful
-summary requires all three complete valid capture exports. Failed/partial
-runs are labelled incomplete, preserve completed captures when available and
-cannot recommend a candidate. Output directories are atomic and do not
-overwrite prior runs. Summary links use relative filenames; no remote chart
-resources or private printer configuration/logs are included.
+summary requires all three complete valid window receipts and a completed
+PNG export. Failed/partial runs may create an explicitly incomplete PNG when
+render/context checks permit and cannot recommend a candidate. PNG publication is
+atomic and never overwrites an earlier output. Descriptive filenames and
+image titles share the same timezone-aware UTC instant, with microseconds;
+bounded collision suffixes distinguish coincident clocks. No user-facing run
+UUID, chart sidecars or private printer configuration/logs are exported.
+
+All chart producers use PNG only, including ordinary capture exports,
+ACCURACY overviews and failure reports. Per-home PNG references carry private
+immutable in-memory receipts binding run/axis/attempt, exact record, image
+path/hash, sample count/baseline and a bounded trace. ACCURACY rechecks receipt
+identity, record changes and PNG bytes/CRC with reactor yields between files;
+copied plain path dictionaries cannot establish provenance. Per-axis overview
+dimensions remain fixed for the maximum 100 measured homes. No raw data is
+reconstructed from image pixels or a sidecar file.
+
+Matplotlib/NumPy/Pillow are loaded only by an isolated worker using the selected
+Klipper Python and a private dependency target keyed by Python ABI and venv
+prefix. The installer verifies or prepares that target without changing global
+pins. The host-only `.plot-deps/` cache is ignored by Git and retained on
+uninstall. Klippy imports only standard-library chart orchestration: it polls
+the child through the reactor, checks cancellation and a finite deadline, and
+cleans private OS-temporary input/output/cache/log files. The PNG output
+directory contains only completed PNG files. Child pixel validation and parent
+bounded PNG structure/CRC/hash checks precede publication. A real small worker
+render is required before a chart-producing workflow moves or measures noise.
+Rendering/preflight does not query the printer or perform motion.
+
+Inline display uses a file URL only when the current Moonraker process/data
+directory and Klippy socket can be correlated. A direct image GET needs a
+same-origin Moonraker route accessible to an ordinary browser request, such
+as a trusted LAN or session-cookie route; it does not inherit JavaScript
+Authorization headers. Remote frontends or header-token-only authentication
+may require the frontend file browser. No tokens are embedded in image links.
+Otherwise the console/STATUS provides the PNG path.
+Formatted console support varies; Mainsail raw-output mode displays plain text.
 
 For each X/Y axis, let `peak` be its largest absolute mean-removed deviation
 across all three windows. The initial candidate is the smallest configured

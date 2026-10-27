@@ -525,3 +525,35 @@ and updates use the automatic host-service restart described above unless
 The offline download fixtures in `tests/test_installer.py` verify branch
 resolution, complete downloads, integrity checks, retained credits and
 download-failure handling without calling GitHub or a printer.
+
+## PNG chart renderer
+
+Install/update checks a real PNG render with the Python environment selected
+for the verified Klipper instance. A working existing plotting stack is reused.
+Otherwise binary plotting wheels are prepared in the source directory's private
+`.plot-deps/` cache, keyed by that environment's Python ABI and venv prefix,
+verified and published before printer-file changes or service activation.
+Global Python package pins are not changed. A dependency/preflight failure
+stops before those printer changes. Dry run reports missing dependencies
+without installing them. The host-only cache is ignored by Git and retained
+on uninstall.
+
+If the selected Klipper Python cannot be established automatically, provide
+its exact venv executable with `--klipper-python /path/to/klippy-env/bin/python`.
+This must agree with the verified live Klipper process when one is present;
+the bootstrap interpreter is not substituted for it.
+
+All charts are completed PNG images with matching current UTC timestamps in
+their descriptive filenames and titles. No CSV/JSON/SVG/HTML chart sidecars
+are created. Images use bounded traces that retain positive/negative extrema;
+there is no full-resolution raw-data export. An isolated worker renders the
+images and cleans its private OS-temporary files. A small real render runs
+before CHARTS/ACCURACY movement or stationary NOISE acquisition.
+
+When the current Moonraker data directory and Klippy socket can be correlated,
+the console can provide a same-origin image link/preview. Its ordinary browser
+GET must already be allowed, for example by a trusted LAN or session cookie;
+image GETs do not inherit frontend JavaScript Authorization headers. Remote
+frontends or header-token-only authentication may require opening the PNG in
+the frontend file browser. No tokens are embedded. Mainsail requires formatted
+console output; raw mode shows text. The PNG path remains in console/STATUS.
