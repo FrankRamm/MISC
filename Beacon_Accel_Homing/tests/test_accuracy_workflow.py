@@ -140,8 +140,9 @@ class AccuracyWorkflowTests(unittest.TestCase):
             self.assertEqual(len(rig.toolhead.moves), 4)
             self.assertEqual(rig.toolhead.moves[-1], ([5.0, None, None], 100.0))
             self.assertEqual(len(result["paths"]), 4)
-            summary = json.loads(Path(result["summary_paths"]["json"]).read_text(encoding="utf-8"))
+            summary = [item for item in rig.workflow.renderer.calls if item["kind"] == "accuracy"][-1]
             self.assertEqual(summary["result"], "complete")
+            self.assertTrue(all(Path(path).suffix == ".png" for path in result["summary_paths"].values()))
             self.assertTrue(any("at or above" in line for line in rig.output))
             self.assertTrue(any("variance" in line and "mm^2" in line for line in rig.output))
             self.assert_restored(rig)
@@ -276,7 +277,7 @@ class AccuracyWorkflowTests(unittest.TestCase):
             self.assertTrue(result["axis_results"]["x"]["complete"])
             self.assertFalse(result["axis_results"]["y"]["complete"])
             self.assertEqual(len(result["paths"]), 3)
-            self.assertTrue(all(Path(item["html"]).is_file() for item in result["paths"]))
+            self.assertTrue(all(Path(item["png"]).is_file() for item in result["paths"]))
             self.assertIn("summary_paths", result)
             self.assert_restored(rig)
 
@@ -366,7 +367,7 @@ class AccuracyWorkflowTests(unittest.TestCase):
                 self.assertEqual(result["result"], "aborted")
                 self.assertEqual(len(result["axis_results"]["x"]["trials"]), 1 if target == "capture" else 2)
                 self.assertEqual(len(result["paths"]), 1 if target == "capture" else 3)
-                self.assertTrue(all(Path(paths["json"]).is_file() for paths in result["paths"]))
+                self.assertTrue(all(Path(paths["png"]).is_file() for paths in result["paths"]))
                 if target == "summary":
                     self.assertIn("chart_error", result)
                 else:
@@ -390,7 +391,7 @@ class AccuracyWorkflowTests(unittest.TestCase):
             self.assertIn("cleanup failed", result["reason"])
             self.assertEqual(result["axis_results"]["x"]["statistics"]["count"], 2)
             self.assertTrue(result["axis_results"]["x"]["complete"])
-            metadata = json.loads(Path(result["summary_paths"]["json"]).read_text(encoding="utf-8"))
+            metadata = [item for item in rig.workflow.renderer.calls if item["kind"] == "accuracy"][-1]
             self.assertEqual(metadata["result"], "aborted")
             self.assert_restored(rig)
 

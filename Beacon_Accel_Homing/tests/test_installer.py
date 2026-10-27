@@ -87,6 +87,11 @@ move_to_previous: True
 
 class HostFixture(unittest.TestCase):
     def setUp(self):
+        # Environment/pip behavior has independent mocked contract tests. Host
+        # lifecycle fixtures must never invoke a real interpreter or installer.
+        plotting = mock.patch.object(installer, "prepare_plotting", return_value={"available": True})
+        plotting.start()
+        self.addCleanup(plotting.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
@@ -1028,6 +1033,7 @@ class RestartFixture(unittest.TestCase):
             mock.patch.object(installer.os, "geteuid", return_value=1000, create=True),
             mock.patch.object(installer.shutil, "which", side_effect=lambda name: "/offline/" + name),
             mock.patch.object(installer, "proc_instances", side_effect=lambda: list(self.processes)),
+            mock.patch.object(installer, "service_instances", side_effect=lambda _: [dict(self.selected)]),
             mock.patch.object(installer, "webhook_query", side_effect=self.query),
             mock.patch.object(installer.subprocess, "run", side_effect=self.command),
             mock.patch.object(installer, "make_plan", side_effect=self.file_plan),

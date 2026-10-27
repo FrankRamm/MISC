@@ -2,16 +2,16 @@
 import collections
 import contextlib
 import copy
-import csv
 import importlib.util
 import json
 import math
 from pathlib import Path
 import sys
+import struct
 import tempfile
 import types
 import unittest
-import xml.etree.ElementTree as ET
+import zlib
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -19,6 +19,26 @@ import accel_homing_charts as charts_module
 from accel_homing_charts import write_capture
 from accel_homing_model import AccelHomingModel
 from harness import CommandError, ConfigError, FakeReactor, plugin
+
+
+class FakePNGRenderer:
+    """Exercise payload/provenance integration without importing plotting libs."""
+    def __init__(self):
+        self.calls = []
+        self.on_render = None
+
+    def render(self, payload, check_running=None):
+        if check_running:
+            check_running()
+        self.calls.append(payload)
+        if self.on_render:
+            self.on_render(payload)
+        if check_running:
+            check_running()
+        def chunk(kind, content):
+            return struct.pack(">I", len(content)) + kind + content + struct.pack(">I", zlib.crc32(kind + content) & 0xffffffff)
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 1, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(b"\0" + b"\xff\xff\xff\xff" * 2)) + chunk(b"IEND", b""))
 
 
 class ConsoleMessages(list):
@@ -348,6 +368,7 @@ class Rig:
                        "_restore_accel", "_set_accel"):
             setattr(self.owner, method, types.MethodType(getattr(plugin.BeaconAccelHoming, method), self.owner))
         self.workflow = AccelHomingWorkflows(self.owner, self.config)
+        self.workflow.renderer = FakePNGRenderer()
         self.owner.workflows = self.workflow
 
     def lookup_object(self, name, default=None):
@@ -392,9 +413,19 @@ class Rig:
         self.capture_stops += 1
         if self.bad_capture is not None:
             return self.bad_capture
-        return {"samples": [(0.0, 0.0, 0.0, 1.0), (0.001, 0.1, 0.0, 1.0),
-                            (0.002, -4.0, -5.0, 1.0), (0.003, 0.0, 0.0, 1.0)],
-                "dropped": 0, "baseline_g": (0.0, 0.0, 1.0)}
+        axis = self.home_calls[-1]["axis"] if self.home_calls else "x"
+        record = self.owner.last.get(axis)
+        t0 = self.capture_stops - 1.0
+        return {"samples": [(t0, 0.0, 0.0, 1.0), (t0 + 0.001, 0.1, 0.0, 1.0),
+                            (t0 + 0.002, -4.0, -5.0, 1.0), (t0 + 0.003, 0.0, 0.0, 1.0)],
+                "dropped": 0, "baseline_g": (0.0, 0.0, 1.0), "_record": record,
+                "detector": None if record is None else {
+                    "axis": axis, "attempt_count": 1, "arm_time_s": record["arm_time_s"],
+                    "onset_time_s": record["onset_time_s"], "threshold_g": self.owner.threshold_g[axis],
+                    "onset_g": record.get("onset_g"), "impact_peak_g": record.get("impact_peak_g"),
+                    "direction": record.get("direction", -1),
+                    "homing_speed_mm_s": self.owner.rails_by_axis[axis].info.speed,
+                    "homing_accel_mm_s2": self.owner.homing_accel}}
 
     def create_gcode_command(self, command, commandline, params):
         self.created_commands.append((command, commandline, dict(params)))
@@ -452,8 +483,8 @@ class Rig:
         _center, expected = self.workflow._geometry(axis)
         record = {"axis": axis, "result": "impact", "travel_mm": expected,
                   "onset_g": 4.0, "impact_peak_g": 7.0, "moving": True,
-                  "threshold_g": self.owner.threshold_g[axis], "arm_time_s": 0.001,
-                  "onset_time_s": 0.002, "direction": -1}
+                  "threshold_g": self.owner.threshold_g[axis], "arm_time_s": self.capture_stops + 0.001,
+                  "onset_time_s": self.capture_stops + 0.002, "direction": -1}
         record.update(result)
         self.owner.last[axis] = record
         index = "xy".index(axis)
@@ -1633,15 +1664,14 @@ class TestAndChartWorkflowTests(unittest.TestCase):
             run = result["run_id"]
             self.assertEqual(len(result["paths"]), 2)
             for item in result["paths"]:
-                for extension in ("csv", "svg", "html", "json"):
-                    path = Path(item[extension])
-                    self.assertTrue(path.is_absolute())
-                    self.assertTrue(path.is_file())
-                    self.assertIn(run, path.name)
-                metadata = json.loads(Path(item["json"]).read_text(encoding="utf-8"))
-                self.assertEqual(metadata["record"]["run_id"], run)
-                self.assertNotEqual(metadata["record"]["travel_mm"], 1234)
-            self.assertTrue(any("CSV: " + temp in message for message in rig.output))
+                path = Path(item["png"])
+                self.assertTrue(path.is_absolute())
+                self.assertTrue(path.is_file())
+                self.assertNotIn(run, path.name)
+            payloads = [item for item in rig.workflow.renderer.calls if item["kind"] == "capture"]
+            self.assertTrue(all(item["record"]["run_id"] == run for item in payloads))
+            self.assertNotEqual(payloads[0]["record"]["travel_mm"], 1234)
+            self.assertTrue(all(path.suffix == ".png" for path in Path(temp).rglob("*") if path.is_file()))
 
     def test_suspect_xy_results_finalize_rejection_without_more_homes_or_model_saving(self):
         for callback in ("cmd_TEST", "cmd_CHARTS"):
@@ -1729,38 +1759,34 @@ class TestAndChartWorkflowTests(unittest.TestCase):
 class PortableChartTests(unittest.TestCase):
     def test_failed_chart_write_publishes_nothing_and_previous_runs_are_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
-            capture = {"samples": [(0.0, 0.0, 0.0, 1.0)],
+            capture = {"samples": [(0.0, 0.0, 0.0, 1.0), (0.001, 0.0, 0.0, 1.0)],
                        "baseline_g": (0.0, 0.0, 1.0), "dropped": 0}
             with self.assertRaises(TypeError):
-                write_capture(temp, "failed", "x", capture, {"unserializable": object()})
+                write_capture(temp, "failed", "x", capture, {"unserializable": object()}, renderer=FakePNGRenderer())
             self.assertEqual(list(Path(temp).iterdir()), [])
-            original = write_capture(temp, "completed", "x", capture, {})
-            before = Path(original["csv"]).read_bytes()
-            with self.assertRaisesRegex(ValueError, "already exists"):
-                write_capture(temp, "completed", "x", capture, {})
-            self.assertEqual(Path(original["csv"]).read_bytes(), before)
+            original = write_capture(temp, "completed", "x", capture, {}, renderer=FakePNGRenderer())
+            before = Path(original["png"]).read_bytes()
+            repeated = write_capture(temp, "completed", "x", capture, {}, renderer=FakePNGRenderer())
+            self.assertNotEqual(repeated["png"], original["png"])
+            self.assertEqual(Path(original["png"]).read_bytes(), before)
 
-    def test_csv_has_raw_and_baseline_subtracted_samples_and_svg_is_valid_xml(self):
+    def test_png_payload_has_baseline_subtracted_signed_samples_and_precise_threshold(self):
         with tempfile.TemporaryDirectory() as temp:
             record = {"onset_g": 4.0, "impact_peak_g": 6.0, "threshold_g": 3.0,
                       "direction": 0, "onset_time_s": 1.002}
             capture = {"samples": [(1.0, 1.0, 2.0, 3.0), (1.001, 1.0, 2.0, 3.0),
                                    (1.002, -5.0, 2.0, 3.0)],
                        "baseline_g": (1.0, 2.0, 3.0), "dropped": 0}
-            paths = write_capture(temp, "synthetic_test", "x", capture, record, simulated=True)
-            root = ET.parse(paths["svg"]).getroot()
-            self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
-            with open(paths["csv"], newline="", encoding="utf-8") as stream:
-                rows = list(csv.DictReader(stream))
-            self.assertEqual(float(rows[-1]["raw_x_g"]), -5.0)
-            self.assertEqual(float(rows[-1]["delta_x_g"]), -6.0)
-            svg = Path(paths["svg"]).read_text(encoding="utf-8")
-            self.assertIn("SIMULATED / NOT PRINTER MEASUREMENT", svg)
-            self.assertIn("+3.00 g threshold", svg)
-            self.assertIn("-3.00 g threshold", svg)
-            page = Path(paths["html"]).read_text(encoding="utf-8")
-            self.assertNotIn("https://", page)
-            self.assertIn(Path(paths["csv"]).name, page)
+            renderer = FakePNGRenderer()
+            paths = write_capture(temp, "synthetic_test", "x", capture, record,
+                                  simulated=True, renderer=renderer)
+            self.assertEqual(set(paths), {"png"})
+            self.assertTrue(Path(paths["png"]).read_bytes().startswith(b"\x89PNG"))
+            payload = renderer.calls[-1]
+            self.assertEqual(payload["trace"][-1][1], -6.0)
+            self.assertEqual(payload["record"]["threshold_g"], 3.0)
+            self.assertTrue(payload["simulated"])
+            self.assertIn("timestamp", payload)
 
     def test_chart_rejects_empty_stale_overflow_or_invalid_data_and_path_injection(self):
         for capture in ({"samples": []}, {"samples": [(1.0, 0, 0, 0)], "dropped": 1},
@@ -1768,7 +1794,7 @@ class PortableChartTests(unittest.TestCase):
                         {"samples": [(1.0, float("nan"), 0, 0)]}):
             with tempfile.TemporaryDirectory() as temp:
                 with self.assertRaises(ValueError):
-                    write_capture(temp, "run", "x", capture, {})
+                    write_capture(temp, "run", "x", capture, {}, renderer=FakePNGRenderer())
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaises(ValueError):
                 write_capture(temp, "../outside", "x", {}, {})

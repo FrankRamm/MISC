@@ -1,7 +1,9 @@
 """Synthetic final-coordinate lifecycle and stationary-noise contracts only."""
 import contextlib
+from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
+import re
 import types
 import unittest
 from unittest import mock
@@ -375,8 +377,10 @@ class NoiseWorkflowTests(unittest.TestCase):
             self.assertEqual(rig.owner.threshold_g, before["thresholds"])
             self.assertEqual(rig.toolhead.position, before["position"])
             self.assertEqual(rig.toolhead.kin.limits, before["limits"])
-            for paths in [result["summary_paths"]] + [item["capture_paths"] for item in result["iterations"]]:
+            for paths in [result["summary_paths"]]:
                 self.assertTrue(all(Path(path).is_file() for path in paths.values()))
+            self.assertTrue(all(not item["capture_paths"] for item in result["iterations"]))
+            self.assertEqual(len([path for path in Path(temp).rglob("*") if path.is_file()]), 1)
             for item in result["iterations"]:
                 self.assertAlmostEqual(item["record"]["noise_peak_g"]["z"], 0.02)
                 self.assertAlmostEqual(item["record"]["baseline_g"]["z"], 1.0)
@@ -457,8 +461,8 @@ class NoiseWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             rig = NoiseRig({"charts_directory": temp})
             export = workflow_module.write_noise_capture
-            def interrupt_export(directory, run_id, iteration, capture, record):
-                paths = export(directory, run_id, iteration, capture, record)
+            def interrupt_export(directory, run_id, iteration, capture, record, **kwargs):
+                paths = export(directory, run_id, iteration, capture, record, **kwargs)
                 if iteration == 3:
                     rig.owner.noise_session = None
                 return paths
@@ -467,6 +471,129 @@ class NoiseWorkflowTests(unittest.TestCase):
                     rig.workflow.cmd_NOISE(GCmd())
             self.assertEqual(rig.workflow.noise_seeds, {})
             self.assertEqual(rig.workflow.last_result["result"], "aborted")
+
+
+class PNGIntegrationTests(unittest.TestCase):
+    def test_motor_off_generation_during_noise_png_render_prevents_seed_even_if_motors_stay_disabled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = NoiseRig({"charts_directory": temp})
+            for line in rig.lines.values():
+                line.enabled = False
+            def interrupt(payload):
+                if payload["kind"] == "noise":
+                    rig.owner.operation_generation += 1
+            rig.workflow.renderer.on_render = interrupt
+            with mock.patch.object(workflow_module.logging, "exception"), self.assertRaises(CommandError):
+                rig.workflow.cmd_NOISE(GCmd())
+            self.assertEqual(rig.workflow.noise_seeds, {})
+            self.assertIsNone(rig.workflow.noise_recommendation)
+            self.assertEqual(rig.workflow.last_result["result"], "aborted")
+
+    def test_missing_renderer_or_cancelled_preflight_never_homes_or_releases_motors(self):
+        for mode in ("charts", "accuracy", "noise"):
+            for failure in ("missing", "cancel"):
+                with self.subTest(mode=mode, failure=failure):
+                    rig = NoiseRig() if mode == "noise" else Rig()
+                    before = rig.effects()
+                    def fail(payload):
+                        if failure == "cancel":
+                            rig.workflow.cmd_CANCEL(GCmd())
+                        else:
+                            raise RuntimeError("missing matplotlib")
+                    rig.workflow.renderer.on_render = fail
+                    callback = {"charts": rig.workflow.cmd_CHARTS,
+                                "accuracy": rig.workflow.cmd_ACCURACY,
+                                "noise": rig.workflow.cmd_NOISE}[mode]
+                    with self.assertRaisesRegex(CommandError, "PNG renderer"):
+                        callback(GCmd(CENTERED=1))
+                    self.assertEqual(rig.scripts, [])
+                    self.assertEqual(rig.toolhead.moves, [])
+                    self.assertEqual(rig.disabled, [])
+                    self.assertEqual(rig.toolhead.position, before["position"])
+                    self.assertEqual(rig.toolhead.kin.limits, before["limits"])
+                    self.assertIsNone(rig.workflow.session)
+
+    def test_chart_uses_verified_precise_detector_threshold_and_rejects_wrong_source(self):
+        for wrong in (False, True):
+            with self.subTest(wrong_source=wrong), tempfile.TemporaryDirectory() as temp:
+                rig = Rig({"charts_directory": temp})
+                rig.owner.threshold_g.update(x=0.001, y=0.002)
+                rig.home_results.extend([{"threshold_g": 0.0}, {"threshold_g": 0.0}])
+                if wrong:
+                    original = rig.owner.stop_capture
+                    def substituted():
+                        capture = original()
+                        capture["_record"] = dict(capture["_record"])
+                        return capture
+                    rig.owner.stop_capture = substituted
+                    with self.assertRaisesRegex(CommandError, "current detector"):
+                        rig.workflow.cmd_CHARTS(GCmd(CENTERED=1))
+                    self.assertEqual(rig.toolhead.moves, [])
+                else:
+                    rig.workflow.cmd_CHARTS(GCmd(CENTERED=1))
+                    captures = [item for item in rig.workflow.renderer.calls if item["kind"] == "capture"]
+                    self.assertEqual([item["record"]["threshold_g"] for item in captures], [0.001, 0.002])
+                    self.assertEqual(rig.owner.threshold_g, {"x": 0.001, "y": 0.002})
+
+    def test_same_user_socket_data_path_correlation_finds_root_and_ignores_nested_main_parent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            data, proc = base / "custom_printer_data", base / "proc"
+            (data / "config/nested").mkdir(parents=True)
+            (data / "config/moonraker.conf").write_text("[server]\n", encoding="utf-8")
+            process = proc / "123"
+            (process / "cwd").mkdir(parents=True)
+            (process / "cmdline").write_bytes(b"python\0moonraker.py\0-d\0" + str(data).encode() + b"\0")
+            socket = data / "comms/klippy.sock"
+            start = {"apiserver": str(socket), "config_file": str(data / "config/nested/printer.cfg")}
+            with mock.patch.object(workflow_module.os, "getuid", return_value=process.stat().st_uid, create=True):
+                found = workflow_module.verified_moonraker_config_root(start, proc)
+                self.assertEqual(Path(found), (data / "config").resolve())
+                self.assertIsNone(workflow_module.verified_moonraker_config_root(
+                    {"apiserver": str(base / "different.sock")}, proc))
+                (data / "config/moonraker.conf").write_text("[server]\n[include unknown.cfg]\n", encoding="utf-8")
+                self.assertIsNone(workflow_module.verified_moonraker_config_root(start, proc))
+
+    def test_inline_png_urls_are_escaped_and_unverified_outside_paths_have_no_img(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = Rig()
+            root = Path(temp) / "config"
+            root.mkdir()
+            png = root / "plot & date.png"
+            png.write_bytes(b"fixture")
+            rig.workflow.chart_config_root = str(root)
+            rig.workflow._show_pngs({"png": str(png)}, '<measured "chart">')
+            markup = [line for line in rig.output if "<img" in line]
+            self.assertEqual(len(markup), 1)
+            self.assertIn('/server/files/config/plot%20%26%20date.png', markup[0])
+            self.assertIn('&lt;measured &quot;chart&quot;&gt;', markup[0])
+            self.assertNotIn('<measured', markup[0])
+            rig.output.clear()
+            rig.workflow._show_pngs({"png": str(Path(temp) / "outside.png")}, "outside")
+            self.assertFalse(any("<img" in line for line in rig.output))
+
+    def test_fluidd_known_command_linkification_cannot_corrupt_png_attributes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = Rig()
+            root = Path(temp) / "config"
+            png = root / "PRINT_START/PRINT_START.png"
+            png.parent.mkdir(parents=True)
+            png.write_bytes(b"fixture")
+            rig.workflow.chart_config_root = str(root)
+            rig.workflow._show_pngs({"png": str(png)}, "PRINT_START")
+            markup = next(line for line in rig.output if "<img" in line)
+            linked = re.sub(r"([A-Z_][A-Z0-9_.]+)", lambda match:
+                            '<a class="command">PRINT_START</a>' if match.group() == "PRINT_START"
+                            else match.group(), markup)
+            self.assertEqual(linked, markup)
+            attributes = []
+            class Parser(HTMLParser):
+                def handle_starttag(self, tag, attrs):
+                    attributes.append((tag, dict(attrs)))
+            Parser().feed(linked)
+            expected = "/server/files/config/PRINT_START/PRINT_START.png"
+            self.assertEqual(attributes[0][1]["href"], expected)
+            self.assertEqual(attributes[2][1]["src"], expected)
         with tempfile.TemporaryDirectory() as temp:
             rig = NoiseRig({"charts_directory": temp})
             rig.workflow.cmd_NOISE(GCmd())
