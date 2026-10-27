@@ -31,6 +31,24 @@ working-directory identity, and bounded rejection diagnostics that omit raw
 environment/configuration and exception payloads. No affected-host cause or
 universal installation compatibility is established by this source review.
 
+The later runtime PNG-root discovery correction is also source-reviewed only.
+Six added discovery fixture methods cover environment-only module launches,
+argv/environment/home/CWD precedence, passwd fallback, the official omitted
+socket default, bounded allowlisted environment reads, UID/entrypoint guards
+and ambiguous matching PIDs. The older discovery fixture now states its socket
+explicitly instead of depending on the former incorrect `data/comms` fallback.
+No tests, imports, compilation, rendering or printer actions were performed for
+this correction. A saved-path preview advisory is separate from an accuracy
+capture-validation failure; no affected host's current route was verified.
+
+The companion impact-capture correction is source-reviewed only. Its regression
+source covers exact original packet/index proof, a unique retained onset row,
+separate original-trigger timing, and refusal of missing/altered/ambiguous proof.
+The copied report uses the actual retained row time without a tolerance or
+synthetic sample. No workflow/unit tests, imports, compilation, rendering or
+printer actions were executed for this revision; the historical suite below
+does not validate these changes or establish physical accuracy.
+
 Optional CHARTS `AXIS=X`/`AXIS=Y` selection was reviewed as source. Its five new
 workflow regression methods were not imported, compiled or executed. The
 fixtures cover early invalid-axis rejection, selected-axis capture/final release,

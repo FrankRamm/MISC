@@ -278,6 +278,7 @@ class Attempt:
         self.steppers = []
         self.halt_delta = None      # axis movement from start to halt, signed
         self.onset_batch = None
+        self.onset_sample = None    # original captured packet and selected sample
         self.onset_raw = 0.0
         self.impact_peak = 0.0
         self.impact_until = None
@@ -1648,6 +1649,7 @@ class BeaconAccelHoming:
             return
         start_clock = params["start_clock"]
         interval = params["delta_clock"] / (count - 1.0)
+        source_params, source_skip = params, 0
         expanded_native = self.backend is None and attempt.proof_noise is not None
         if expanded_native and (not math.isfinite(interval) or interval <= 0.0):
             self._fire(attempt, "invalid_data", mcu.MCU_trsync.REASON_HOST_REQUEST)
@@ -1662,6 +1664,7 @@ class BeaconAccelHoming:
             width = 3 if isinstance(data, tuple) else 6
             data = data[skip * width:]
             count -= skip
+            source_skip = skip
             start_clock = (start_clock + int(round(skip * interval))) & 0xFFFFFFFF
             params = dict(params, data=data, start_clock=start_clock,
                           delta_clock=int(round((count - 1) * interval)))
@@ -1771,9 +1774,9 @@ class BeaconAccelHoming:
                 elif abs(speed) >= AUTO_DIRECTION_SPEED:
                     attempt.auto_direction = -1 if speed > 0 else 1
             return
-        self._onset(attempt, params, values, count)
+        self._onset(attempt, params, values, count, source_params, source_skip)
 
-    def _onset(self, attempt, params, values, count):
+    def _onset(self, attempt, params, values, count, source_params=None, source_skip=0):
         base, map_sign = attempt.baseline, attempt.map_sign
         direction = attempt.direction or attempt.auto_direction
         # Clips are already decoded, so they pass the same direction check.
@@ -1785,6 +1788,12 @@ class BeaconAccelHoming:
             return
         start_clock = params["start_clock"]
         attempt.onset_batch = (start_clock, params["delta_clock"], position, count)
+        # Constant-size sample identity only; conversion and capture inspection
+        # remain after the trigger. Arm trimming must refer to the original
+        # packet retained by _inspect's finally block, including its last row.
+        source = params if source_params is None else source_params
+        attempt.onset_sample = (source["start_clock"], source["delta_clock"],
+                                position + source_skip, sample_count(source["data"]))
         attempt.onset_raw = value
         attempt.impact_until = (start_clock + self.impact_window) & 0xFFFFFFFF
         self._fire(attempt, "impact", mcu.MCU_trsync.REASON_ENDSTOP_HIT)
@@ -2079,12 +2088,23 @@ class BeaconAccelHoming:
         mapping = ([(0, 1), (1, 1), (2, 1)] if self.backend is not None
                    else self.helper.config.axes_map)
         detector = None
+        onset_sample = None if attempt is None else attempt.onset_sample
+        valid_onset_sample = (isinstance(onset_sample, (tuple, list)) and len(onset_sample) == 4
+                              and all(isinstance(value, int) and not isinstance(value, bool)
+                                      for value in onset_sample)
+                              and 0 <= onset_sample[0] <= 0xFFFFFFFF
+                              and 0 < onset_sample[1] <= 0xFFFFFFFF
+                              and onset_sample[3] >= 2
+                              and 0 <= onset_sample[2] < onset_sample[3])
         if attempt is not None and attempt.bases is not None:
             baseline = tuple(attempt.bases[index] * sign * attempt.count_g
                              for index, sign in mapping)
             detector = {"axis": attempt.axis, "arm_time_s": attempt.arm_time,
-                        "onset_time_s": (self.onset_time(attempt)
-                                         if attempt.onset_batch is not None else None),
+                        "onset_time_s": None,  # Filled only from a retained row below.
+                        "trigger_onset_time_s": (attempt.record.get("onset_time_s")
+                                                 if isinstance(attempt.record, dict) else None),
+                        "onset_sample_version": 1,
+                        "onset_sample": onset_sample,
                         "threshold_g": attempt.limit_raw * attempt.count_g,
                         "onset_g": (attempt.onset_raw * attempt.count_g
                                     if attempt.onset_batch is not None else None),
@@ -2095,8 +2115,13 @@ class BeaconAccelHoming:
                         "homing_accel_mm_s2": attempt.effective_accel,
                         "attempt_count": attempt_count}
         samples, previous = [], [0, 0, 0]
+        onset_matches, onset_index = 0, None
         for start_clock, delta_clock, data, count_g in batches:
             count = sample_count(data)
+            if valid_onset_sample and (start_clock, delta_clock, count) == (
+                    onset_sample[0], onset_sample[1], onset_sample[3]):
+                onset_matches += 1
+                onset_index = len(samples) + onset_sample[2]
             raw = (list(data) if isinstance(data, tuple)
                    else [v for row in SAMPLE.iter_unpack(sample_slice(data, count)) for v in row])
             if self.backend is None and CLIPPED in raw:
@@ -2108,6 +2133,13 @@ class BeaconAccelHoming:
                 xyz = raw[number * 3:number * 3 + 3]
                 samples.append((start + number * dt,) + tuple(
                     xyz[index] * sign * count_g for index, sign in mapping))
+        if detector is not None:
+            detector["onset_sample_matches"] = onset_matches
+            detector["onset_sample_index"] = onset_index if onset_matches == 1 else None
+            if onset_sample is not None and onset_matches == 1:
+                # Use the actual exported row, avoiding both later MCU clock
+                # adjustments and a different floating-point interpolation order.
+                detector["onset_time_s"] = samples[onset_index][0]
         if baseline is None and samples:
             resting = samples[:min(50, len(samples))]
             baseline = tuple(sum(row[i] for row in resting) / len(resting) for i in (1, 2, 3))
@@ -2124,6 +2156,7 @@ class BeaconAccelHoming:
             attempt.noise_neg = max(attempt.noise_neg, attempt.pending_noise[1])
             attempt.noise_checked = max(attempt.noise_checked, attempt.pending_noise[2])
         onset = attempt.onset_batch is not None
+        recorded_onset = self.onset_time(attempt) if onset else None
         velocity = self._velocity(attempt)
         result = {
             "axis": attempt.axis,
@@ -2142,11 +2175,12 @@ class BeaconAccelHoming:
             "moving": attempt.moving,
             "motion_seen": attempt.motion_seen or attempt.moving,
             "arm_time_s": attempt.arm_time,
-            "onset_time_s": self.onset_time(attempt) if onset else None,
+            "onset_time_s": recorded_onset,
+            "onset_sample": attempt.onset_sample,
             "start_position_mm": attempt.start_position,
             "expected_travel_mm": attempt.expected_travel,
             "backend": "beacon_raw" if self.backend is None else self.backend.kind,
-            "trigger_after_arm_s": round(self.onset_time(attempt) - attempt.arm_time, 4) if onset else None,
+            "trigger_after_arm_s": round(recorded_onset - attempt.arm_time, 4) if onset else None,
         }
         if attempt.motion_deadline is not None:
             result["motion_proof"] = self._motion_proof_status(attempt)

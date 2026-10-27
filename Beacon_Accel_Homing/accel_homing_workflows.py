@@ -54,6 +54,43 @@ NOISE_ITERATIONS = 3
 NOISE_DURATION = 1.0
 
 
+def _moonraker_read_bytes(path, limit):
+    with path.open("rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("Moonraker discovery input exceeds its byte bound")
+    return data
+
+
+def _moonraker_path_environment(process):
+    allowed = {b"HOME", b"MOONRAKER_DATA_PATH", b"MOONRAKER_CONFIG_PATH"}
+    environment = {}
+    for field in _moonraker_read_bytes(process / "environ", 65536).split(b"\0"):
+        key, separator, value = field.partition(b"=")
+        if separator and key in allowed:
+            name = key.decode("ascii")
+            if name in environment:
+                raise ValueError("ambiguous Moonraker path environment")
+            environment[name] = value.decode("utf-8")
+    return environment
+
+
+def _moonraker_expand_path(value, environment, uid):
+    if value.startswith("~"):
+        home = environment.get("HOME")
+        if home is None:
+            try:
+                import pwd
+                home = pwd.getpwuid(uid).pw_dir
+            except (ImportError, KeyError):
+                home = None
+        if (not home or not Path(home).is_absolute()
+                or (value != "~" and not value.startswith("~/"))):
+            raise ValueError("cannot establish Moonraker user-home expansion")
+        value = home.rstrip("/") + value[1:] or "/"
+    return Path(value)
+
+
 def verified_moonraker_config_root(start_args, proc_root="/proc"):
     """Correlate one same-user Moonraker data path to this Klippy Unix socket.
 
@@ -63,7 +100,7 @@ def verified_moonraker_config_root(start_args, proc_root="/proc"):
     socket = start_args.get("apiserver")
     if not socket or not hasattr(os, "getuid"):
         return None
-    expected, roots = Path(socket).expanduser().resolve(), set()
+    expected, roots = Path(socket).expanduser().resolve(), []
     try:
         processes = list(Path(proc_root).iterdir())
     except OSError:
@@ -72,48 +109,54 @@ def verified_moonraker_config_root(start_args, proc_root="/proc"):
         if not process.name.isdigit():
             continue
         try:
-            if process.stat().st_uid != os.getuid():
+            uid = process.stat().st_uid
+            if uid != os.getuid():
                 continue
-            data = (process / "cmdline").read_bytes()
-            if len(data) > 65536:
-                continue
+            data = _moonraker_read_bytes(process / "cmdline", 65536)
             argv = [part.decode("utf-8") for part in data.split(b"\0") if part]
             indexes = [index for index, value in enumerate(argv) if Path(value).name == "moonraker.py"]
             indexes += [index + 1 for index, value in enumerate(argv[:-1])
                         if value == "-m" and argv[index + 1] == "moonraker"]
             if len(indexes) != 1:
                 continue
+            environment = _moonraker_path_environment(process)
             options = {}
             iterator = iter(argv[indexes[0] + 1:])
             for value in iterator:
                 key, separator, inline = value.partition("=")
                 if key in ("-d", "--datapath", "-c", "--configfile"):
-                    options[key] = inline if separator else next(iterator, "")
-            raw_data = options.get("-d", options.get("--datapath"))
-            if not raw_data:
-                continue
+                    name = "data" if key in ("-d", "--datapath") else "config"
+                    options[name] = inline if separator else next(iterator, "")
+                elif (key.startswith(("-d", "-c")) or
+                      (key.startswith("--") and any(option.startswith(key)
+                                                     for option in ("--datapath", "--configfile")))):
+                    raise ValueError("unsupported Moonraker path argument form")
+            raw_data = options.get("data", environment.get("MOONRAKER_DATA_PATH"))
             cwd = (process / "cwd").resolve()
-            data_path = Path(raw_data).expanduser()
-            data_path = (data_path if data_path.is_absolute() else cwd / data_path).resolve()
-            raw_config = options.get("-c", options.get("--configfile"))
-            config_path = Path(raw_config).expanduser() if raw_config else data_path / "config/moonraker.conf"
-            config_path = config_path if config_path.is_absolute() else cwd / config_path
-            encoded = config_path.read_bytes()
-            if len(encoded) > 262144:
+            if not cwd.is_dir():
                 continue
+            data_path = _moonraker_expand_path(raw_data or "~/printer_data", environment, uid)
+            data_path = (data_path if data_path.is_absolute() else cwd / data_path).resolve()
+            raw_config = options.get("config", environment.get("MOONRAKER_CONFIG_PATH"))
+            config_path = (_moonraker_expand_path(raw_config, environment, uid)
+                           if raw_config is not None else data_path / "config/moonraker.conf")
+            config_path = config_path if config_path.is_absolute() else cwd / config_path
+            encoded = _moonraker_read_bytes(config_path, 262144)
             parser = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=("#", ";"))
             parser.read_string(encoded.decode("utf-8"))
-            if any(section.lower().startswith("include ") for section in parser.sections()):
+            if not parser.has_section("server") or any(
+                    re.match(r"include\s", section, re.I) for section in parser.sections()):
                 continue
-            raw_socket = parser.get("server", "klippy_uds_address", fallback=str(data_path / "comms/klippy.sock"))
+            raw_socket = parser.get("server", "klippy_uds_address", fallback="/tmp/klippy_uds")
             if any(character in raw_socket for character in ("{", "}", "$", "%", "\n")):
                 continue
-            actual_socket = Path(raw_socket).expanduser()
-            if not actual_socket.is_absolute() or actual_socket.resolve() != expected:
+            actual_socket = _moonraker_expand_path(raw_socket, environment, uid)
+            if (not (actual_socket.is_absolute() or raw_socket.startswith("/"))
+                    or actual_socket.resolve() != expected):
                 continue
             root = (data_path / "config").resolve()
             if root.is_dir():
-                roots.add(str(root))
+                roots.append(str(root))
         except (OSError, UnicodeError, ValueError, configparser.Error):
             continue
     return next(iter(roots)) if len(roots) == 1 else None
@@ -1021,12 +1064,63 @@ class AccelHomingWorkflows:
         samples = capture["samples"]
         if not samples[0][0] < arm <= samples[-1][0]:
             raise self._error("homing capture lacks the current pre-arm reference or armed samples")
-        if record.get("result") == "impact" and (
-                not finite(onset) or detector.get("onset_time_s") != onset
-                or not arm <= onset <= samples[-1][0]
-                or not finite(detector.get("onset_g"))
-                or not finite(detector.get("impact_peak_g")) or detector["impact_peak_g"] < 0):
-            raise self._error("homing capture lacks the current measured impact")
+        if record.get("result") == "impact":
+            captured_onset = detector.get("onset_time_s")
+            def stamp(value):
+                if (not isinstance(value, (tuple, list)) or len(value) != 4
+                        or not all(isinstance(item, int) and not isinstance(item, bool) for item in value)
+                        or not 0 <= value[0] <= 0xFFFFFFFF or not 0 < value[1] <= 0xFFFFFFFF
+                        or value[3] < 2 or not 0 <= value[2] < value[3]):
+                    return None
+                return tuple(value)
+            def missing_impact(reason):
+                number = lambda value: value if finite(value) else None
+                diagnostics = {"reason": reason, "axis": axis, "sample_count": len(samples),
+                               "first_sample_time_s": samples[0][0], "last_sample_time_s": samples[-1][0],
+                               "arm_time_s": arm, "recorded_onset_time_s": number(onset),
+                               "capture_onset_time_s": number(captured_onset),
+                               "onset_sample": stamp(source_record.get("onset_sample")),
+                               "capture_onset_sample": stamp(detector.get("onset_sample")),
+                               "onset_sample_matches": number(detector.get("onset_sample_matches")),
+                               "onset_sample_index": number(detector.get("onset_sample_index")),
+                               "onset_g": number(detector.get("onset_g")),
+                               "impact_peak_g": number(detector.get("impact_peak_g"))}
+                record["capture_diagnostics"] = diagnostics
+                detail = lambda value: "unknown" if value is None else "%.17g" % value
+                raise self._error("homing capture lacks the current measured impact "
+                                  "(%s; recorded onset=%s, capture onset=%s, last sample=%s; "
+                                  "matches=%s, index=%s, samples=%d)" % (
+                                      reason, detail(diagnostics["recorded_onset_time_s"]),
+                                      detail(diagnostics["capture_onset_time_s"]),
+                                      detail(diagnostics["last_sample_time_s"]),
+                                      detail(diagnostics["onset_sample_matches"]),
+                                      detail(diagnostics["onset_sample_index"]), len(samples)))
+            if (not finite(onset) or not finite(detector.get("onset_g"))
+                    or not finite(detector.get("impact_peak_g")) or detector["impact_peak_g"] < 0):
+                missing_impact("invalid measured impact values")
+            source_stamp = stamp(source_record.get("onset_sample"))
+            capture_stamp = stamp(detector.get("onset_sample"))
+            if (type(detector.get("onset_sample_version")) is not int
+                    or detector["onset_sample_version"] != 1
+                    or source_stamp is None or capture_stamp != source_stamp):
+                missing_impact("missing or changed raw onset sample identity")
+            index = detector.get("onset_sample_index")
+            if (type(detector.get("onset_sample_matches")) is not int
+                    or detector["onset_sample_matches"] != 1
+                    or type(index) is not int or not 0 <= index < len(samples)):
+                missing_impact("onset packet/sample was not retained exactly once")
+            if (not finite(captured_onset) or detector.get("trigger_onset_time_s") != onset
+                    or samples[index][0] != captured_onset):
+                missing_impact("retained onset does not match the current detector/sample")
+            if not arm <= onset or not arm <= captured_onset <= samples[-1][0]:
+                missing_impact("onset lies outside the armed capture")
+            # A later MCU clock adjustment may change chart timestamps.
+            # Keep the original homing timestamp and align only this copied
+            # report to its proven retained row; the detector is untouched.
+            record["trigger_onset_time_s"] = onset
+            record["onset_time_s"] = captured_onset
+            record["capture_onset_sample_index"] = index
+            record["capture_clock_shift_s"] = captured_onset - onset
         record["threshold_g"] = detector["threshold_g"]
         record["onset_g"] = detector.get("onset_g")
         record["impact_peak_g"] = detector.get("impact_peak_g")
