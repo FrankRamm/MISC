@@ -195,6 +195,17 @@ Ambiguous/foreign instances or conflicting updater settings stop installation
 before printer configuration is replaced. `--moonraker-config` can select a
 candidate, but it still must match the chosen Klippy instance.
 
+If discovery reports `0 matches`, read the selected Klipper socket and bounded
+candidate/rejection details printed with the error. They distinguish an
+unreadable process environment, unsupported configuration/include syntax and a
+socket mismatch. Run as the selected service user. `--moonraker-config` filters
+verified candidates; it does not create a missing instance. An omitted
+`klippy_uds_address` uses Moonraker's `/tmp/klippy_uds` default; configured relative
+paths resolve against its process working directory. The installer resolves
+literal `{data_path}` and leaves other template expressions unsupported.
+See Moonraker's [socket default](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/components/klippy_connection.py#L63-L65)
+and [path resolution](https://github.com/Arksine/moonraker/blob/b559b9a81161f958a43c2f527b6ad96f73310d5d/moonraker/confighelper.py#L433-L443).
+
 The generated include is `accel_homing_update.cfg`, containing
 `[update_manager accel_homing]`. The installer records its ownership separately
 and rechecks conflicting includes/stanzas before writes. The dedicated repo
