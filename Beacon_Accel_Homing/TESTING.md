@@ -1,5 +1,30 @@
 # Offline verification
 
+## Impact-after-20 mm discovery and selected-axis centering
+
+The updated package passed **708 offline tests** with no failures, errors or
+skips using `python -B -m unittest discover -s Beacon_Accel_Homing/tests -v`.
+`git diff --check` passed. No printer hardware or service was accessed.
+
+This revision corrects the preceding screening design: crossing 20 mm is
+never success. Both discovery and validation require a threshold-crossing
+impact with commanded travel strictly greater than 20 mm. The initial hit
+is excluded; only the selected X/Y axis returns to its configured midpoint,
+then ten following impacts define the max-minus-min spread. Exactly 2 mm
+passes; a larger completed set raises the threshold by STEP and requires a
+new discovery impact and ten new measurements.
+
+Regressions cover both movement axes and both homing directions; full G28
+rather than a bounded no-contact screen; a live sensor stream beyond 20 mm
+without a trigger; no-impact rejection; the exact 20 mm boundary using unrounded
+travel; exclusion of an off-center discovery; unchanged other-axis/Z return
+coordinates; failed-set restart requiring another impact; unchanged command
+syntax and resume grid; rejecting obsolete screen-only records at save time;
+and existing vector detection, sensor faults, ceilings and cleanup. Stock
+G28's fatal all-motor-off handling is preserved, including on discovery errors.
+
+Historical sections below describe their own revisions, not current behavior.
+
 ## Simple vector calibration with 20 mm screening — 2026-10-27
 
 The integrated package passed **704 offline tests**, including **29 new**

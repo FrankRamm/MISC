@@ -4,9 +4,10 @@
 
 [Simple calibration](SIMPLE_CALIBRATION.md) replaces the selected-axis velocity-
 proof workflow for CALIBRATE and its newly saved vector models. It requires
-Klipper/Kalico HomingMove with `probe_pos=True, check_triggered=False` for the
-bounded 20 mm screen, then ten impact measurements. A >2 mm complete-set spread
-raises the candidate and restarts. Old models/manual overrides retain the
+a discovery impact after >20 mm using verified stock single-axis G28, then
+ten impact measurements from the selected axis's configured midpoint. Merely
+crossing 20 mm never qualifies a candidate. A >2 mm complete-set spread raises
+the candidate and restarts discovery. Old models/manual overrides retain the
 legacy algorithms described below. Offline tests cover both paths; neither
 commands nor step counts establish actual physical position.
 
