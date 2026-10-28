@@ -6,14 +6,18 @@
 proof workflow for CALIBRATE and its newly saved vector models. It requires
 a discovery impact after >20 mm using verified stock single-axis G28, then
 ten impact measurements from the selected axis's configured midpoint. Merely
-crossing 20 mm never qualifies a candidate. A >2 mm complete-set spread raises
-the candidate and restarts discovery. Old models/manual overrides retain the
-legacy algorithms described below. Offline tests cover both paths; neither
+crossing 20 mm never qualifies a candidate. Each impact beyond 20 mm must fit
+the configured midpoint-to-endstop distance within the existing tolerance
+(default 20%). A >2 mm running spread immediately raises the candidate and
+restarts discovery; passing still requires ten checks. An implausible >20 mm
+hit aborts without automatic recentering. Old models/manual overrides retain the
+legacy algorithms described below. Regression sources cover both paths; neither
 commands nor step counts establish actual physical position.
 
 Historical offline verification is recorded in [TESTING.md](../TESTING.md).
-The new built-in `homing_override` support and regression source were reviewed
-without execution. No new sensor, printer, homing impact,
+The current calibration validation/return changes and the new built-in
+`homing_override` support were reviewed from source without execution.
+No new sensor, printer, homing impact,
 calibration or first-layer result was tested on hardware. The original
 Beacon-only project's historical printer reports are not evidence that these
 changes work on every ADXL carrier, firmware version, fork or mechanism.
@@ -484,25 +488,36 @@ cap before reaching the configured threshold ceiling or completing validation;
 this change does not add automatic attempts.
 One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
-Calibration temporarily caps that return at `homing_accel` without raising a
-lower live value; zero leaves it unchanged. After `manual_move` and
-`wait_moves` complete, it queues `calibration_settle_time` (default 0.25 s,
-finite 0-2 s) and waits for that dwell to finish before the next acquisition.
-Zero disables only this extra wait. Session identity is checked after yielding
-operations, and acceleration is restored in `finally` after success, failure
-or cancellation. The cap/wait apply only to calibration returns; other
-workflow return behavior and all homing thresholds remain unchanged.
+CALIBRATE and ACCURACY use the same helper for midpoint returns at ordinary
+acceleration restored after homing. After the return completes, each waits for
+`calibration_settle_time` (default 0.25 s, finite 0-2 s) before the next
+acquisition. Zero disables only this extra wait. Session identity is checked
+after yielding operations. Homing speed, the acceleration cap during homing,
+thresholds and TEST/CHARTS return behavior are unchanged.
 
 Discovery requires an impact after more than 20 mm of commanded travel. The
 discovery impact is excluded from the following ten centered checks; their
-max-minus-min spread must be at most 2 mm. A larger completed window raises
-the candidate and restarts discovery and all ten checks.
+max-minus-min spread must be at most 2 mm. The running spread is checked after
+every accepted impact; >2 mm immediately raises the candidate and restarts
+discovery and all ten checks.
+For discovery and every validation impact beyond 20 mm, commanded trigger
+travel must also lie inside the inclusive band
+`expected * (1 - calibration_travel_tolerance)` through
+`expected * (1 + calibration_travel_tolerance)`, where `expected` is the absolute
+configured midpoint-to-endstop distance and the existing tolerance defaults
+to 0.20. Outside this band, the endstop coordinate is untrustworthy: the run
+aborts, invalidates only the selected axis's homed state, and requires manual
+XY centering before a new command. It does not return, raise the threshold or
+write a model. Other-axis/Z state is preserved. This checks commanded-travel
+plausibility, not actual position or contact with the intended stop.
 An impact at or before 20 mm instead uses recorded signed start-to-halt travel
 to return only the selected axis to its estimated starting point, settles,
 and retries discovery automatically at the next candidate. It clears the
 selected axis's homed state and the validation window. There is no manual
 fallback when return checks fail. Sensor faults, missing or uncertain evidence
 and homing errors abort; stock homing errors may release all motors.
+These bounded early reversals retain their existing homing acceleration cap
+and configured settling wait.
 See [SIMPLE_CALIBRATION.md](SIMPLE_CALIBRATION.md) for the per-return bounds
 and commanded-travel limitations.
 

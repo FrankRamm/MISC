@@ -442,11 +442,18 @@ Each retry raises the current candidate by the selected step. An explicit
 performing the noise measurement. No prior standalone NOISE result is reused.
 Use `AXIS=Y` to calibrate only Y instead.
 
-An impact beyond 20 mm selects the candidate, followed by ten centered checks.
-Their commanded-travel range (`max - min`) must be **at most 2.00 mm**; exactly
-2 mm passes. A larger completed window raises the threshold and restarts
-discovery and all ten checks. Step travel does not prove physical position or
-correct endstop contact. See the [current calibration sequence and return
+Discovery and each validation impact beyond 20 mm must fit the configured
+midpoint-to-endstop distance within `calibration_travel_tolerance` (default
+20%). An implausible >20 mm hit aborts without recentering; physically center
+XY before a new command. A plausible discovery is followed by ten centered
+checks. Their commanded-travel range (`max - min`) must be **at most 2.00 mm**;
+exactly 2 mm passes. A running spread greater than 2 mm rejects the candidate
+immediately and restarts discovery and all ten checks at the next threshold.
+CALIBRATE and ACCURACY midpoint returns use ordinary acceleration and the same
+explicit settling wait, default 0.25 s. Early reversals keep their existing
+cap and wait; homing speed and its acceleration cap are unchanged.
+These checks do not prove physical position or correct endstop contact.
+See the [current calibration sequence and return
 limits](SIMPLE_CALIBRATION.md).
 
 Calibration and saved models accept finite values from 0.5 g; existing models

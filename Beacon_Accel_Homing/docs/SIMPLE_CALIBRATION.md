@@ -65,39 +65,69 @@ error. Host-delivered sensor data does not provide a hard real-time stop bound.
 
 1. Home the selected printer axis toward its mechanical endstop, watching
    acceleration throughout. **Reaching 20 mm alone does not stop the move or
-   select a candidate.** Discovery requires an actual threshold-crossing impact
-   after **more than 20 mm** of commanded travel.
+   select a candidate.** Discovery requires a threshold-crossing impact after
+   **more than 20 mm** of commanded travel that also passes the travel
+   plausibility check below.
 2. An impact at **20 mm or less** stops immediately. If the return checks below
    pass, reverse the selected axis's recorded signed start-to-halt travel,
    including travel after the trigger, to its **estimated starting point**.
    Settle and restart discovery automatically at the next configured threshold
    step, with the previous candidate and measurements cleared. Exactly 20 mm
    is still an early hit; no further command or manual recentering is needed.
-3. The first impact **beyond 20 mm** selects the candidate. Stock axis homing
-   assigns the endstop coordinate. Move **only that printer axis** to its
+3. The first plausible impact **beyond 20 mm** selects the candidate. Stock
+   axis homing assigns the endstop coordinate before its result is checked.
+   After the travel check passes, move **only that printer axis** to its
    configured midpoint `(position_min + position_max) / 2`. The discovery
    distance is excluded from repeatability because its start was manual.
 4. At the unchanged threshold, run **ten** center-to-impact trips, returning
    only the calibrated axis to that same configured midpoint between trips.
-   Record commanded step distance at each first acceleration threshold crossing.
+   Record commanded step distance at each first acceleration threshold crossing
+   and check its travel plausibility before another automatic move.
    A validation impact at or below 20 mm rejects the candidate and follows the
    same automatic early-impact return and new discovery in step 2. A sensor
    fault or missing impact aborts without a return or an increase in g.
-5. After all ten checks, calculate **maximum distance minus minimum distance**,
-   not statistical variance and not just consecutive differences. A spread
-   **at most 2.00 mm passes**. If it is **greater than 2.00 mm**, advance one
-   threshold step, discard the candidate and all ten values, recenter the
-   calibrated axis, and restart **impact discovery** with an empty window.
-   The new discovery impact also stays outside its following ten measurements.
-   All cycles share the configured attempt and threshold ceilings.
+5. After **each** accepted validation impact, calculate the running **maximum
+   distance minus minimum distance**, not statistical variance or just
+   consecutive differences. If the spread is **greater than 2.00 mm**, reject
+   the candidate immediately without waiting for ten checks. Advance one
+   threshold step, discard the candidate and its values, recenter the calibrated
+   axis, and restart **impact discovery** with an empty window. Passing still
+   requires **ten** validation impacts with a spread **at most 2.00 mm**;
+   exactly 2.00 mm passes. The new discovery impact also stays outside its
+   following ten measurements. All cycles share the configured attempt and
+   threshold ceilings.
 
 Discovery and validation use the same verified stock single-axis G28 path.
 There is no standalone 20 mm probe move or successful no-contact endpoint.
 Only returns after qualifying impacts target the configured midpoint.
-Returns use the existing homing acceleration cap and `calibration_settle_time`
-(default 0.25 s). No return command changes the other XY coordinate or Z.
+CALIBRATE and ACCURACY share the helper for midpoint returns. These returns use
+ordinary acceleration restored after homing, then wait `calibration_settle_time`
+(default 0.25 s) before the next acquisition. They do not apply the homing
+acceleration cap to midpoint returns. Homing speed and its acceleration cap
+are unchanged. No return command changes the other XY coordinate or Z.
 Cancellation/failure restores settings; stock G28's fatal error handling may
 turn off all motors, including Z. Keep Z supported as for ordinary homing faults.
+
+## Travel plausibility before midpoint returns
+
+Discovery and every validation impact beyond 20 mm must agree with the
+configured midpoint-to-endstop distance. Let `expected` be the absolute
+distance from `(position_min + position_max) / 2` to `position_endstop`.
+The recorded commanded trigger travel must fall inside the inclusive band
+`expected * (1 - calibration_travel_tolerance)` through
+`expected * (1 + calibration_travel_tolerance)`. The existing tolerance defaults
+to `0.20` (20%); this is separate from the 2 mm repeatability limit.
+
+An impact **beyond 20 mm outside this band aborts immediately**. The assigned
+endstop coordinate is untrustworthy, so the workflow invalidates only the
+selected axis's homed state and does not reverse, return to the midpoint,
+raise the threshold or save a model. The other XY axis and Z are preserved.
+Physically center XY and prepare a new command after the abort. An impact at
+or below 20 mm still follows the bounded early-return checks below.
+
+This is a commanded-travel plausibility check, not a measurement of the manual
+starting position or proof of contact with the intended stop. Skipped steps,
+slip or an obstruction can still produce plausible recorded travel.
 
 ## Automatic early-impact returns
 
@@ -116,7 +146,9 @@ per-return limits:
 The existing attempt budget and next-candidate threshold ceiling are checked
 before returning. These limits apply to each early return; there is no separate
 cumulative return-distance budget. The **2 mm trigger-to-halt allowance** is
-independent of the **2 mm ten-check repeatability limit**.
+independent of the **2 mm running-spread repeatability limit**.
+Early reversals keep their existing homing acceleration cap and
+`calibration_settle_time` wait (default 0.25 s).
 
 The reverse target is the current coordinate assigned by stock G28 minus the
 recorded signed start-to-halt displacement; the return does not reset coordinates.
@@ -148,6 +180,10 @@ overrides retain their legacy detector. Leave manual overrides commented out
 to use the new calibrated model; thresholds from different metrics are not
 interchangeable. Existing axes_map remains useful for other Klipper features.
 
+New calibration metadata also records `travel_plausibility_required: true`,
+`recenter_acceleration_policy: restored_normal_limit` and the configured
+settling interval. `physical_position_verified` remains false.
+
 `ACCEL_HOMING_CALIBRATE_NOISE` remains a separate stationary diagnostic. Its
 mapped X/Y component hints do not select a later calibration's initial value;
 that calibration uses its own fresh XYZ-magnitude measurement.
@@ -163,6 +199,6 @@ assume no skipped steps, slipping belts or blocked motion. Repeatable contact
 with the wrong obstruction can pass. An impact beyond 20 mm is a candidate,
 not independent proof that the intended endstop was reached. Assigning an
 endstop coordinate and returning to its midpoint assumes genuine contact;
-supervise actual travel and stop on unexpected behavior. This stationary-noise
-preflight revision was reviewed from source only; its regression sources were
+supervise actual travel and stop on unexpected behavior. This calibration
+validation revision was reviewed from source only; its regression sources were
 not run and no printer hardware or service was accessed.

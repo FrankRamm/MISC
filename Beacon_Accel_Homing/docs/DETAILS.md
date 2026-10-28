@@ -301,10 +301,14 @@ use `START_THRESHOLD=1 STEP=0.25`; the noise measurement still runs first.
 X or Y selects movement; all three sensor channels contribute to the
 baseline-subtracted magnitude. Discovery continues until an impact; reaching
 20 mm alone never selects a candidate. An impact after strictly more than
-20 mm qualifies the candidate, then only that axis returns to its configured
-midpoint. Only the following ten centered impacts count toward repeatability.
-A ten-check spread <=2 mm passes; >2 mm increases by STEP, clears the whole
-window, recenters that axis and restarts impact discovery. An impact at or
+20 mm must fit the configured midpoint-to-endstop distance within the existing
+`calibration_travel_tolerance` (default 20%). This applies to discovery and
+every validation impact. A plausible discovery selects the candidate, then
+only that axis returns to its configured midpoint. Only the following ten
+centered impacts count toward repeatability. The running max-minus-min spread
+is checked after every accepted impact: >2 mm immediately increases by STEP,
+clears the window, recenters that axis and restarts discovery. Passing still
+requires ten checks with spread <=2 mm. An impact at or
 before 20 mm stops immediately, then automatically reverses recorded signed
 halted travel to the estimated starting point if the return checks pass.
 It settles and restarts discovery at the next STEP candidate; START_THRESHOLD/STEP
@@ -313,12 +317,19 @@ budget includes discovery and validation across all retries; the default
 threshold ceiling remains 12 g or 80% of range. Sensor faults or a move with
 no impact abort instead of raising thresholds. Missing, stale or inconsistent
 return evidence also aborts; it never authorizes automatic fault recovery.
+An impact beyond 20 mm outside the inclusive expected-distance tolerance band
+aborts without a return, threshold increase or model write. Only the suspect
+axis's homed state is invalidated; the operator must physically center XY
+and prepare a new command. This guards plausibility, not physical contact.
 
 The initial physical center is confirmed by the operator while XY is unhomed.
 Discovery and validation both use verified stock axis homing. After a qualifying
 impact, the selected axis is returned to `(position_min + position_max) / 2`.
-Both return types keep the existing acceleration cap and default 0.25 s settling
-interval. Other axes are not commanded to move. Midpoint centering assumes the
+CALIBRATE and ACCURACY use the same helper for midpoint returns with ordinary
+acceleration restored after homing and an explicit `calibration_settle_time`
+wait (default 0.25 s) after the return. Early reversals keep their existing
+homing acceleration cap and settling wait. Homing speed and its cap are unchanged.
+Other axes are not commanded to move. Midpoint centering assumes the
 accepted impact was the endstop; early returns estimate the previous starting
 point from commanded steps. Neither provides encoder feedback. Stock G28 fatal
 errors may disable all motors, so keep Z supported. New saved models preserve
@@ -530,9 +541,10 @@ interval, acceleration or current to admit a requested speed.
 
 The **2 mm simple-calibration rule is a separate repeatability test**:
 `max(distance) - min(distance) <= 2.0 mm` across ten validation impacts,
-excluding the discovery impact. A failed complete set advances the candidate and
-requires a new impact beyond 20 mm before ten fresh centered checks. Legacy ACCURACY retains its existing
-qualification limits; it is not the simple calibration command.
+excluding discovery. The running spread is checked after each impact; >2 mm
+rejects immediately and requires a new discovery before ten fresh checks.
+ACCURACY reports the measured spread without applying calibration's 2 mm
+acceptance rule; its existing per-home qualification remains in use.
 It is not a per-home travel cap or a physical stopping-distance guarantee.
 Neither the startup deadline nor optional nominal travel limits include
 unbounded host stalls, transport/MCU stop delay or the machine's mechanical
@@ -566,8 +578,10 @@ configured final back-off; no return to center follows a single-axis capture.
 It first qualifies a home, excludes it from statistics, returns that trusted
 axis to center and records the requested number of additional homes. Each
 accepted home is followed by a return of that axis to center only when another
-home or axis is needed. Thresholds, homing speed and current remain unchanged;
-the command neither stages a model nor saves configuration or restarts Klipper.
+home or axis is needed. Thresholds, homing speed and current remain unchanged.
+Midpoint returns use the same ordinary acceleration and explicit settling wait
+as calibration, representing the usual return conditions between homes.
+The command neither stages a model nor saves configuration or restarts Klipper.
 A suspect home aborts without another automatic move. Use the accessible
 emergency stop if active movement must be interrupted; `ACCEL_HOMING_CANCEL`
 is not an immediate emergency stop for a running console command.
