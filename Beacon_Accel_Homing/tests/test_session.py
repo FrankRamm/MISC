@@ -365,7 +365,7 @@ class StatusTest(unittest.TestCase):
         self.assertIn("ordinary homing requires quiet XYZ", policy)
         self.assertIn("fresh 100.00 ms / 50 sample reference", policy)
         self.assertIn("without a quiet-range limit", policy)
-        self.assertIn("measured noise bounds remain active", policy)
+        self.assertIn("no acceleration-derived motion proof for XYZ magnitude", policy)
 
     def test_status_is_a_copy(self):
         obj = make_homing()

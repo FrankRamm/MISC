@@ -1,5 +1,15 @@
 # Compatibility evidence and limits
 
+## Current simple-calibration exception
+
+[Simple calibration](SIMPLE_CALIBRATION.md) replaces the selected-axis velocity-
+proof workflow for CALIBRATE and its newly saved vector models. It requires
+Klipper/Kalico HomingMove with `probe_pos=True, check_triggered=False` for the
+bounded 20 mm screen, then ten impact measurements. A >2 mm complete-set spread
+raises the candidate and restarts. Old models/manual overrides retain the
+legacy algorithms described below. Offline tests cover both paths; neither
+commands nor step counts establish actual physical position.
+
 Historical offline verification is recorded in [TESTING.md](../TESTING.md).
 The new built-in `homing_override` support and regression source were reviewed
 without execution. No new sensor, printer, homing impact,

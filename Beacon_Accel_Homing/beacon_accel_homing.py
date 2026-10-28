@@ -5,7 +5,8 @@
 # home. The homing axis is watched in either direction until the toolhead
 # travels, then only against the travel (or in a configured direction). A
 # legacy Beacon path recognizes pressed starts from commanded versus measured
-# motion. Configured batch sensors fail homing if startup motion is unverified.
+# motion. Legacy configured batch sensors require startup motion proof. Simple
+# calibration and its saved models use XYZ magnitude and commanded travel instead.
 #
 # Experimental. The inherited upstream Beacon implementation reports use on
 # three printers; these generic adapters have only been tested synthetically.
@@ -311,6 +312,8 @@ class Attempt:
         self.pending_noise = (0.0, 0.0, 0.0)
         self.bases = None           # resting reading of all three sensor axes
         self.sums = [0.0, 0.0, 0.0]  # integrated readings since the pass started
+        self.vector_mode = False   # XYZ magnitude; no acceleration-derived motion proof
+        self.vector_unchanged_since = None
         self.proof_noise = None    # measured uncertainty for calibration/expanded references
         self.proof_state = None    # atomic (sums, sample count, dt, end clock) for that proof
         self.proof_speed_peak = 0.0  # conservative lower bound, before the startup deadline
@@ -990,7 +993,8 @@ class BeaconAccelHoming:
                 and any(rail is self.session_axes[attempt.axis] for rail in rails)):
             record = attempt.record
             accepted = (attempt.reason == "impact" and
-                        (record.get("moving") or record.get("motion_seen"))) or (
+                        (record.get("moving") or record.get("motion_seen")
+                         or record.get("impact_metric") == "xyz_magnitude")) or (
                             attempt.reason == "pressed" and record.get("kept_origin"))
             if accepted and self.last.get(attempt.axis) is record:
                 context["rails"][attempt.axis] = (self.session_axes[attempt.axis], record)
@@ -1023,7 +1027,8 @@ class BeaconAccelHoming:
             reference = QuietReference(axis, cutoff, self.baseline_time,
                                        self._reference_noise_limit(axis) / count_g,
                                        threshold_g=self.threshold_g[axis],
-                                       require_quiet=not self.workflows.calibration_reference(axis))
+                                       require_quiet=not (self.workflows.calibration_reference(axis)
+                                                          or self._uses_vector_detector(axis)))
             with self.lock:
                 self.recent.clear()
                 self.tail = None
@@ -1111,6 +1116,9 @@ class BeaconAccelHoming:
                                           " sensor readings and delivery timing; see ACCEL_HOMING_STATUS"
                                           % (message, detail))
 
+    def _uses_vector_detector(self, axis):
+        return self.workflows.simple_detection(axis)
+
     def _reference_noise_limit(self, axis):
         original = BASELINE_NOISE_RATIO * self.threshold_g[axis]
         floor = (min(NATIVE_BASELINE_NOISE_FLOOR, self.threshold_g[axis])
@@ -1119,7 +1127,7 @@ class BeaconAccelHoming:
 
     def _reference_motion_noise(self, reference, bases, axis):
         """Measured envelope for calibration and expanded quiet references."""
-        if reference is None or bases is None:
+        if reference is None or bases is None or self._uses_vector_detector(axis):
             return None
         original = BASELINE_NOISE_RATIO * self.threshold_g[axis] / (self.session_scale["scale"] / 1000.0)
         if reference.require_quiet and not any(
@@ -1189,6 +1197,8 @@ class BeaconAccelHoming:
             sp.stepper_name: round(sp.trig_pos * sp.stepper.get_step_dist(), 4) for sp in positions}
         travel = self._travel(positions, attempt.axis)
         record["travel_mm"] = None if travel is None else round(abs(travel), 3)
+        record["travel_mm_exact"] = None if travel is None else abs(travel)
+        record["halt_travel_mm_signed"] = self._travel(positions, attempt.axis, halt=True)
         attempt.halt_delta = self._travel(positions, attempt.axis, halt=True)
         self.last_pass = attempt
         self.workflows.check_home_result(record)
@@ -1245,6 +1255,9 @@ class BeaconAccelHoming:
         else:
             retract = max(info.retract_dist, getattr(info, "min_home_dist", 0.0) or 0.0)
             travel, speed = 2.0 * retract + 3.0, info.second_homing_speed
+        plan = self.workflows.home_plan
+        if plan is not None and plan["axis"] == axis:
+            travel = plan["travel_mm"]
         # The toolhead never moves faster than its max_velocity.
         speed = min(speed, max_velocity)
         if self.backend is not None:
@@ -1275,7 +1288,8 @@ class BeaconAccelHoming:
             bases = reference.baseline() if reference is not None and reference.axis == axis else None
             result = ("missing_before_arm" if reference is None else
                       "calibration_reference_outside_trial" if not reference.require_quiet
-                      and not self.workflows.calibration_reference(axis) else
+                      and not (self.workflows.calibration_reference(axis)
+                               or self._uses_vector_detector(axis)) else
                       "quiet_window_invalidated_before_arm" if bases is None else
                       "expired_before_arm" if reference.last is None
                       or not -0.005 <= now - reference.last <= self._reference_max_age() else "ready")
@@ -1300,6 +1314,7 @@ class BeaconAccelHoming:
                           beacon_mcu.print_time_to_clock(print_time) & 0xFFFFFFFF,
                           deadline, beacon_mcu.print_time_to_clock(deadline) & 0xFFFFFFFF,
                           index, map_sign, direction, limit_raw, count_g)
+        attempt.vector_mode = self._uses_vector_detector(axis)
         attempt.steppers = endstop.get_steppers()
         attempt.bases = bases
         attempt.proof_noise = proof_noise
@@ -1307,7 +1322,7 @@ class BeaconAccelHoming:
         attempt.last_samples = list(bases)
         attempt.effective_speed, attempt.effective_accel = speed, accel
         attempt.motion_deadline = motion_deadline
-        if self.backend is not None:
+        if self.backend is not None and not attempt.vector_mode:
             attempt.proof_deadline = print_time + self.backend.motion_startup_timeout(speed, accel)
             attempt.proof_method = "full_arm_lower" if proof_noise is not None else "raw_integral"
         if motion_deadline is not None:
@@ -1367,7 +1382,7 @@ class BeaconAccelHoming:
         A toolhead that never moved with the steps was already pressed against
         the stop, so the origin is where the move started. Otherwise it is the
         first accelerometer sample over the threshold."""
-        if attempt.reason == "impact" and self._motion_state(attempt) is True:
+        if not attempt.vector_mode and attempt.reason == "impact" and self._motion_state(attempt) is True:
             attempt.reason = "pressed"
             if attempt.record is not None:
                 attempt.record["result"] = "pressed"
@@ -1661,6 +1676,14 @@ class BeaconAccelHoming:
         if print_time > attempt.deadline + self.stream_timeout:
             self._fire(attempt, "travel", mcu.MCU_trsync.REASON_HOST_REQUEST)
             return self.reactor.NEVER
+        if attempt.vector_mode:
+            if (self.backend is None and attempt.vector_unchanged_since is not None
+                    and attempt.proof_sample_time is not None
+                    and attempt.proof_sample_time - attempt.vector_unchanged_since > 0.025
+                    and self._commanded_speed(attempt, attempt.proof_sample_time - MOTION_LAG) >= 40.0):
+                self._fire(attempt, "frozen", mcu.MCU_trsync.REASON_HOST_REQUEST)
+                return self.reactor.NEVER
+            return eventtime + WATCHDOG_INTERVAL
         if attempt.moving:
             return eventtime + WATCHDOG_INTERVAL
         if self.backend is not None:
@@ -1783,7 +1806,8 @@ class BeaconAccelHoming:
         interval = params["delta_clock"] / (count - 1.0)
         source_params, source_skip = params, 0
         expanded_native = self.backend is None and attempt.proof_noise is not None
-        if expanded_native and (not math.isfinite(interval) or interval <= 0.0):
+        strict_native = self.backend is None and (expanded_native or attempt.vector_mode)
+        if strict_native and (not math.isfinite(interval) or interval <= 0.0):
             self._fire(attempt, "invalid_data", mcu.MCU_trsync.REASON_HOST_REQUEST)
             return
         if not clock_after(start_clock, attempt.arm_clock):
@@ -1800,7 +1824,7 @@ class BeaconAccelHoming:
             start_clock = (start_clock + int(round(skip * interval))) & 0xFFFFFFFF
             params = dict(params, data=data, start_clock=start_clock,
                           delta_clock=int(round((count - 1) * interval)))
-        if expanded_native:
+        if strict_native:
             start_time = self.clock_to_time(start_clock)
             end_time = self.clock_to_time(start_clock + params["delta_clock"])
             sensor_now = self.main_mcu.estimated_print_time(now)
@@ -1823,7 +1847,7 @@ class BeaconAccelHoming:
                 attempt.bases = self._baseline()
             attempt.first_clock = start_clock
             attempt.sample_dt = interval / self.beacon_freq
-            if expanded_native or self.backend is not None:
+            if strict_native or self.backend is not None:
                 attempt.proof_first_sample_time = self.clock_to_time(start_clock)
             if attempt.bases is None:
                 self._fire(attempt, "no_baseline", mcu.MCU_trsync.REASON_HOST_REQUEST)
@@ -1842,11 +1866,17 @@ class BeaconAccelHoming:
         data = sample_slice(data, count)
         raw = (data if isinstance(data, tuple) else memoryview(data).cast("h") if NATIVE_LE
                else [v for sample in SAMPLE.iter_unpack(data) for v in sample])
-        if expanded_native and not all(math.isfinite(value) for value in raw):
+        if strict_native and not all(math.isfinite(value) for value in raw):
             self._fire(attempt, "invalid_data", mcu.MCU_trsync.REASON_HOST_REQUEST)
             return
         if self.backend is None and CLIPPED in raw:
             raw = decode_clips(raw, attempt.last_samples, self.clip_values)
+        if attempt.vector_mode:
+            if attempt.gap:
+                self._fire(attempt, "sample_gap", mcu.MCU_trsync.REASON_HOST_REQUEST)
+                return
+            self._inspect_vector(attempt, params, raw, count, source_params, source_skip)
+            return
         values = raw[attempt.index::3]
         top, bottom = max(values), min(values)
         if top != bottom:
@@ -1912,6 +1942,41 @@ class BeaconAccelHoming:
             return
         self._onset(attempt, params, values, count, source_params, source_skip)
 
+    def _inspect_vector(self, attempt, params, raw, count, source_params, source_skip):
+        """XYZ acceleration magnitude about a fixed resting offset, in raw units."""
+        if not all(math.isfinite(value) for value in raw):
+            self._fire(attempt, "invalid_data", mcu.MCU_trsync.REASON_HOST_REQUEST)
+            return
+        limit2 = attempt.limit_raw * attempt.limit_raw
+        peak = 0.0
+        previous = tuple(attempt.last_samples)
+        for position in range(count):
+            xyz = tuple(raw[3 * position:3 * position + 3])
+            if xyz != previous or attempt.vector_unchanged_since is None:
+                attempt.varied = attempt.varied or xyz != previous
+                interval = params["delta_clock"] / max(1, count - 1)
+                attempt.vector_unchanged_since = self.clock_to_time(
+                    params["start_clock"] + int(round(position * interval)))
+            previous = xyz
+            level2 = sum((value - base) ** 2 for value, base in zip(xyz, attempt.bases))
+            if level2 >= limit2:
+                attempt.onset_batch = (params["start_clock"], params["delta_clock"], position, count)
+                attempt.onset_sample = (source_params["start_clock"], source_params["delta_clock"],
+                                        position + source_skip, sample_count(source_params["data"]))
+                attempt.onset_raw = math.sqrt(level2)
+                interval = params["delta_clock"] / max(1, count - 1)
+                onset_clock = params["start_clock"] + int(round(position * interval))
+                attempt.impact_until = (onset_clock + self.impact_window) & 0xFFFFFFFF
+                self._fire(attempt, "impact", mcu.MCU_trsync.REASON_ENDSTOP_HIT)
+                self._track_impact(attempt, params, raw, count)
+                return
+            peak = max(peak, math.sqrt(level2))
+        attempt.noise_checked = max(attempt.noise_checked, peak)
+        attempt.noise_pos = max(attempt.noise_pos, peak)
+        attempt.last_end_clock = params["start_clock"] + params["delta_clock"]
+        attempt.proof_sample_time = self.clock_to_time(attempt.last_end_clock)
+        attempt.last_samples = list(previous)
+
     def _onset(self, attempt, params, values, count, source_params=None, source_skip=0):
         base, map_sign = attempt.baseline, attempt.map_sign
         direction = attempt.direction or attempt.auto_direction
@@ -1938,6 +2003,18 @@ class BeaconAccelHoming:
     def _track_impact(self, attempt, params, data, count, values=None):
         """Largest reading shortly after the onset, for status."""
         if attempt.impact_until is None or not clock_after(attempt.impact_until, params["start_clock"]):
+            return
+        if attempt.vector_mode:
+            raw = (data if isinstance(data, (tuple, list, memoryview)) else
+                   [v for row in SAMPLE.iter_unpack(sample_slice(data, count)) for v in row])
+            if self.backend is None and CLIPPED in raw:
+                raw = decode_clips(raw, attempt.last_samples, self.clip_values)
+            peak = max(math.sqrt(sum((raw[n + axis] - attempt.bases[axis]) ** 2
+                                     for axis in range(3))) for n in range(0, count * 3, 3))
+            if peak > attempt.impact_peak:
+                attempt.impact_peak = peak
+                if attempt.record is not None:
+                    attempt.record["impact_peak_g"] = round(peak * attempt.count_g, 2)
             return
         if values is None:
             values = axis_values(sample_slice(data, count), attempt.index)
@@ -1971,7 +2048,7 @@ class BeaconAccelHoming:
     def _velocity(self, attempt):
         """Speed along the homing axis before the impact, integrated from the
         accelerometer (machine frame of Beacon's axes map)."""
-        if attempt.last_end_clock is None:
+        if attempt.vector_mode or attempt.last_end_clock is None:
             return None
         return (attempt.sums[attempt.index] * attempt.map_sign * attempt.count_g
                 * MM_PER_S2_PER_G * attempt.sample_dt)
@@ -2258,7 +2335,8 @@ class BeaconAccelHoming:
                                     if attempt.onset_batch is not None else None),
                         "impact_peak_g": (attempt.impact_peak * attempt.count_g
                                           if attempt.onset_batch is not None else None),
-                        "direction": attempt.direction or attempt.auto_direction,
+                        "direction": 0 if attempt.vector_mode else attempt.direction or attempt.auto_direction,
+                        "impact_metric": "xyz_magnitude" if attempt.vector_mode else "selected_axis",
                         "homing_speed_mm_s": attempt.effective_speed,
                         "homing_accel_mm_s2": attempt.effective_accel,
                         "attempt_count": attempt_count}
@@ -2311,7 +2389,9 @@ class BeaconAccelHoming:
             "pass": attempt.pass_no,
             "result": attempt.reason or "no_trigger",
             "threshold_g": round(attempt.limit_raw * to_g, 2),
-            "direction": attempt.direction or attempt.auto_direction,
+            "impact_metric": "xyz_magnitude" if attempt.vector_mode else "selected_axis",
+            "physical_position_verified": False,
+            "direction": 0 if attempt.vector_mode else attempt.direction or attempt.auto_direction,
             "onset_g": round(attempt.onset_raw * to_g, 2) if onset else None,
             "impact_sign": (1 if attempt.onset_raw > 0 else -1 if attempt.onset_raw < 0 else None)
                            if onset else None,
@@ -2342,6 +2422,11 @@ class BeaconAccelHoming:
             return round(value, 6) if value is not None and math.isfinite(value) else None
         def elapsed(value):
             return number(None if value is None else (value - attempt.arm_time) * 1000.0)
+        if attempt.vector_mode:
+            return {"result": "not_required", "method": "commanded_travel",
+                    "backend": "beacon_raw" if self.backend is None else self.backend.kind,
+                    "command_eligible": False, "noise_bound_xyz_g": None,
+                    "physical_position_verified": False}
         first, sample = attempt.proof_first_sample_time, attempt.proof_sample_time
         interval = attempt.proof_interval
         native = self.backend is None
@@ -2417,9 +2502,10 @@ class BeaconAccelHoming:
         kind = "beacon_raw" if self.backend is None else self.backend.kind
         gcmd.respond_info("accel_homing: sensor %s, backend %s, X %.12g g, Y %.12g g"
                           % (self.sensor_name, kind, self.threshold_g["x"], self.threshold_g["y"]))
-        gcmd.respond_info("accel_homing: baseline policy: ordinary homing requires quiet XYZ;"
-                          " calibration requires a fresh %.2f ms / %d sample reference"
-                          " without a quiet-range limit; measured noise bounds remain active"
+        gcmd.respond_info("accel_homing: baseline policy: legacy ordinary homing requires quiet XYZ;"
+                          " simple calibration and saved XYZ-magnitude models require a fresh"
+                          " %.2f ms / %d sample reference without a quiet-range limit;"
+                          " no acceleration-derived motion proof for XYZ magnitude"
                           % (self.baseline_time * 1000.0, BASELINE_MIN_SAMPLES))
         if self.backend is not None:
             gcmd.respond_info("accel_homing: requested report interval %.4f s, sample-age limit"

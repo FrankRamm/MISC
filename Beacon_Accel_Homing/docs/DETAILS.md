@@ -154,7 +154,8 @@ value to be rejected. Calibration and saved models retain their 0.5–15 g range
 subject to the calibration ceiling and sensor-range limits.
 
 The named model defaults to `[accel_homing_model default]`. It stores thresholds,
-ten-success counts, the validation travel range and fixed 1.5 mm limit, and
+ten-success counts, the validation travel range, the fixed 2.0 mm calibration
+limit, the XYZ-magnitude detector metric, and
 sensor/configuration metadata. Existing saved models remain loadable; updating
 does not certify their historical travel range under the new calibration rule.
 Run a new calibration to obtain that qualification. Calibration defaults to
@@ -165,7 +166,7 @@ homing. The workflow restores the previous active thresholds when it ends.
 The staged model supplies its threshold after saving and reloading, unless a
 manual override takes priority. An ordinary `RESTART` discards unsaved staged
 values. A clean calibration has one
-qualifying discovery home and ten validation homes: eleven homes in total.
+bounded 20 mm screen and ten validation homes: eleven monitored moves in total.
 With `SAVE_CONFIG=0`, the completed axis remains homed. Before calibrating the
 other axis, use your machine's appropriate controls to leave both XY axes
 unhomed and physically center XY by hand again.
@@ -219,16 +220,11 @@ fit. An unknown sensor range also leaves candidates unavailable. Complete
 measurements and charts remain available in either case. An incomplete or
 faulted run has no recommendation.
 
-The next separate `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` consumes its
-available X candidate; Y is independent. A restart or changed sensor/calibration
-context discards unused candidates. Existing manual thresholds, saved models
-and ordinary homing thresholds are unchanged by noise measurement. Stationary
-vibration does not measure motor-enable/first-step transients, guarantee noise
-filtering or qualify contact detection. Calibration skips the peak-to-peak
-quietness gate but still requires fresh valid offset samples, movement proof,
-normal geometry and ten-home repeatability qualification. An explicit
-`START_THRESHOLD` or `STEP` on CALIBRATE skips automatic seed selection for
-that run, so a measured candidate cannot replace the requested grid.
+These stationary hints are diagnostic only. Simple `ACCEL_HOMING_CALIBRATE`
+always starts on its configured or explicitly supplied start/step grid and
+does not consume noise seeds. Existing manual thresholds, saved models and
+ordinary homing thresholds are unchanged by noise measurement. See
+[the current calibration algorithm](SIMPLE_CALIBRATION.md).
 
 `homing_retract_dist: 0` keeps one touch per home. The separate plugin setting
 `back_off_dist` defaults to 5 mm (0 disables; finite 0–20 mm) and controls the
@@ -271,75 +267,46 @@ retain their existing behavior. Dual carriages, shared XY/Z enables,
 G28 macros and nested/unknown wrapper chains remain rejected. See
 [the source contract and limits](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
-Calibration defaults: start at 1.0 g, increase by 0.25 g for early triggers, stop
-at 12 g or 80% of sensor range, allow at most 40 homing attempts and wait up to
-300 seconds for manual recentering. `calibration_start_threshold` is configurable
-with a minimum of 0.5 g. Existing explicit start/step settings are preserved.
-To select this grid for one run, use:
+Calibration uses the [20 mm screen and ten-check cycle](SIMPLE_CALIBRATION.md).
+The command syntax and defaults remain:
 
 ```gcode
 ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
 ```
 
-Use `AXIS=Y` to calibrate Y instead. These parameters override the configured
-start/step and skip a stored noise seed. They are snapshotted for the run:
-after manually recentering, repeat the same command or omit the grid parameters
-to continue at the current candidate. A different start or step on resume is
-rejected. The attempt limit remains independent of the finer grid and includes
-discovery and validation; a high candidate may exhaust it before ten validations.
-Updating does not replace a saved model's threshold; recalibrate to produce a
-new model. Starting or resuming
-calibration requires both XY axes to be unhomed; it never marks manually
-centered coordinates as homed.
+X or Y selects movement; all three sensor channels contribute to the
+baseline-subtracted magnitude. The screen completes at 20 mm without requiring
+contact. Only the following ten impacts count toward repeatability. A ten-check
+spread <=2 mm passes; >2 mm increases by STEP, clears the whole window and
+automatically restarts screening. An impact before 20 mm instead stops,
+increases the candidate and waits for manual recentering and the same command.
+A resumed command keeps its advanced candidate; START_THRESHOLD/STEP cannot
+change mid-run. The 40-attempt default budget includes screens and validations
+across all retries; the default threshold ceiling remains 12 g or 80% of range.
+Sensor faults or a move with no impact abort instead of raising thresholds.
 
-After an accepted discovery or validation home, calibration returns only the
-tested axis to center. That move now uses the existing `homing_accel` cap and
-preserves a lower live acceleration; `homing_accel: 0` leaves acceleration
-unchanged. After the return finishes, `calibration_settle_time` queues a
-stationary wait before the next reference. It defaults to **0.25 s**, accepts
-finite values from **0 to 2 s**, and zero disables the extra wait. The original
-acceleration is restored on completion, cancellation or failure. Other workflow
-return moves retain their existing behavior.
-
-This separates acquisition from the immediate aftermath of an automatic
-return. Waiting for queued steps alone does not establish that mechanical
-ringing has decayed. A settling wait can help transient vibration; it cannot
-resolve persistent vibration or certify the physical cause of a particular
-`no_motion` failure. Active status, calibration results and new model metadata
-record the selected settling time.
-Qualification requires over 10 mm of commanded travel and agreement within
-20% of expected center-to-stop travel by default. After a separate qualifying
-discovery, ten consecutive geometry-qualified validation homes at the same
-candidate must also have `max(travel_mm) - min(travel_mm) < 1.5 mm`. This fixed
-limit has no configuration override. Each axis has its own validation window.
-The existing early-hit classification (pressed start, at most 10 mm, or travel
-below the geometry tolerance) still raises the candidate and clears that window;
-the new candidate must qualify again. A range failure among geometry-qualified
-validation homes aborts without a higher candidate, another automatic move,
-model staging, writing or restart. Status and console progress report the range
-and limit. Commanded distances do not establish physical repeatability.
-Missing/late data, invalid captures, MCU errors and excessive travel abort
-instead of increasing the threshold. Stock Klipper homing fault cleanup still
-applies and may release all motors.
-
+The initial physical center is confirmed by the operator while XY is unhomed.
+For a screen the selected coordinate is temporarily assigned that center,
+then a bounded HomingMove runs without declaring its endpoint to be an endstop.
+All returns reverse measured halted step travel, including post-trigger
+steps, with the existing acceleration cap and default 0.25 s settling interval.
+They assume no skipped steps or mechanical slip. New saved models preserve
+the same vector detector for ordinary homing; old models/manual overrides
+retain the legacy selected-axis path.
 
 ## Stationary preparation and diagnostics
 
-Ordinary homing, TEST, CHARTS and ACCURACY require a quiet reference.
-`ACCEL_HOMING_CALIBRATE` skips only that peak-to-peak quietness gate for the
-selected axis while its trial is actually running. It still collects at least
-50 fresh contiguous samples spanning `baseline_time` (100 ms by default),
-computes the resting offset from every retained sample, and keeps the real XYZ
-noise envelope for movement proof at every candidate threshold. Missing,
-stale, future, irregular, invalid or saturated data still aborts. Broad noise
-can still prevent proof of movement and produce `no_motion`; that fault does
-not advance the candidate. No post-arm impact is filtered or ignored.
+Simple calibration and axes using a saved XYZ-magnitude model acquire at least
+50 fresh contiguous offset samples over `baseline_time` (100 ms by default),
+but do not enforce quietness or use the noise envelope to prove movement.
+Missing, stale, future, irregular, invalid or saturated reference data still
+aborts. The acceleration threshold is active immediately after arming.
+`ACCEL_HOMING_STATUS` labels this policy explicitly.
 
-The bypass does not apply while waiting for manual centering, after cancellation
-or cleanup, to another axis, or to a different workflow. `ACCEL_HOMING_STATUS`
-reports the calibration policy before movement, and a retained baseline summary
-includes `quiet_range_enforced`. A calibration reference is labelled as a fresh
-reference rather than as having passed the quiet-range limit.
+The quiet-reference and motion-bound descriptions below apply only to the
+**legacy selected-axis detector** (old models/manual overrides). The new vector
+path does not produce a startup `no_motion` failure. Both paths keep fresh
+offset and sensor-delivery checks.
 
 `no fresh quiet accelerometer baseline before the move` means an ordinary pass
 could not obtain or retain its required stationary reference before arming.
@@ -439,6 +406,11 @@ The preparation check does not change driver settings.
 
 ## Generic timing, speed and travel limits
 
+The following startup-motion estimator applies only to the legacy selected-axis
+path. Simple calibration and saved vector models skip it, retaining sensor data
+checks and the full-move travel/time watchdog. Explicit optional admission
+limits are still honored; they are not physical stopping guarantees.
+
 Generic defaults are 5 ms reports, a 20 ms maximum sample age and at least
 1000 Hz. The previous report interval is restored afterwards. Sample freshness,
 stream faults and startup motion detection still apply at every speed.
@@ -475,7 +447,7 @@ deadline or fail with `no_motion`; this does not establish an origin. Ordinary
 `G28` can finish on a fresh impact before motion proof; workflows also check
 motion and travel.
 
-During calibration, or when another generic reference exceeds the original 20% quiet limit,
+In the legacy selected-axis detector, when a generic reference exceeds the original 20% quiet limit,
 movement proof subtracts an allowance for its observed noise. Each sensor
 axis uses the larger deviation from the accepted mean to either observed
 extreme; status reports the applied `motion-proof noise bound XYZ` in g.
@@ -511,8 +483,11 @@ proof. An optional `max_startup_travel` can reject such a plan; no distance cap
 is inserted automatically. Installation does not change sample age, reporting
 interval, acceleration or current to admit a requested speed.
 
-The **1.5 mm calibration rule is a separate repeatability test**:
-`max(travel_mm) - min(travel_mm) < 1.5 mm` across ten accepted validation homes.
+The **2 mm simple-calibration rule is a separate repeatability test**:
+`max(distance) - min(distance) <= 2.0 mm` across ten validation impacts,
+excluding the 20 mm screen. A failed complete set advances the candidate and
+starts a fresh screen and ten checks. Legacy ACCURACY retains its existing
+qualification limits; it is not the simple calibration command.
 It is not a per-home travel cap or a physical stopping-distance guarantee.
 Neither the startup deadline nor optional nominal travel limits include
 unbounded host stalls, transport/MCU stop delay or the machine's mechanical

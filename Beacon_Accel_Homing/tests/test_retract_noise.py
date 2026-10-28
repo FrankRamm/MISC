@@ -498,9 +498,9 @@ class NoiseWorkflowTests(unittest.TestCase):
                 self.assertAlmostEqual(item["record"]["baseline_g"]["z"], 1.0)
             rig.toolhead.kin.limits[:2] = [(1.0, -1.0), (1.0, -1.0)]
             rig.calibrate(save=0)
-            self.assertEqual([call["threshold"] for call in rig.home_calls], [2.5] * 11)
+            self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 11)
             self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
-            self.assertEqual(rig.workflow.noise_seeds, {"y": 1.0})
+            self.assertEqual(rig.workflow.noise_seeds, {})
 
     def test_either_explicit_grid_parameter_bypasses_noise_seed(self):
         for parameters, expected_start, expected_step in (
@@ -517,7 +517,7 @@ class NoiseWorkflowTests(unittest.TestCase):
                 self.assertEqual([call["threshold"] for call in rig.home_calls], [expected_start] * 11)
                 self.assertEqual(rig.workflow.last_result["start_threshold_g"], expected_start)
                 self.assertEqual(rig.workflow.last_result["threshold_step_g"], expected_step)
-                self.assertEqual(rig.workflow.noise_seeds, seeds)
+                self.assertEqual(rig.workflow.noise_seeds, {})
                 metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
                 self.assertNotIn("stationary_noise_seed", metadata)
 
