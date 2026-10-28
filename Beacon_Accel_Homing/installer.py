@@ -387,7 +387,7 @@ def validate_homing_speeds(graph, args, family, existing):
             velocity = float(printer.get("max_velocity", "nan"))
             acceleration = float(printer.get("max_accel", "nan"))
             homing_accel = float(existing.get("homing_accel", "5000")) if existing else 5000.0
-            age = float(existing.get("max_sample_age", "0.020")) if existing else 0.020
+            age = float(existing.get("max_sample_age", "0.050")) if existing else 0.050
             travel = (overrides["max_report_travel"] if "max_report_travel" in overrides else
                       existing.get("max_report_travel") if existing else None)
             startup = (overrides["max_startup_travel"] if "max_startup_travel" in overrides else

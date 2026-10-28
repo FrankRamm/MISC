@@ -1,5 +1,21 @@
 # Offline verification
 
+## Generic 50 ms sample-age default — 2026-10-28
+
+This change was reviewed from source only. Regression sources were updated but
+**not executed or imported**; no plugin import, compilation, rendering, printer
+connection or printer command was performed. Historical test counts below do
+not verify this revision.
+
+The sources cover the 50 ms generic default during stationary preparation and
+armed homing, rejection beyond that limit, preserved explicit sample-age and
+shorter no-data timeouts, and matching installer policy. Earlier numeric policy
+fixtures explicitly select 20 ms where needed to retain their original cases.
+The report/startup distance policies and future-timestamp, gap and disconnect
+checks remain enabled. With sample age omitted, the existing legacy startup
+formula gains 30 ms and `speed * 0.030` mm; a 1 mm reporting limit now permits
+at most 20 mm/s. No distance budget is increased to admit a faster plan.
+
 ## Temporary accuracy captures and colon filenames — 2026-10-28
 
 This change was reviewed from source only. Regression sources were updated but
