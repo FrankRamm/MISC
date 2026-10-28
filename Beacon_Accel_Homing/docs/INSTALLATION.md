@@ -288,7 +288,7 @@ the startup budget limits nominal travel before the host requests a stop for
 absent motion proof. Neither changes the startup deadline or includes
 unbounded host stalls, transport/MCU stop delay or the machine's mechanical
 response. They are not physical stopping-distance guarantees. The calibration
-rule `max(travel_mm) - min(travel_mm) < 1.5 mm` is instead a repeatability
+rule `max(travel_mm) - min(travel_mm) <= 2 mm` is instead a repeatability
 requirement across ten accepted validation homes. It does not set either of
 these distance caps.
 
@@ -428,27 +428,21 @@ ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
 
 `CENTERED=1` states that the toolhead is already physically centered and
 authorizes the first candidate home, starting at 1.0 g by default. It does not
-measure the manual position. After an early trigger, XY is released and made
-unhomed; center it manually again and reissue the same calibration command to
-resume, keeping the same `AXIS`, start/step and optional `SAVE_CONFIG` value. The console
-reports manual-recentering instructions; the pending calibration retains its
-configured timeout. The default 0.25 g step makes the first retry 1.25 g.
-The explicit start/step parameters override older configuration and skip a
-stored noise seed. Repeating them on resume continues at the current candidate;
-it does not restart the grid. Use `AXIS=Y` to calibrate only Y instead.
-Calibration skips the stationary peak-to-peak quietness gate, while retaining
-fresh offset samples, data fault checks and movement proof. Other workflows
-and ordinary homing still enforce their quietness requirement.
-One geometry-qualified discovery must be followed by ten additional consecutive
-geometry-qualified homes at the same candidate. Their commanded-travel range
-(`max - min`) must be **strictly less than 1.5 mm**; exactly 1.5 mm fails.
-Discovery and manual centering are excluded, and each axis has its own window.
-If that validation range reaches 1.5 mm, calibration aborts before another
-automatic return/home, without increasing the candidate or staging, saving or
-restarting. Existing early-hit retries still clear the count and distance
-window; after manual recentering, the new candidate needs another qualifying
-discovery and ten fresh validations. These commanded distances do not prove
-contact with the correct stop or absence of skipped steps.
+measure the manual position. An impact at or before 20 mm automatically returns
+only the tested axis to its estimated starting point, settles, and retries
+discovery at the next threshold step if all return checks pass. No additional
+command is needed. Faults, no impact or uncertain return evidence abort.
+The default 0.25 g step makes the first retry 1.25 g. Explicit start/step
+parameters override older configuration; stationary-noise hints are diagnostic.
+Use `AXIS=Y` to calibrate only Y instead.
+
+An impact beyond 20 mm selects the candidate, followed by ten centered checks.
+Their commanded-travel range (`max - min`) must be **at most 2.00 mm**; exactly
+2 mm passes. A larger completed window raises the threshold and restarts
+discovery and all ten checks. Step travel does not prove physical position or
+correct endstop contact. See the [current calibration sequence and return
+limits](SIMPLE_CALIBRATION.md).
+
 Calibration and saved models accept finite values from 0.5 g; existing models
 at 1 g and 2 g remain valid. Manual `threshold`, `x_threshold` and `y_threshold`
 settings in either current or legacy section, and temporary `SET_ACCEL_HOMING`
@@ -463,7 +457,7 @@ Explicit existing `calibration_start_threshold` and `calibration_step` values
 are preserved. Set them to `1.0` and `0.25`, leave both absent for the new
 defaults, or use the per-command parameters above. Updating does not replace a saved model's threshold;
 run calibration to create a new one. Previous models remain loadable, but
-updating does not qualify their historical distances under the new 1.5 mm rule.
+updating does not qualify their historical distances under the current 2 mm rule.
 
 TEST and CHARTS require the same existing manual XY center, both axes unhomed
 and nozzle/bed clearance. Start them directly with

@@ -36,10 +36,12 @@ error. Host-delivered sensor data does not provide a hard real-time stop bound.
    acceleration throughout. **Reaching 20 mm alone does not stop the move or
    select a candidate.** Discovery requires an actual threshold-crossing impact
    after **more than 20 mm** of commanded travel.
-2. An impact at **20 mm or less** stops immediately, advances by one configured
-   threshold step, clears the candidate and measurements, and releases XY for
-   manual recentering. Repeat the same command; its original START_THRESHOLD
-   does not reset the advanced candidate. Exactly 20 mm is still an early hit.
+2. An impact at **20 mm or less** stops immediately. If the return checks below
+   pass, reverse the selected axis's recorded signed start-to-halt travel,
+   including travel after the trigger, to its **estimated starting point**.
+   Settle and restart discovery automatically at the next configured threshold
+   step, with the previous candidate and measurements cleared. Exactly 20 mm
+   is still an early hit; no further command or manual recentering is needed.
 3. The first impact **beyond 20 mm** selects the candidate. Stock axis homing
    assigns the endstop coordinate. Move **only that printer axis** to its
    configured midpoint `(position_min + position_max) / 2`. The discovery
@@ -47,8 +49,9 @@ error. Host-delivered sensor data does not provide a hard real-time stop bound.
 4. At the unchanged threshold, run **ten** center-to-impact trips, returning
    only the calibrated axis to that same configured midpoint between trips.
    Record commanded step distance at each first acceleration threshold crossing.
-   A validation impact at or below 20 mm rejects the candidate and requests
-   manual recentering. A sensor fault or missing impact aborts without raising g.
+   A validation impact at or below 20 mm rejects the candidate and follows the
+   same automatic early-impact return and new discovery in step 2. A sensor
+   fault or missing impact aborts without a return or an increase in g.
 5. After all ten checks, calculate **maximum distance minus minimum distance**,
    not statistical variance and not just consecutive differences. A spread
    **at most 2.00 mm passes**. If it is **greater than 2.00 mm**, advance one
@@ -59,12 +62,45 @@ error. Host-delivered sensor data does not provide a hard real-time stop bound.
 
 Discovery and validation use the same verified stock single-axis G28 path.
 There is no standalone 20 mm probe move or successful no-contact endpoint.
-Every automatic return targets the selected axis's configured midpoint,
-not a distance inferred from the manually estimated first starting point.
+Only returns after qualifying impacts target the configured midpoint.
 Returns use the existing homing acceleration cap and `calibration_settle_time`
 (default 0.25 s). No return command changes the other XY coordinate or Z.
 Cancellation/failure restores settings; stock G28's fatal error handling may
 turn off all motors, including Z. Keep Z supported as for ordinary homing faults.
+
+## Automatic early-impact returns
+
+An early return requires a successful, complete stock single-axis home and
+fresh, internally consistent trigger and halted-step evidence from that exact
+attempt. Signed travel must agree with the configured homing direction.
+The halted travel must be at least the trigger travel and satisfy all of these
+per-return limits:
+
+- Trigger travel is at most 20 mm.
+- Travel from trigger to halt is at most 2 mm; total halted travel is at most 22 mm.
+- Total halted travel stays at least 2 mm short of the nominal configured
+  midpoint-to-endstop distance.
+- The reverse target lies inside the configured axis limits.
+
+The existing attempt budget and next-candidate threshold ceiling are checked
+before returning. These limits apply to each early return; there is no separate
+cumulative return-distance budget. The **2 mm trigger-to-halt allowance** is
+independent of the **2 mm ten-check repeatability limit**.
+
+The reverse target is the current coordinate assigned by stock G28 minus the
+recorded signed start-to-halt displacement; the return does not reset coordinates.
+After returning it clears only the selected axis's homed state before retrying.
+It does not accept the early hit as the endstop or command the other XY axis or Z.
+Zero halted travel needs no reverse move; it still settles before retrying.
+This reverses commanded step travel, not measured physical carriage travel.
+Lost steps, slip or an obstruction can
+make the estimated starting point wrong, including across repeated retries.
+
+Any homing error, sensor/transport fault, missing or stale evidence, inconsistent
+travel, motor release, cancellation, shutdown or failed return check aborts.
+There is no automatic recovery from these faults and no manual-recentering
+fallback that continues the same run. Prepare the printer again before a new
+command after an abort.
 
 ## Saving and ordinary homing
 
@@ -94,6 +130,6 @@ assume no skipped steps, slipping belts or blocked motion. Repeatable contact
 with the wrong obstruction can pass. An impact beyond 20 mm is a candidate,
 not independent proof that the intended endstop was reached. Assigning an
 endstop coordinate and returning to its midpoint assumes genuine contact;
-supervise actual
-travel and stop on unexpected behavior. No printer hardware was exercised by
-the offline tests shipped with this change.
+supervise actual travel and stop on unexpected behavior. This early-return
+revision was reviewed from source only; its regression sources were not run
+and no printer hardware or service was accessed.

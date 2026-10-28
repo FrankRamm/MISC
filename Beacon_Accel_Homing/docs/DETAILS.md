@@ -173,9 +173,8 @@ unhomed and physically center XY by hand again.
 
 To defer saving, start with
 `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 SAVE_CONFIG=0`.
-When resuming after recentering, keep the same command, `AXIS` and optional
-`SAVE_CONFIG` value. The console reports when recentering is needed; a pending
-calibration expires after its configured timeout.
+Early-impact retries run automatically within the same calibration command.
+See the [return checks and fault limits](SIMPLE_CALIBRATION.md#automatic-early-impact-returns).
 
 
 ## Stationary vibration measurement and final retraction
@@ -281,19 +280,22 @@ baseline-subtracted magnitude. Discovery continues until an impact; reaching
 midpoint. Only the following ten centered impacts count toward repeatability.
 A ten-check spread <=2 mm passes; >2 mm increases by STEP, clears the whole
 window, recenters that axis and restarts impact discovery. An impact at or
-before 20 mm instead stops, increases the candidate and waits for manual
-recentering and the same command. A resumed command keeps its advanced
-candidate; START_THRESHOLD/STEP cannot change mid-run. The 40-attempt default
+before 20 mm stops immediately, then automatically reverses recorded signed
+halted travel to the estimated starting point if the return checks pass.
+It settles and restarts discovery at the next STEP candidate; START_THRESHOLD/STEP
+cannot change mid-run. The 40-attempt default
 budget includes discovery and validation across all retries; the default
 threshold ceiling remains 12 g or 80% of range. Sensor faults or a move with
-no impact abort instead of raising thresholds.
+no impact abort instead of raising thresholds. Missing, stale or inconsistent
+return evidence also aborts; it never authorizes automatic fault recovery.
 
 The initial physical center is confirmed by the operator while XY is unhomed.
-Discovery and validation both use verified stock axis homing. After its impact,
-the selected axis is returned to `(position_min + position_max) / 2`, with the
-existing acceleration cap and default 0.25 s settling interval. Other axes
-are not commanded to move. Centering assumes the accepted impact was the
-endstop and no steps slipped; it is not encoder feedback. Stock G28 fatal
+Discovery and validation both use verified stock axis homing. After a qualifying
+impact, the selected axis is returned to `(position_min + position_max) / 2`.
+Both return types keep the existing acceleration cap and default 0.25 s settling
+interval. Other axes are not commanded to move. Midpoint centering assumes the
+accepted impact was the endstop; early returns estimate the previous starting
+point from commanded steps. Neither provides encoder feedback. Stock G28 fatal
 errors may disable all motors, so keep Z supported. New saved models preserve
 the same vector detector for ordinary homing; old models/manual overrides
 retain the legacy selected-axis path.

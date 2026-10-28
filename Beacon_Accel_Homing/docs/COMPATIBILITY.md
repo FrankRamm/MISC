@@ -417,8 +417,8 @@ Unused candidates last until restart and are discarded when sensor or
 calibration context changes; a new run, cancellation, shutdown or manual
 threshold change also clears them. Saving X normally restarts Klipper, so
 remeasure stationary vibration before Y to obtain a new Y candidate.
-Existing candidate escalation, manual recentering, geometry checks and the
-strict ten-home range qualification remain in force.
+See the [current calibration sequence](SIMPLE_CALIBRATION.md) for threshold
+selection, automatic early-impact returns and ten-check qualification.
 
 Stationary vibration in the current motor/fan state does not predict motor
 enable, hold-to-run-current or first-step transients. It does not certify
@@ -430,7 +430,7 @@ remain active.
 
 ## Centered calibration
 
-Start or resume with `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`, or `AXIS=Y`
+Start with `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1`, or `AXIS=Y`
 for Y. Before that command, the operator physically centers both XY axes by
 hand using motor controls appropriate for the machine, with Z supported.
 Both XY axes must be unhomed in Klipper. `CENTERED=1` declares that this manual
@@ -439,15 +439,13 @@ measurement. The workflow does not assign a center coordinate or mark either
 axis homed before the actual home. No further confirmation is requested; the
 first homing pass starts after stationary preparation succeeds.
 
-The first home tests the candidate threshold, starting at 1.0 g by default or
-at an available transient candidate from stationary noise measurement.
+The first home tests the candidate threshold, starting at 1.0 g by default.
 Calibration and saved models accept finite thresholds from 0.5 to 15 g, with
 the configured calibration ceiling and sensor-range limit still applied.
 The default step is 0.25 g, so the first early-trigger retry uses 1.25 g.
 `START_THRESHOLD=1 STEP=0.25` selects those values explicitly for a run and
-skips any stored noise seed. Parameters are validated before workflow effects,
-stored in the session, and cannot change on resume. Repeating the initial
-start parameter while resuming does not reset the current candidate.
+does not consume stationary-noise hints. Parameters are validated before
+workflow effects, stored in the session, and cannot change mid-run.
 Previous models at 1 g and 2 g remain valid. Manual `threshold`, `x_threshold`
 and `y_threshold` settings in either section, and both `SET_ACCEL_HOMING` and
 `SET_BEACON_ACCEL_HOMING`, accept any finite value greater than 0 g. They have
@@ -476,38 +474,26 @@ operations, and acceleration is restored in `finally` after success, failure
 or cancellation. The cap/wait apply only to calibration returns; other
 workflow return behavior and all homing thresholds remain unchanged.
 
-Each accepted home must exceed 10 mm of commanded travel and fall within the
-configured tolerance of expected center-to-stop travel (20% by default).
-These geometry checks apply to the discovery and each validation.
-New calibrations also require the ten geometry-qualified validation
-homes at the same candidate to satisfy `max(travel_mm) - min(travel_mm) < 1.5 mm`.
-The limit is fixed; exactly 1.5 mm fails. Discovery and manual centering are
-excluded, and X/Y have separate validation windows. If the range reaches the
-limit before all ten validations, no later result can make that window pass:
-calibration aborts immediately without a higher threshold, another automatic
-return/home, model staging, config write or restart. The save path independently
-checks ten distinct consecutive homes from the same axis, run and candidate
-after the separate discovery. Metadata and progress expose the range and limit.
-The comparison uses the decimal reported distances; it does not add physical
-precision to the underlying step-count measurement.
-An early trigger raises the candidate, resets validation progress, releases
-XY and invalidates its homed state while retaining Z. The operator manually
-recenters and repeats the same calibration command to resume the pending
-candidate and attempt count, keeping the same `AXIS` and optional `SAVE_CONFIG`
-value. This existing early-hit classification includes pressed starts, travel
-at most 10 mm and travel below the geometry tolerance. It clears all previous
-validation distances; the new candidate requires a fresh qualifying discovery
-and ten new validation homes. Sensor faults and excessive travel abort.
-Native homing errors still
-use stock fault cleanup, which may release all motors.
+Discovery requires an impact after more than 20 mm of commanded travel. The
+discovery impact is excluded from the following ten centered checks; their
+max-minus-min spread must be at most 2 mm. A larger completed window raises
+the candidate and restarts discovery and all ten checks.
+An impact at or before 20 mm instead uses recorded signed start-to-halt travel
+to return only the selected axis to its estimated starting point, settles,
+and retries discovery automatically at the next candidate. It clears the
+selected axis's homed state and the validation window. There is no manual
+fallback when return checks fail. Sensor faults, missing or uncertain evidence
+and homing errors abort; stock homing errors may release all motors.
+See [SIMPLE_CALIBRATION.md](SIMPLE_CALIBRATION.md) for the per-return bounds
+and commanded-travel limitations.
+
 TEST/CHARTS use the same manual preparation, with both XY axes unhomed, and
 start directly with `ACCEL_HOMING_TEST CENTERED=1` or
 `ACCEL_HOMING_CHARTS_GENERATE CENTERED=1`. They retain the prepared XY state
 until homing starts; there is no preliminary XY release or separate
 confirmation command. All three workflows require `CENTERED=1` before any
-workflow movement. Early calibration hits use plain console instructions for
-manual recentering and the same calibration command; the timeout remains
-active. The workflows emit no UI prompt actions.
+workflow movement. Early calibration retries need no additional command.
+The workflows emit no UI prompt actions.
 
 Successful calibration defaults to `SAVE_CONFIG=1`, writing the staged model
 to `printer.cfg` and restarting Klipper. `SAVE_CONFIG=0` stages only in memory;
@@ -728,7 +714,7 @@ Backend status exposes `startup_motion_request_limit_mm`,
 inspection; the limit key reflects the explicit `max_startup_travel` or `null`
 when disabled. These remain software planning values.
 
-The calibration criterion `max(travel_mm) - min(travel_mm) < 1.5 mm` measures
+The calibration criterion `max(travel_mm) - min(travel_mm) <= 2 mm` measures
 spread across ten accepted validation homes. It does not constrain the travel
 of a single home and does not set either optional distance cap. Host latency,
 transport and the mechanical response remain relevant at every speed.
