@@ -623,6 +623,9 @@ def _check_noise_record(run_id, iteration, record):
         vector = _noise_vector(record.get(key), key)
         if key != "baseline_g" and any(value < 0 for value in vector.values()):
             raise ValueError("Stationary noise magnitudes must not be negative")
+    if "noise_magnitude_peak_g" in record and (
+            not _finite(record["noise_magnitude_peak_g"]) or record["noise_magnitude_peak_g"] < 0):
+        raise ValueError("Invalid stationary XYZ-magnitude noise peak")
     for key in ("sensor", "backend", "axis_context"):
         if not isinstance(record.get(key), str) or not record[key] or len(record[key]) > 400:
             raise ValueError("Invalid stationary noise sensor context")
@@ -666,6 +669,11 @@ def _validate_noise_capture(run_id, iteration, capture, record):
                     "noise_rms_g": math.sqrt(math.fsum(value * value for value in values) / len(values))}
         if any(not _same_noise_number(record[key][axis], value) for key, value in computed.items()):
             raise ValueError("Stationary noise statistics do not match measured samples")
+    if "noise_magnitude_peak_g" in record:
+        magnitude_peak = max(math.sqrt(math.fsum(value * value for value in sample[1:]))
+                             for sample in delta)
+        if not _same_noise_number(record["noise_magnitude_peak_g"], magnitude_peak):
+            raise ValueError("Stationary XYZ-magnitude noise peak does not match measured samples")
     return samples, baseline, delta
 
 def _validate_noise_recommendation(recommendation, iterations):
@@ -904,7 +912,7 @@ def _plot_noise(figure, payload):
     if recommendation:
         candidates = recommendation["start_threshold_g"]
         fmt = lambda value: "unavailable" if value is None else "%s g" % _number(value, 4)
-        note = "Initial candidates: X %s; Y %s (not calibrated)." % (
+        note = "Per-axis diagnostic hints: X %s; Y %s (not XYZ-magnitude calibration starts)." % (
             fmt(candidates["x"]), fmt(candidates["y"]),
             )
     else:
@@ -920,10 +928,14 @@ def _plot_noise(figure, payload):
             continue
         record = records[index]
         _traces(axis, traces[index])
-        _axes_summary(axis, ["Window %d (%s s)  |  Peak XYZ: %s g" % (
+        summary = ["Window %d (%s s)  |  Peak XYZ: %s g" % (
                                 index + 1, _number(record["duration_s"]),
                                 " / ".join(_number(record["noise_peak_g"][key]) for key in "xyz")),
-                             "RMS XYZ: %s g" % " / ".join(_number(record["noise_rms_g"][key]) for key in "xyz")])
+                   "RMS XYZ: %s g" % " / ".join(_number(record["noise_rms_g"][key]) for key in "xyz")]
+        if "noise_magnitude_peak_g" in record:
+            summary.append("XYZ-magnitude peak: %s g (calibration metric)" %
+                           _number(record["noise_magnitude_peak_g"], 4))
+        _axes_summary(axis, summary)
         axis.legend(loc="best", ncol=3, fontsize=8)
     for axis in axes[:-1]:
         axis.set_xlabel("")

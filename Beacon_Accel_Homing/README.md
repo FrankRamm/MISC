@@ -59,9 +59,11 @@ Workflows require Cartesian/CoreXY, independent Z
 and stock `G28` (standard `safe_z_home` or `homing_override` is supported);
 see [compatibility](docs/COMPATIBILITY.md).
 
-Calibration uses **three-axis acceleration magnitude** about a fresh resting
+Each new calibration command first measures **three one-second stationary-noise
+windows**. By default, that measurement selects the initial threshold.
+Calibration detects **three-axis acceleration magnitude** about a fresh resting
 offset, with **no quietness gate or acceleration-derived motion proof**.
-It starts at **1.0 g**, with **0.25 g** increments by default.
+Stationary noise does not measure movement or motor-start transients.
 
 An **impact after more than 20 mm of travel** selects the candidate. Reaching
 20 mm without an impact does not stop or qualify the move. It then centers
@@ -86,7 +88,7 @@ Step counts are not physical-position feedback.
 2. In the **printer console**, run:
 
    ```gcode
-   ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
+   ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
    ```
 
    **`CENTERED=1` authorizes movement without another confirmation.**
@@ -95,12 +97,13 @@ Step counts are not physical-position feedback.
 4. After restart, repeat step 1, then calibrate Y:
 
    ```gcode
-   ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1 START_THRESHOLD=1 STEP=0.25
+   ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1
    ```
 
 Early-hit retries run automatically; do not reissue the command during a run.
-The explicit start and step above override older configuration values and
-do not consume stationary-noise hints.
+Noise is measured once per new calibration command, not for each retry.
+If measurement or its summary export fails, calibration aborts before movement.
+The measured threshold is an initial candidate, not a proven minimum.
 After physically validating both axes, use the printer's normal homing controls.
 
 ## Mainsail / Fluidd console commands
@@ -114,13 +117,13 @@ TEST, CHARTS and ACCURACY need the same manual preparation as calibration.
 | `ACCEL_HOMING_STATUS` | Show settings, progress and results. |
 | `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` | Calibrate X; saves X and restarts Klipper. |
 | `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` | Calibrate Y; saves Y and restarts Klipper. |
-| `ACCEL_HOMING_CALIBRATE_NOISE` | Optional stationary diagnostic; no movement and no automatic calibration seeding. |
+| `ACCEL_HOMING_CALIBRATE_NOISE` | Separate stationary diagnostic; calibration already measures fresh noise. |
 | `ACCEL_HOMING_TEST CENTERED=1` | Test X and Y. |
 | `ACCEL_HOMING_CHARTS_GENERATE AXIS=X CENTERED=1` | Chart X; use `AXIS=Y` or omit `AXIS` for both. |
 | `ACCEL_HOMING_ACCURACY AXIS=X SAMPLES=10 CENTERED=1` | Measure repeated X commanded-travel variation and keep one final accuracy PNG per requested axis. |
 | `ACCEL_HOMING_CANCEL` | Cancel pending work; not an emergency stop. |
 
-Noise measurement is diagnostic only; it does not choose the starting threshold for simple calibration.
+Standalone NOISE does not move the printer, and its results are not reused by calibration.
 New saved models preserve XYZ-magnitude detection for ordinary homing after restart.
 
 ACCURACY removes its temporary per-home PNGs after saving the final summaries,

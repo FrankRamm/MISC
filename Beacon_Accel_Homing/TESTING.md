@@ -1,5 +1,34 @@
 # Offline verification
 
+## Stationary-noise preflight before calibration — 2026-10-28
+
+This change was reviewed from source only. Regression sources were updated but
+**not executed or imported**; no plugin import, compilation, rendering, printer
+connection or printer command was performed. Historical test counts below do
+not verify this revision.
+
+Regression sources: `tests/test_calibration_noise_preflight.py`,
+`tests/test_retract_noise.py`, `tests/test_accuracy_charts.py` and the shared
+synthetic fixture in `tests/test_workflows.py`.
+The intended cases cover three fresh stationary windows and completed PNG
+export before each new per-axis calibration's first movement; no remeasurement
+on candidate retries; and no reuse of an older standalone diagnostic result.
+Automatic initial selection uses mean-removed per-sample XYZ magnitude,
+including multi-channel noise, rather than mapped X/Y component hints.
+An explicit `START_THRESHOLD` retains its value while still requiring the
+measurement; an explicit `STEP` supplies the selection grid spacing.
+Unknown sensor range and over-ceiling automatic candidates abort without
+clamping or fallback. Acquisition/context/export faults, cancellation and
+shutdown must abort before movement and must not publish a successful seed.
+Status/model metadata distinguish the measurement from an automatic seed and
+preserve the current measurement's identity and magnitude provenance.
+
+The >20 mm discovery rule, ten subsequent validation homes, <=2 mm complete-set
+spread and existing attempt/threshold limits are unchanged. Stationary noise
+does not qualify motor-start or travel transients. These are synthetic source
+cases and an initial-value heuristic, not executed verification, a certified
+minimum threshold or hardware performance evidence.
+
 ## Automatic early-trigger calibration return — 2026-10-28
 
 This change was reviewed from source only. Regression sources were updated but

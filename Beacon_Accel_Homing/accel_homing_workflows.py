@@ -557,7 +557,8 @@ class AccelHomingWorkflows:
         if session is None:
             return
         if session["mode"] == "noise":
-            self.owner.stop_noise_measurement()
+            if session.get("sensor_started"):
+                self.owner.stop_noise_measurement()
             session["sensor_stopped"] = True
             return
         try:
@@ -577,6 +578,8 @@ class AccelHomingWorkflows:
                 result = dict(result, **{key: session[key] for key in (
                     "start_threshold_g", "threshold_step_g", "quiet_range_enforced",
                     "calibration_settle_time_s")})
+                if session.get("stationary_noise") is not None:
+                    result["stationary_noise"] = dict(session["stationary_noise"])
             session["finishing"] = True
             session["finish_result"] = result.get("result")
         try:
@@ -737,6 +740,7 @@ class AccelHomingWorkflows:
             raise gcmd.error("START_THRESHOLD exceeds the safe calibration threshold ceiling")
         grid["explicit_calibration_grid"] = any(gcmd.get(key, None) is not None
                                                 for key in ("START_THRESHOLD", "STEP"))
+        grid["explicit_start_threshold"] = gcmd.get("START_THRESHOLD", None) is not None
         return grid
 
     def _begin(self, gcmd, mode, axis=None, axes=None, calibration_grid=None):
@@ -765,13 +769,14 @@ class AccelHomingWorkflows:
                                 algorithm=SIMPLE_CALIBRATION, restarts=0,
                                 quiet_range_enforced=False,
                                 calibration_settle_time_s=self.calibration_settle_time)
-            # A stationary-noise seed is not part of this calibration policy.
             self._clear_noise_seeds()
-            self._info("%s calibration starts at %.6g g with %.6g g steps; XYZ magnitude; "
-                       "impact after >20 mm then ten centered endstop checks with spread <= 2 mm; "
-                       "no quietness or acceleration-derived motion proof; returns settle for %.3f s" % (
-                           axis.upper(), self.session["candidate"], self.session["threshold_step_g"],
-                           self.session["calibration_settle_time_s"]))
+
+    def _announce_calibration(self, session):
+        self._info("%s calibration starts at %.6g g with %.6g g steps; XYZ magnitude; "
+                   "impact after >20 mm then ten centered endstop checks with spread <= 2 mm; "
+                   "no quietness or acceleration-derived motion proof; returns settle for %.3f s" % (
+                       session["axis"].upper(), session["candidate"], session["threshold_step_g"],
+                       session["calibration_settle_time_s"]))
 
     def _wait_center(self, reason):
         self._restore()
@@ -841,9 +846,11 @@ class AccelHomingWorkflows:
                 tuple(sorted(self.owner.impact_sign.items())),
                 self.owner.homing_accel, self.owner.back_off_dist, tuple(sorted(motors)))
 
-    def _preflight_noise(self):
-        if self.session is not None:
+    def _preflight_noise(self, session=None):
+        if self.session is not None and self.session is not session:
             raise self._error("a workflow is already active; use ACCEL_HOMING_CANCEL first")
+        if session is not None:
+            self._check_running(session)
         if hasattr(self.printer, "is_shutdown") and self.printer.is_shutdown():
             raise self._error("printer is shut down")
         if self._printing() or self._status("idle_timeout").get("state") == "Printing":
@@ -913,10 +920,14 @@ class AccelHomingWorkflows:
             rms[axis] = math.sqrt(math.fsum(value * value for value in deltas) / len(deltas))
             spread[axis] = max(values) - min(values)
         capture["baseline_g"] = tuple(baseline[axis] for axis in "xyz")
+        magnitude_peak = max(math.sqrt(math.fsum((row[index] - baseline[axis]) ** 2
+                                                for index, axis in enumerate("xyz", 1)))
+                             for row in samples)
         return {"run_id": session["run_id"], "noise_iteration": iteration,
                 "duration_s": samples[-1][0] - samples[0][0], "sample_count": len(samples),
                 "first_sample_time_s": samples[0][0], "last_sample_time_s": samples[-1][0],
                 "baseline_g": baseline, "noise_peak_g": peaks,
+                "noise_magnitude_peak_g": magnitude_peak,
                 "noise_peak_to_peak_g": spread, "noise_rms_g": rms,
                 "sensor": context["sensor"], "backend": context["backend"],
                 "full_scale_g": context["full_scale_g"],
@@ -954,6 +965,8 @@ class AccelHomingWorkflows:
                   "iterations_requested": NOISE_ITERATIONS,
                   "iterations": list(session["iterations"]),
                   "recommendation": recommendation, **ending}
+        if session.get("calibration_preflight"):
+            result.update(purpose="calibration_preflight", calibration_axis=session["axis"])
         timing_fault = getattr(self.owner, "sample_timing_fault", None)
         if (not complete and timing_fault is not None
                 and timing_fault is not session.get("timing_fault_before")):
@@ -970,6 +983,127 @@ class AccelHomingWorkflows:
                 result.update(result="aborted", reason="noise summary export failed: %s" % exc)
         return result
 
+    def _begin_noise(self, session=None):
+        context = self._noise_context()
+        if session is None:
+            session = {"run_id": uuid.uuid4().hex}
+        else:
+            self._check_running(session)
+        session.update(mode="noise", state="running", iterations=[], context=context,
+                       snapshot=self._noise_snapshot(), noise_generation=self.owner.operation_generation,
+                       timing_fault_before=getattr(self.owner, "sample_timing_fault", None),
+                       iteration=0, recommendation=None, sensor_started=False, sensor_stopped=True)
+        self.session = session
+        return session
+
+    def _measure_noise(self, session):
+        self._check_running(session)
+        self._check_stopped_noise_context(session)
+        session["sensor_stopped"] = False
+        session["sensor_started"] = True
+        if self.owner.start_noise_measurement() != session["context"]["sensor"]:
+            raise self._error("sensor context changed before stationary noise measurement")
+        session["sensor_token"] = self.owner.noise_session
+        self._info("Recording three stationary one-second windows with the current motor/fan state. "
+                   "Keep the toolhead still; no homing or motor-state changes are requested")
+        for iteration in range(1, NOISE_ITERATIONS + 1):
+            session["iteration"] = iteration
+            capture = self.owner.collect_noise_window(lambda: self._check_noise_running(session),
+                                                      NOISE_DURATION)
+            self._check_noise_running(session)
+            record = self._noise_record(session, iteration, capture)
+            try:
+                paths = write_noise_capture(self.charts_directory, session["run_id"],
+                                            iteration, capture, record, **self._chart_options(session))
+            finally:
+                del capture
+            session["iterations"].append({"record": record, "capture_paths": paths})
+            self._check_noise_running(session)
+            self._info("Stationary noise window %d/3 complete: X %.6g g, Y %.6g g, Z %.6g g; "
+                       "XYZ magnitude %.6g g after subtracting this window's mean" % (
+                           iteration, *(record["noise_peak_g"][axis] for axis in "xyz"),
+                           record["noise_magnitude_peak_g"]))
+        session["recommendation"] = self._noise_recommend(session)
+        self._check_noise_running(session)
+
+    def _calibration_noise_preflight(self, session):
+        # _begin has validated CENTERED, the command parameters and the motion
+        # policy without moving or changing motor state. Keep this exact active
+        # dictionary through stationary acquisition, PNG yields and transition.
+        self._begin_noise(session)
+        session["calibration_preflight"] = True
+        self._chart_preflight()
+        self._preflight([session["axis"]])
+        self._require_unhomed_xy()
+        self._preflight_noise(session)
+        self._check_stopped_noise_context(session)
+        self._measure_noise(session)
+        self._restore()
+        session.update(finishing=True, finish_result="complete")
+        try:
+            noise_result = self._noise_result(session, {"result": "complete"})
+            if noise_result["result"] != "complete":
+                raise self._error(noise_result.get("reason", "noise export failed"))
+            self._chart_check(session)
+        finally:
+            session.pop("finishing", None)
+            session.pop("finish_result", None)
+        # Renderer and sensor setup can yield. The initial manual-centering
+        # acknowledgement only remains valid while the full context is intact.
+        self._check_running(session)
+        self._preflight([session["axis"]])
+        self._require_unhomed_xy()
+        self._check_stopped_noise_context(session)
+        peaks = [item["record"].get("noise_magnitude_peak_g") for item in session["iterations"]]
+        if (len(peaks) != NOISE_ITERATIONS or any(
+                not isinstance(peak, (int, float)) or isinstance(peak, bool)
+                or not math.isfinite(peak) or peak < 0.0 for peak in peaks)):
+            raise self._error("calibration requires three measured XYZ-magnitude noise peaks")
+        peak = max(peaks)
+        start, step = session["start_threshold_g"], session["threshold_step_g"]
+        # Decimal avoids an extra grid step from binary roundoff at an exact
+        # boundary. A noisy candidate must never be rounded or clamped downward.
+        start_decimal, step_decimal = Decimal(str(start)), Decimal(str(step))
+        peak_decimal = Decimal(str(peak))
+        required_decimal = max(start_decimal, Decimal("1.2") * peak_decimal,
+                               peak_decimal + Decimal("0.1"))
+        required = float(required_decimal)
+        steps = math.ceil((required_decimal - start_decimal) / step_decimal)
+        candidate = float(start_decimal + steps * step_decimal)
+        full_scale = session["context"]["sensor"]["full_scale_g"]
+        limit = min(self._threshold_limit(), 15.0, 0.8 * full_scale) if full_scale else None
+        explicit = session["explicit_start_threshold"]
+        session["stationary_noise"] = {
+            "run_id": session["run_id"], "iterations": NOISE_ITERATIONS,
+            "impact_metric": "xyz_magnitude", "noise_magnitude_peak_g": peak,
+            "initial_threshold_source": "explicit_start_threshold" if explicit else "stationary_noise",
+            "start_threshold_g": start if explicit else candidate,
+            "summary_paths": dict(noise_result["summary_paths"])}
+        if not explicit:
+            if limit is None:
+                raise self._error("stationary XYZ-magnitude noise cannot select a calibration start "
+                                  "without a known sensor range; specify START_THRESHOLD explicitly")
+            if candidate > limit or candidate <= peak:
+                raise self._error("stationary XYZ-magnitude noise requires %.6g g, above the safe "
+                                  "calibration threshold ceiling %.6g g; calibration aborted" % (
+                                      candidate, limit))
+            session["noise_seed"] = {
+                "run_id": session["run_id"], "source": "stationary_noise",
+                "impact_metric": "xyz_magnitude", "noise_magnitude_peak_g": peak,
+                "required_threshold_g": required, "start_threshold_g": candidate,
+                "configured_start_g": start, "candidate_step_g": step, "threshold_limit_g": limit,
+                "margin_factor": 1.2, "margin_g": 0.1}
+            session.update(start_threshold_g=candidate, candidate=candidate)
+            self._info("Fresh stationary XYZ-magnitude peak %.6g g selects initial candidate %.6g g; "
+                       "ten-home qualification remains required" % (peak, candidate))
+        else:
+            self._info("Fresh stationary XYZ-magnitude peak %.6g g measured; explicit START_THRESHOLD "
+                       "%.6g g remains the initial candidate" % (peak, start))
+        self._announce_calibration(session)
+        self._check_running(session)
+        self._check_stopped_noise_context(session)
+        session.update(mode="calibration", state="running")
+
     def cmd_NOISE(self, gcmd):
         self._clear_noise_seeds()
         self._preflight_noise()
@@ -977,49 +1111,21 @@ class AccelHomingWorkflows:
         self._preflight_noise()
         if gcmd.get("SAVE_CONFIG", None) is not None:
             raise gcmd.error("SAVE_CONFIG is not supported by ACCEL_HOMING_CALIBRATE_NOISE")
-        context = self._noise_context()
-        session = {"mode": "noise", "state": "running", "run_id": uuid.uuid4().hex,
-                   "iterations": [], "context": context, "snapshot": self._noise_snapshot(),
-                   "noise_generation": self.owner.operation_generation,
-                   "timing_fault_before": getattr(self.owner, "sample_timing_fault", None),
-                   "iteration": 0, "recommendation": None}
-        self.session = session
+        session = self._begin_noise()
         try:
-            if self.owner.start_noise_measurement() != context["sensor"]:
-                raise self._error("sensor context changed before stationary noise measurement")
-            session["sensor_token"] = self.owner.noise_session
-            self._info("Recording three stationary one-second windows with the current motor/fan state. "
-                       "Keep the toolhead still; no homing or motor-state changes are requested")
-            for iteration in range(1, NOISE_ITERATIONS + 1):
-                session["iteration"] = iteration
-                capture = self.owner.collect_noise_window(lambda: self._check_noise_running(session),
-                                                          NOISE_DURATION)
-                self._check_noise_running(session)
-                record = self._noise_record(session, iteration, capture)
-                try:
-                    paths = write_noise_capture(self.charts_directory, session["run_id"],
-                                                iteration, capture, record, **self._chart_options(session))
-                finally:
-                    del capture
-                session["iterations"].append({"record": record, "capture_paths": paths})
-                self._check_noise_running(session)
-                self._info("Stationary noise window %d/3 complete: X %.6g g, Y %.6g g, Z %.6g g "
-                           "absolute peaks after subtracting this window's mean" % (
-                               iteration, *(record["noise_peak_g"][axis] for axis in "xyz")))
-            session["recommendation"] = self._noise_recommend(session)
-            self._check_noise_running(session)
+            self._measure_noise(session)
             self._finish({"result": "complete"})
             if self.last_result["result"] != "complete":
                 raise self._error(self.last_result.get("reason", "noise export failed"))
             self._check_stopped_noise_context(session)
             self.noise_recommendation = {"run_id": session["run_id"], **session["recommendation"]}
-            self.noise_seed_context = context
+            self.noise_seed_context = session["context"]
             self.noise_seeds = {axis: value for axis, value in
                                 session["recommendation"]["start_threshold_g"].items()
                                 if value is not None}
-            self._info("Noise measurement complete. Stationary threshold hints: %s. Ordinary homing "
-                       "thresholds are unchanged. Simple calibration does not use these hints; it starts "
-                       "at its configured or explicit START_THRESHOLD and tests commanded travel" %
+            self._info("Noise measurement complete. Per-axis stationary threshold hints: %s. Ordinary "
+                       "homing thresholds are unchanged. Each fresh calibration measures its own "
+                       "XYZ-magnitude noise; these component hints are not reused" %
                        ", ".join("%s=%s" % (axis.upper(), "unavailable above the safe ceiling" if value is None
                                              else "%.6g g" % value)
                                  for axis, value in session["recommendation"]["start_threshold_g"].items()))
@@ -1608,6 +1714,8 @@ class AccelHomingWorkflows:
                     "physical_position_verified": False}
         if session.get("noise_seed") is not None:
             metadata["stationary_noise_seed"] = dict(session["noise_seed"])
+        if session.get("stationary_noise") is not None:
+            metadata["stationary_noise_measurement"] = dict(session["stationary_noise"])
         encoded_metadata = json.dumps(metadata, separators=(",", ":"), allow_nan=False)
         configfile = self.printer.lookup_object("configfile")
         configfile.set(self.model_section, "version", "1")
@@ -1639,6 +1747,8 @@ class AccelHomingWorkflows:
             self._info("Model staged only. Run SAVE_CONFIG to write printer.cfg and restart")
 
     def cmd_CALIBRATE(self, gcmd):
+        if self.session is None:
+            self._clear_noise_seeds()
         axis = gcmd.get("AXIS", "").lower()
         if axis not in AXES:
             raise gcmd.error("AXIS must be X or Y")
@@ -1657,13 +1767,16 @@ class AccelHomingWorkflows:
             return
         grid = self._calibration_grid(gcmd)
         self._begin(gcmd, "calibration", axis, calibration_grid=grid)
+        session = self.session
         try:
-            self.session["state"] = "running"
+            self._calibration_noise_preflight(session)
             self._calibrate_trials()
         except Exception as exc:
-            if self.session is not None:
+            if self.session is session:
                 self._finish({"result": "aborted", "reason": str(exc)},
-                             release=not self.session.get("early_return_cleanup", False))
+                             release=(session["mode"] == "calibration"
+                                      and session.get("axis_touched", False)
+                                      and not session.get("early_return_cleanup", False)))
             raise
 
     def _continue_calibration(self):
@@ -1968,6 +2081,8 @@ class AccelHomingWorkflows:
                       "iteration": session["iteration"], "iterations_requested": NOISE_ITERATIONS,
                       "iterations_completed": len(session["iterations"]),
                       "duration_per_iteration_s": NOISE_DURATION}
+            if session.get("calibration_preflight"):
+                active.update(purpose="calibration_preflight", calibration_axis=session["axis"])
         elif active is not None:
             active["repeatability_limit_mm"] = (CALIBRATION_REPEATABILITY_MM
                                                   if session["mode"] == "calibration" else REPEATABILITY_LIMIT_MM)
@@ -1980,6 +2095,8 @@ class AccelHomingWorkflows:
                               minimum_impact_travel_mm=CALIBRATION_MIN_TRAVEL_MM,
                               discovery_impact_required=True, recenter_policy="selected_axis_midpoint",
                               phase="validation" if session["candidate_qualified"] else "discovery")
+                if session.get("stationary_noise") is not None:
+                    active["stationary_noise"] = dict(session["stationary_noise"])
         return {"model": self.model_name, "manual_threshold_overrides": sorted(self.manual_axes),
                 "active": active, "last_result": self.last_result,
                 "noise_recommendation": self.noise_recommendation,
