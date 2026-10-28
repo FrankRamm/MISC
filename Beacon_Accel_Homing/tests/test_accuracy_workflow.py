@@ -152,6 +152,45 @@ class AccuracyWorkflowTests(unittest.TestCase):
             self.assertTrue(any("variance" in line and "mm^2" in line for line in rig.output))
             self.assert_restored(rig)
 
+    def test_exact_travel_statistics_match_summary_when_console_values_are_equal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = AccuracyRig({"charts_directory": temp})
+            exact = (150.000244140625, 150.00048828125)
+            rig.home_results.extend([{"travel_mm": 145.}] +
+                                    [{"travel_mm": 150., "travel_mm_exact": value} for value in exact])
+            rig.accuracy()
+            result = rig.workflow.last_result
+            self.assertEqual(result["result"], "complete")
+            axis = result["axis_results"]["x"]
+            self.assertEqual([trial["travel_mm"] for trial in axis["trials"]], [150., 150.])
+            expected = {"count": 2, "min_mm": exact[0], "max_mm": exact[1],
+                        "mean_mm": 150.0003662109375, "spread_mm": .000244140625,
+                        "stddev_mm": .0001220703125, "variance_mm2": 2. ** -26,
+                        "variance_definition": "population (divide by N)"}
+            self.assertEqual(axis["statistics"], expected)
+            summary = [item for item in rig.workflow.renderer.calls if item["kind"] == "accuracy"][-1]
+            self.assertEqual(summary["statistics"], expected)
+            self.assert_restored(rig)
+
+    def test_invalid_exact_travel_is_rejected_without_losing_prior_measurements(self):
+        for invalid in (None, True, "150.25", 0., -1., float("nan"), float("inf")):
+            with self.subTest(exact=invalid), tempfile.TemporaryDirectory() as temp:
+                rig = AccuracyRig({"charts_directory": temp})
+                rig.home_results.extend([{}, {"travel_mm_exact": 150.25}, {"travel_mm_exact": invalid}])
+                with self.assertRaisesRegex(CommandError, "invalid exact commanded travel"):
+                    rig.accuracy()
+                result = rig.workflow.last_result
+                axis = result["axis_results"]["x"]
+                self.assertEqual(result["result"], "aborted")
+                self.assertEqual(len(axis["trials"]), 1)
+                self.assertEqual(axis["statistics"]["mean_mm"], 150.25)
+                self.assertIsNone(axis["statistics"]["variance_mm2"])
+                self.assertIsNotNone(axis["rejected"])
+                self.assertFalse(axis["complete"])
+                self.assertEqual(len(rig.toolhead.moves), 2)
+                self.assertIn("summary_paths", result)
+                self.assert_restored(rig)
+
     def test_xy_default_and_explicit_order_recenter_x_before_y_preserve_z(self):
         for requested in (None, "XY"):
             for z_homed in (False, True):
@@ -445,8 +484,9 @@ class AccuracyWorkflowTests(unittest.TestCase):
             self.assert_restored(rig)
 
     def test_export_failure_preserves_trials_partial_status_and_existing_capture_paths(self):
-        for target in ("capture", "summary"):
-            with self.subTest(target=target), tempfile.TemporaryDirectory() as temp:
+        for target, error_type in (("capture", ValueError), ("capture", OSError),
+                                   ("summary", ValueError), ("summary", OSError)):
+            with self.subTest(target=target, error_type=error_type), tempfile.TemporaryDirectory() as temp:
                 rig = AccuracyRig({"charts_directory": temp})
                 writer = workflow_module.write_capture
                 count = 0
@@ -454,13 +494,13 @@ class AccuracyWorkflowTests(unittest.TestCase):
                     nonlocal count
                     count += 1
                     if count == 2:
-                        raise OSError("synthetic capture export failure")
+                        raise error_type("synthetic capture export failure")
                     return writer(*args, **kwargs)
                 with mock.patch.object(workflow_module, "write_capture", side_effect=fail_second) \
                         if target == "capture" else mock.patch.object(
-                            workflow_module, "write_accuracy", side_effect=OSError("synthetic summary export failure")):
+                            workflow_module, "write_accuracy", side_effect=error_type("synthetic summary export failure")):
                     logs = self.assertLogs(level="ERROR") if target == "summary" else contextlib.nullcontext()
-                    with logs, self.assertRaises(Exception):
+                    with logs, self.assertRaisesRegex(CommandError, "synthetic %s export failure" % target):
                         rig.accuracy()
                 result = rig.workflow.last_result
                 self.assertEqual(result["result"], "aborted")
@@ -473,6 +513,66 @@ class AccuracyWorkflowTests(unittest.TestCase):
                     self.assertIn("summary_paths", result)
                     self.assertEqual(result["axis_results"]["x"]["capture_paths"], [None])
                 self.assert_restored(rig)
+
+    def test_summary_validation_errors_are_command_errors_after_safe_cleanup(self):
+        for error_type in (ValueError, OSError):
+            with self.subTest(error_type=error_type), tempfile.TemporaryDirectory() as temp:
+                rig = AccuracyRig({"charts_directory": temp})
+                fault = error_type("synthetic summary validation failure")
+                with mock.patch.object(workflow_module, "validate_accuracy", side_effect=fault), \
+                        self.assertRaisesRegex(CommandError, "accuracy summary validation failed") as caught:
+                    rig.accuracy()
+                self.assertIs(caught.exception.__cause__, fault)
+                result = rig.workflow.last_result
+                self.assertEqual(result["result"], "aborted")
+                self.assertIn("synthetic summary validation failure", result["reason"])
+                self.assertEqual(result["axis_results"]["x"]["statistics"]["count"], 2)
+                self.assertEqual(len(rig.home_calls), 3)
+                self.assertEqual(len(rig.toolhead.moves), 2)
+                self.assertEqual(set(rig.disabled), {"stepper_x", "stepper_y"})
+                self.assertIn("summary_paths", result)
+                self.assert_restored(rig)
+
+    def test_motion_and_restoration_faults_are_not_reclassified_as_chart_errors(self):
+        for stage in ("recenter", "terminal_release", "restore"):
+            for error_type in (ValueError, OSError, RuntimeError):
+                with self.subTest(stage=stage, error_type=error_type), tempfile.TemporaryDirectory() as temp:
+                    rig = AccuracyRig({"charts_directory": temp})
+                    fault = error_type("synthetic %s failure" % stage)
+                    if stage == "restore":
+                        original = rig.owner._end_session
+                        def fail_final_restore():
+                            original()
+                            if rig.capture_stops == 3:
+                                raise fault
+                        patch = mock.patch.object(rig.owner, "_end_session", side_effect=fail_final_restore)
+                    else:
+                        method = "_recenter" if stage == "recenter" else "_release_terminal_home"
+                        patch = mock.patch.object(rig.workflow, method, side_effect=fault)
+                    with patch, self.assertRaises(error_type) as caught:
+                        rig.accuracy()
+                    self.assertIs(caught.exception, fault)
+                    self.assertEqual(rig.workflow.last_result["result"], "aborted")
+                    self.assertIn(str(fault), rig.workflow.last_result["reason"])
+                    self.assert_restored(rig)
+
+    def test_restoration_failure_takes_precedence_over_controlled_validation_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            rig = AccuracyRig({"charts_directory": temp})
+            original = rig.owner._end_session
+            fault = OSError("synthetic restoration failure during export-error cleanup")
+            def fail_final_restore():
+                original()
+                if rig.capture_stops == 3:
+                    raise fault
+            with mock.patch.object(workflow_module, "validate_accuracy", side_effect=ValueError("bad statistics")), \
+                    mock.patch.object(rig.owner, "_end_session", side_effect=fail_final_restore), \
+                    self.assertRaises(OSError) as caught:
+                rig.accuracy()
+            self.assertIs(caught.exception, fault)
+            self.assertIn("workflow cleanup failed", rig.workflow.last_result["reason"])
+            self.assertEqual(rig.workflow.last_result["result"], "aborted")
+            self.assert_restored(rig)
 
     def test_final_restoration_failure_is_aborted_before_summary_publication(self):
         with tempfile.TemporaryDirectory() as temp:

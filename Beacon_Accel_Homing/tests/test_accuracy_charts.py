@@ -41,7 +41,7 @@ class RecordingRenderer:
 
 
 def simulated_axis(directory, run_id, axis="x", travels=(175.0, 175.2), requested=None,
-                   attempt_start=1, threshold=1.005, renderer=None):
+                   attempt_start=1, threshold=1.005, renderer=None, exact_travels=None):
     """Publish unmistakably synthetic per-home captures in the production shape."""
     requested = len(travels) if requested is None else requested
     item = {"requested_samples": requested, "complete": len(travels) == requested,
@@ -54,6 +54,8 @@ def simulated_axis(directory, run_id, axis="x", travels=(175.0, 175.2), requeste
                   "accuracy_sample": index, "result": "impact", "travel_mm": travel,
                   "onset_g": -1.125, "impact_peak_g": 2.75, "threshold_g": threshold,
                   "workflow_threshold_g": threshold, "direction": -1, "onset_time_s": 1.002}
+        if exact_travels is not None:
+            record["travel_mm_exact"] = 174.5 if index == 0 else exact_travels[index - 1]
         impact = [[1.002, .2, -.1, 1.], [1.003, .2, -.1, 1.]]
         channel = 1 if axis == "x" else 2
         impact[0][channel] -= 1.125
@@ -484,6 +486,68 @@ class PortablePNGTests(unittest.TestCase):
 
 
 class AccuracyPNGTests(unittest.TestCase):
+    def test_exact_travel_statistics_validate_without_console_rounding(self):
+        exact = (175.000244140625, 175.00048828125)
+        expected = {"count": 2, "min_mm": exact[0], "max_mm": exact[1],
+                    "mean_mm": 175.0003662109375, "spread_mm": .000244140625,
+                    "stddev_mm": .0001220703125, "variance_mm2": 2. ** -26,
+                    "variance_definition": "population (divide by N)"}
+        renderer = RecordingRenderer()
+        with tempfile.TemporaryDirectory() as temp:
+            item = simulated_axis(temp, "precise", travels=(175., 175.), exact_travels=exact,
+                                  renderer=renderer)
+            item["statistics"] = expected.copy()
+            checked = charts.validate_accuracy(temp, "precise", {"x": item}, simulated=True)
+            self.assertEqual(checked["x"]["statistics"], expected)
+            charts.write_accuracy(temp, "precise", {"x": item}, "complete", simulated=True,
+                                  renderer=renderer)
+            self.assertEqual(renderer.payloads[-1]["statistics"], expected)
+            self.assertEqual([trial["travel_mm_exact"] for trial in renderer.payloads[-1]["trials"]],
+                             list(exact))
+            for key in ("count", "min_mm", "max_mm", "mean_mm", "spread_mm", "stddev_mm", "variance_mm2"):
+                with self.subTest(corrupt_statistic=key):
+                    item["statistics"] = {**expected, key: expected[key] + 1.}
+                    with self.assertRaisesRegex(ValueError, "statistics do not match"):
+                        charts.validate_accuracy(temp, "precise", {"x": item}, simulated=True)
+
+    def test_statistics_fall_back_per_record_only_when_exact_travel_is_absent(self):
+        stats = charts._accuracy_statistics([{"travel_mm": 175.},
+                                             {"travel_mm": 175., "travel_mm_exact": 175.25}])
+        self.assertEqual((stats["min_mm"], stats["max_mm"], stats["mean_mm"], stats["spread_mm"]),
+                         (175., 175.25, 175.125, .25))
+        self.assertEqual(stats["variance_mm2"], .015625)
+        self.assertEqual(stats["stddev_mm"], .125)
+        for invalid in (None, True, "175.25", 0., -1., float("nan"), float("inf")):
+            with self.subTest(exact=invalid):
+                trial = {"travel_mm": 175., "travel_mm_exact": invalid}
+                with self.assertRaisesRegex(ValueError, "invalid commanded travel"):
+                    charts._accuracy_statistics([trial])
+                record = {**trial, "run_id": "invalid", "axis": "x", "workflow_phase": "measurement",
+                          "accuracy_sample": 1, "workflow_attempt": 2, "result": "impact",
+                          "onset_g": 1., "impact_peak_g": 2., "threshold_g": 1., "direction": -1}
+                with self.assertRaisesRegex(ValueError, "invalid travel"):
+                    charts._check_accuracy_record(record, "invalid", "x", "measurement", 1, set())
+
+    def test_travel_plot_and_capture_labels_select_exact_measurements(self):
+        figure = mock.Mock()
+        figure.get_figheight.return_value = 7.
+        axes = [mock.Mock() for _ in range(4)]
+        figure.subplots.return_value = axes
+        trials = [{"travel_mm": 175., "travel_mm_exact": 175.000244140625},
+                  {"travel_mm": 175.}]
+        charts._plot_accuracy(figure, {"axis": "x", "timestamp": "SIMULATED", "simulated": True,
+                                       "trials": trials, "traces": [], "statistics": {}, "requested": 2})
+        self.assertEqual(axes[0].plot.call_args.args[1], [175.000244140625, 175.])
+        for exact, label in ((175.004, "175.004"), (0., "0"), (None, "n/a")):
+            with self.subTest(exact=exact):
+                axis = mock.Mock()
+                figure.subplots.return_value = axis
+                charts._plot_capture(figure, {"axis": "x", "timestamp": "SIMULATED", "simulated": True,
+                                              "record": {"travel_mm": 175., "travel_mm_exact": exact},
+                                              "trace": [(0., 0., 0., 0.), (.001, 1., 0., 0.)],
+                                              "capture": {"first_sample_time_s": 0., "sample_count": 2}})
+                self.assertIn("Travel: %s mm" % label, axis.set_title.call_args.args[0])
+
     def test_complete_per_axis_pngs_retain_population_stats_and_actual_traces(self):
         renderer = RecordingRenderer()
         with tempfile.TemporaryDirectory() as temp:
