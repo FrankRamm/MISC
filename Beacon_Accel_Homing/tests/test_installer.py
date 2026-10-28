@@ -74,7 +74,7 @@ SAVED = """
 #*# [accel_homing_model default]
 #*# x_threshold = 6.5
 """
-TRAVEL_LIMITS = "\n[accel_homing]\nmax_report_travel: 1.0\nmax_startup_travel: 3.0\n"
+TRAVEL_LIMITS = "\n[accel_homing]\nmax_sample_age: 0.020\nmax_report_travel: 1.0\nmax_startup_travel: 3.0\n"
 SAFE_Z_HOME = """# Preserve the operator's probe homing setup
 [safe_z_home]
 home_xy_position: 175, 175
@@ -146,7 +146,7 @@ class HostFixture(unittest.TestCase):
 
     def retained_y_policy_fixture(self, options, speed=50, startup=4.5):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
-                               "\n[accel_homing]\nmax_report_travel: 1.5\nmax_startup_travel: "
+                               "\n[accel_homing]\nmax_sample_age: 0.020\nmax_report_travel: 1.5\nmax_startup_travel: "
                                + str(startup) + "\n" + SAVED)
         self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 50")
                              .replace("homing_speed: 35", "homing_speed: " + str(speed))
@@ -296,7 +296,7 @@ class HostFixture(unittest.TestCase):
         self.assertNotIn(b"max_startup_travel", self.config.read_bytes())
 
     def test_existing_individual_distance_limit_is_honored_without_adding_the_other(self):
-        for option, value, conflict in (("max_report_travel", "1", "report-speed limit 50 mm/s"),
+        for option, value, conflict in (("max_report_travel", "1", "report-speed limit 20 mm/s"),
                                         ("max_startup_travel", "3", "3 mm max_startup_travel limit")):
             with self.subTest(option=option):
                 self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
@@ -306,12 +306,12 @@ class HostFixture(unittest.TestCase):
                 before = self.config.read_bytes()
                 with self.assertRaisesRegex(installer.InstallError, conflict):
                     self.plan()
-                changes = self.plan("--homing-speed", "40")[0]
+                changes = self.plan("--homing-speed", "20")[0]
                 self.assertNotIn(self.config, changes)
                 self.assertEqual(self.config.read_bytes(), before)
 
     def test_absent_distance_policies_still_reject_invalid_timing_before_staging(self):
-        settings = ("max_sample_age: 0.004", "max_sample_age: nan", "stream_interval: 0.020",
+        settings = ("max_sample_age: 0.004", "max_sample_age: nan", "stream_interval: 0.021",
                     "stream_interval: inf")
         for setting in settings:
             with self.subTest(setting=setting):
@@ -433,7 +433,7 @@ class HostFixture(unittest.TestCase):
 
     def test_generic_low_accel_explicit_startup_limit_refuses_without_lowering_speed(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]").replace("max_accel: 5000", "max_accel: 1000")
-                               + "\n[accel_homing]\nmax_startup_travel: 3\n" + SAVED)
+                               + "\n[accel_homing]\nmax_sample_age: 0.020\nmax_startup_travel: 3\n" + SAVED)
         self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 50"))
         before = self.config.read_bytes(), self.axes.read_bytes()
         with self.assertRaisesRegex(installer.InstallError, "startup stop request needs 3.65 mm"):
@@ -443,7 +443,7 @@ class HostFixture(unittest.TestCase):
 
     def test_explicit_generic_speed_above_startup_budget_refuses_without_writes(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]").replace("max_accel: 5000", "max_accel: 1000")
-                               + "\n[accel_homing]\nmax_startup_travel: 3\n" + SAVED)
+                               + "\n[accel_homing]\nmax_sample_age: 0.020\nmax_startup_travel: 3\n" + SAVED)
         before = self.config.read_bytes()
         with self.assertRaisesRegex(installer.InstallError, "startup stop request"):
             self.plan("--homing-speed", "50")
@@ -456,7 +456,7 @@ class HostFixture(unittest.TestCase):
         policy = installer.load_motion_policy()
         for homing_accel, effective_accel, speed in ((100.0, 100.0, 20.0), (0.0, 5000.0, 50.0)):
             self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
-                                   "\n[accel_homing]\nmax_startup_travel: 3\nhoming_accel: " + str(homing_accel) + "\n" + SAVED)
+                                   "\n[accel_homing]\nmax_sample_age: 0.020\nmax_startup_travel: 3\nhoming_accel: " + str(homing_accel) + "\n" + SAVED)
             self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: " + str(speed))
                                  .replace("homing_speed: 35", "homing_speed: " + str(speed)))
             changes, _, _ = self.plan()
@@ -494,27 +494,28 @@ class HostFixture(unittest.TestCase):
         with self.assertRaisesRegex(installer.InstallError, "3.0375 mm"):
             self.plan()
 
-    def test_explicit_policy_overrides_admit_75_without_changing_speed_or_timing(self):
+    def test_explicit_policy_overrides_admit_30_without_changing_speed_or_timing(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") + SAVED)
-        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75")
-                             .replace("homing_speed: 35", "homing_speed: 75"))
+        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 30")
+                             .replace("homing_speed: 35", "homing_speed: 30"))
         before = self.config.read_bytes(), self.axes.read_bytes()
         changes = self.plan("--max-report-travel", "1.5", "--max-startup-travel", "4.5")[0]
         managed = changes[self.config.parent / installer.MANAGED]["data"]
         self.assertIn(b"max_report_travel: 1.5\nmax_startup_travel: 4.5\n", managed)
         for option in (b"max_sample_age:", b"stream_interval:", b"homing_accel:"):
             self.assertNotIn(option, managed)
-        self.assertEqual(self.planned_speed(changes, "x"), 75.0)
-        self.assertEqual(self.planned_speed(changes, "y"), 75.0)
+        self.assertEqual(self.planned_speed(changes, "x"), 30.0)
+        self.assertEqual(self.planned_speed(changes, "y"), 30.0)
         self.assertNotIn(b"previous: homing_speed", changes[self.axes]["data"])
         self.assertIn(b"max_accel: 5000", changes[self.config]["data"])
         self.assertEqual((self.config.read_bytes(), self.axes.read_bytes()), before)
 
     def test_each_distance_policy_can_be_enabled_independently(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") + SAVED)
-        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75"))
-        for flags, conflict in ((("--max-report-travel", "1"), "report-speed limit 50 mm/s"),
-                                (("--max-startup-travel", "3"), "3 mm max_startup_travel limit")):
+        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 30")
+                             .replace("homing_speed: 35", "homing_speed: 30"))
+        for flags, conflict in ((("--max-report-travel", "1"), "report-speed limit 20 mm/s"),
+                                (("--max-startup-travel", "2"), "2 mm max_startup_travel limit")):
             with self.subTest(flags=flags), self.assertRaisesRegex(installer.InstallError, conflict):
                 self.plan(*flags)
         for flags, present, absent in ((("--max-report-travel", "1.5"), b"max_report_travel", b"max_startup_travel"),
@@ -527,6 +528,7 @@ class HostFixture(unittest.TestCase):
 
     def test_existing_policy_limits_preserved_without_explicit_override(self):
         settings = ("\n[accel_homing]\naccel_chip: adxl345 toolhead\n"
+                    "max_sample_age: 0.020\n"
                     "  max_report_travel = 01.500 # chosen reporting limit\n"
                     "max_startup_travel: 4.500 # chosen startup limit\n")
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") + settings + SAVED)
@@ -544,7 +546,7 @@ class HostFixture(unittest.TestCase):
                 self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
                                        "\n[include sensor-policy.cfg]\n" + SAVED)
                 policy_file.write_bytes(("# Preserve this included policy\r\n[" + section + "]\r\n"
-                                         "accel_chip: adxl345 toolhead\r\nmax_report_travel: 1.0\r\n"
+                                         "accel_chip: adxl345 toolhead\r\nmax_sample_age: 0.020\r\nmax_report_travel: 1.0\r\n"
                                          "max_startup_travel: 3.0\r\nx_threshold: 6.1\r\n").encode())
                 self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75"))
                 before = policy_file.read_bytes()
@@ -562,7 +564,7 @@ class HostFixture(unittest.TestCase):
 
     def test_explicit_policy_replaces_invalid_previous_value_before_validation(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
-                               "\n[accel_homing]\nmax_report_travel: old-invalid\n"
+                               "\n[accel_homing]\nmax_sample_age: 0.020\nmax_report_travel: old-invalid\n"
                                "max_startup_travel: nan\n" + SAVED)
         self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75"))
         changes = self.plan("--max-report-travel", "1.5", "--max-startup-travel", "4.5")[0]
@@ -588,8 +590,9 @@ class HostFixture(unittest.TestCase):
 
     def test_policy_override_bounds_and_exact_required_startup_boundary(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") + SAVED)
-        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75"))
-        required = installer.load_motion_policy().motion_startup_request_travel(75.0, 5000.0, 0.020, 0.005)
+        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 30")
+                             .replace("homing_speed: 35", "homing_speed: 30"))
+        required = installer.load_motion_policy().motion_startup_request_travel(30.0, 5000.0, 0.050, 0.005)
         for limit in (required, required + 0.0000001):
             with self.subTest(limit=limit):
                 changes = self.plan("--max-report-travel", "1.5", "--max-startup-travel", repr(limit))[0]
@@ -597,15 +600,15 @@ class HostFixture(unittest.TestCase):
                 persisted = float(re.search(r"(?m)^max_startup_travel:\s*(.+)$", text).group(1))
                 self.assertEqual(persisted, limit)
                 self.assertGreaterEqual(persisted, required)
-        with self.assertRaisesRegex(installer.InstallError, "startup stop request needs 4.1625 mm"):
+        with self.assertRaisesRegex(installer.InstallError, "startup stop request needs 2.43 mm"):
             self.plan("--max-report-travel", "1.5", "--max-startup-travel", repr(required - 0.0000001))
         for report, startup in (("0.1", "0.1"), ("2", "5")):
             with self.subTest(report=report, startup=startup):
-                self.plan("--homing-speed", "1", "--max-report-travel", report, "--max-startup-travel", startup)
+                self.plan("--homing-speed", "0.5", "--max-report-travel", report, "--max-startup-travel", startup)
 
     def test_policy_override_checks_retained_active_axis_without_editing_it(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
-                               "\n[accel_homing]\nmax_report_travel: 1.5\nmax_startup_travel: 4.5\n" + SAVED)
+                               "\n[accel_homing]\nmax_sample_age: 0.020\nmax_report_travel: 1.5\nmax_startup_travel: 4.5\n" + SAVED)
         self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 50")
                              .replace("homing_speed: 35", "homing_speed: 75")
                              .replace("endstop_pin: !PA0", "endstop_pin: beacon_accel:y"))
@@ -747,8 +750,8 @@ class HostFixture(unittest.TestCase):
 
     def test_cli_explicit_policy_output_reports_limits_and_preserved_speed(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") + SAVED)
-        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75")
-                             .replace("homing_speed: 35", "homing_speed: 75"))
+        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 30")
+                             .replace("homing_speed: 35", "homing_speed: 30"))
         policy, output = installer.load_motion_policy(), io.StringIO()
         before = {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}
         with mock.patch.object(installer, "discover_target", return_value=self.selected), \
@@ -763,7 +766,7 @@ class HostFixture(unittest.TestCase):
                                              "--max-startup-travel", "4.5"]), 0)
         for message in ("Explicit generic policy overrides: max_report_travel=1.5 mm, max_startup_travel=4.5 mm",
                         "nominal request-travel limits are not physical stopping guarantees",
-                        "Preserved configured homing_speed: X=75 mm/s, Y=75 mm/s"):
+                        "Preserved configured homing_speed: X=30 mm/s, Y=30 mm/s"):
             self.assertIn(message, output.getvalue())
         for operation in (idle, prepare, apply):
             operation.assert_not_called()
@@ -1617,13 +1620,13 @@ class UninstallFixture(unittest.TestCase):
 
     def test_explicit_policy_install_upgrade_and_uninstall_restore_original_state(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") + SAVED)
-        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75")
-                             .replace("homing_speed: 35", "homing_speed: 75"))
+        self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 30")
+                             .replace("homing_speed: 35", "homing_speed: 30"))
         original = self.capture()
         first = self.install("package", "--max-report-travel", "1.5", "--max-startup-travel", "4.5")
         managed = self.config.parent / installer.MANAGED
         self.assertIn(b"max_report_travel: 1.5\nmax_startup_travel: 4.5\n", managed.read_bytes())
-        self.assertEqual(self.axes.read_bytes().count(b"homing_speed: 75"), 2)
+        self.assertEqual(self.axes.read_bytes().count(b"homing_speed: 30"), 2)
         saved = next(entry for entry in self.manifest(first)["changes"] if entry["path"] == str(managed))
         self.assertEqual(saved["before"], {"kind": "absent"})
         self.assertIn(b"max_startup_travel: 4.5", base64.b64decode(saved["after"]["data"]))
@@ -1639,7 +1642,7 @@ class UninstallFixture(unittest.TestCase):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
                                "\n[include sensor-policy.cfg]\n" + SAVED)
         policy_file.write_bytes(b"# Existing included legacy section\r\n[beacon_accel_homing]\r\n"
-                                b"accel_chip: adxl345 toolhead\r\nmax_report_travel: 1.0\r\n"
+                                b"accel_chip: adxl345 toolhead\r\nmax_sample_age: 0.020\r\nmax_report_travel: 1.0\r\n"
                                 b"max_startup_travel: 3.0\r\nx_threshold: 6.1\r\n")
         self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75"))
         original, original_policy = self.capture(), policy_file.read_bytes()
@@ -1660,7 +1663,7 @@ class UninstallFixture(unittest.TestCase):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
                                "\n[include sensor-policy.cfg]\n" + SAVED)
         original_policy = (b"# Existing current section\n[accel_homing]\n"
-                           b"accel_chip: adxl345 toolhead\nmax_report_travel: 1.0\n"
+                           b"accel_chip: adxl345 toolhead\nmax_sample_age: 0.020\nmax_report_travel: 1.0\n"
                            b"max_startup_travel: 3.0\nx_threshold: 6.1\n")
         policy_file.write_bytes(original_policy)
         self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75"))
@@ -1672,7 +1675,7 @@ class UninstallFixture(unittest.TestCase):
     def test_policy_history_rejects_unexpected_options_and_invalid_values_without_writes(self):
         self.config.write_text(CONFIG.replace("[beacon]", "[adxl345 toolhead]") +
                                "\n[accel_homing]\naccel_chip: adxl345 toolhead\n"
-                               "max_report_travel: 1.0\nmax_startup_travel: 3.0\n" + SAVED)
+                               "max_sample_age: 0.020\nmax_report_travel: 1.0\nmax_startup_travel: 3.0\n" + SAVED)
         self.axes.write_text(AXES.replace("homing_speed: 150", "homing_speed: 75"))
         first = self.install("package", "--max-report-travel", "1.5", "--max-startup-travel", "4.5")
         original_manifest = (first / "manifest.json").read_bytes()

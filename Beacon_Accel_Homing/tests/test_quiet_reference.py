@@ -296,7 +296,7 @@ class RollingReferenceIntegrationTest(unittest.TestCase):
                 obj, endstop = self.machine()
                 self.prepare(obj, endstop)
                 if mode == "stale":
-                    obj.reactor.now += 0.040
+                    obj.reactor.now += obj.backend.max_age + 0.010
                 else:
                     feed(obj, samples(obj.backend.last_sample_time + 1 / 3200.0, x=-0.8))
                 with self.assertRaisesRegex(CommandError, "fresh quiet"):

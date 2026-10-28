@@ -107,7 +107,7 @@ class VectorDetectorTests(unittest.TestCase):
         obj, attempt = prepared()
         rows = [(attempt.arm_time + n / 3200., .001 * (n % 2) * G, 0., G)
                 for n in range(-15, 17)]
-        feed(obj, rows, age=.021)
+        feed(obj, rows, age=obj.backend.max_age + .001)
         self.assertTrue(attempt.done)
         self.assertEqual(attempt.reason, "stale_data")
 
