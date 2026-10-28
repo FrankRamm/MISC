@@ -658,11 +658,15 @@ its exact venv executable with `--klipper-python /path/to/klippy-env/bin/python`
 This must agree with the verified live Klipper process when one is present;
 the bootstrap interpreter is not substituted for it.
 
-All charts are completed PNG images with matching current UTC timestamps in
+All charts are completed PNG images with matching local `YYYY-MM-DD HH:MM:SS` timestamps in
 their descriptive filenames and titles, saved directly under the configured
 chart directory without per-output subdirectories. No CSV/JSON/SVG/HTML chart sidecars
 are created. Atomic publication requires hard-link support in that directory;
 an unsupported filesystem fails clearly instead of overwriting an output.
+ACCURACY keeps only its final PNG per requested axis there. Per-home PNGs are
+temporary, outside the chart/config roots, and are removed after final export
+or on abort/cancel. Existing charts are preserved. Windows downloads need
+colon-free filenames.
 Images use bounded traces that retain positive/negative extrema;
 there is no full-resolution raw-data export. An isolated worker renders the
 images and cleans its private OS-temporary files. A small real render runs

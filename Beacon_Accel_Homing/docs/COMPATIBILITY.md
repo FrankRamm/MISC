@@ -278,7 +278,8 @@ after both axes pass quality checks and any per-home charts are exported.
 ACCURACY validates the final accepted home and all required per-home captures,
 then releases its final tested axis before writing the aggregate summary.
 A later aggregate-export failure marks ACCURACY aborted while preserving
-the captures and the preceding trusted release. Rejected, cancelled or
+any published final summary and the preceding trusted release. Its temporary
+per-home PNGs are removed on success, abort or cancellation. Rejected, cancelled or
 failed trial data never requests a terminal release. Stationary NOISE performs
 no release or other motion. These paths are verified with synthetic objects;
 no physical clearance, stop accuracy or skipped-step result is established.
@@ -330,12 +331,19 @@ summary requires all three complete valid window receipts and a completed
 PNG export. Failed/partial runs may create an explicitly incomplete PNG when
 render/context checks permit and cannot recommend a candidate. PNG publication is
 atomic and never overwrites an earlier output. Descriptive filenames and
-image titles share the same timezone-aware UTC instant, with microseconds;
-bounded collision suffixes distinguish coincident clocks. No user-facing run
+image titles share the host's local `YYYY-MM-DD HH:MM:SS` timestamp;
+PNG metadata retains the timezone offset and UTC instant. Colons in the Linux
+filenames require renaming for Windows downloads. Bounded collision suffixes
+distinguish coincident clocks. No user-facing run
 UUID, chart sidecars or private printer configuration/logs are exported.
 
 All chart producers use PNG only, including ordinary capture exports,
-ACCURACY overviews and failure reports. Per-home PNG references carry private
+ACCURACY overviews and failure reports. ACCURACY's per-home PNGs live in a private
+run-specific OS temporary directory outside the chart/config watched roots;
+only the final PNG per requested axis is published to the chart directory. Cleanup removes its
+temporary directory after final publication and on abort/cancel, without deleting
+existing charts. Temporary paths are omitted from public status/results.
+Per-home PNG references carry private
 immutable in-memory receipts binding run/axis/attempt, exact record, image
 path/hash, sample count/baseline and a bounded trace. ACCURACY rechecks receipt
 identity, record changes and PNG bytes/CRC with reactor yields between files;

@@ -240,7 +240,7 @@ accepted intermediate homes still return only the tested axis to center;
 after the whole workflow passes its checks and required per-home captures, its
 final tested axis releases before model staging/saving or successful completion.
 ACCURACY writes its aggregate summary after this trusted release. A later
-summary-export failure reports an aborted run and preserves the per-home captures;
+summary-export failure reports an aborted run and retains any published final summary;
 it does not reverse the preceding release.
 A failed, cancelled or suspect workflow does not gain a final release move.
 Homing speeds, driver currents and the meaning of commanded-travel statistics
@@ -541,9 +541,13 @@ Travel is the firmware's commanded step distance, recorded to **0.001 mm**,
 not an encoder measurement of physical stop position. These statistics describe
 variation across those repeated commands; they do not prove absolute accuracy,
 absence of skipped steps, or calibration qualification for any sample count.
-Each home has its own PNG with XYZ acceleration, the actual trigger threshold,
-detected onset and measured peak. ACCURACY also creates one overview PNG per
-tested axis with commanded travel/statistics and the accepted XYZ traces.
+ACCURACY creates per-home PNGs in a private run-specific OS temporary directory
+outside the chart/config roots. Their immutable receipts and PNG bytes are
+validated before final publication. Only one final overview PNG per requested
+axis is kept in the chart directory, with commanded travel/statistics, accepted
+XYZ traces and the actual trigger threshold. Temporary PNGs are removed after
+the summaries are saved, and on abort/cancel or export failure; any final partial
+summaries remain available. Temporary paths are omitted from public status/results.
 Overview dimensions and stored traces stay bounded for up to 100 measured homes.
 
 An accepted impact capture must identify exactly one retained sample from the
@@ -561,9 +565,9 @@ outputs, including incomplete reports, are **PNG only**: no CSV, JSON, SVG or
 HTML sidecars. Each image uses bounded samples that retain signed extrema;
 there is no full-resolution raw-data export. Previously generated files are
 retained. Titles show the host's local time as `YYYY-MM-DD HH:MM:SS`.
-Filenames use `HH-MM-SS` for portability, for example
-`Accel Homing X - 2026-10-27 23-59-42.png`; PNG metadata retains its timezone
-offset and UTC provenance.
+Filenames also use `HH:MM:SS`, for example
+`Accel Homing Accuracy X - 2026-10-27 23:59:42.png`; PNG metadata retains its
+timezone offset and UTC provenance. Windows downloads need a colon-free name.
 The default `accel_homing_charts/` directory is beside the
 main `printer.cfg`; `charts_directory` changes it. See the
 [configuration example](../examples/accel_homing.cfg) for all settings.
