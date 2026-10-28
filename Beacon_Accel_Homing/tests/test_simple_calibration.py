@@ -280,16 +280,15 @@ class ImpactDiscoveryTests(unittest.TestCase):
                 rig.calibrate(save=0)
         self.assertEqual(rig.configfile.saved, {})
 
-    def test_exactly_twenty_mm_hit_advances_and_same_command_resumes(self):
+    def test_exactly_twenty_mm_hit_returns_and_retries_in_the_same_command(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 20.})
         rig.calibrate(save=0, START_THRESHOLD=1, STEP=.25)
-        self.assertEqual(rig.workflow.session["candidate"], 1.25)
-        self.assertEqual(rig.workflow.session["validation_records"], [])
-        status = rig.workflow.get_status(0)["active"]
-        self.assertEqual(status["phase"], "discovery")
-        self.assertTrue(status["discovery_impact_required"])
-        rig.calibrate(START_THRESHOLD=1, STEP=.25)
+        self.assertIsNone(rig.workflow.session)
+        self.assertEqual(rig.toolhead.moves[0], ([20., None, None], 50.))
+        self.assertEqual(rig.home_calls[1]["homed_axes"], "z")
+        self.assertFalse(rig.home_calls[1]["candidate_qualified"])
+        self.assertEqual(rig.home_calls[1]["successes"], 0)
         self.assertEqual([c["threshold"] for c in rig.home_calls], [1.] + [1.25] * 11)
 
     def test_failed_spread_requires_another_discovery_impact_before_ten_new_checks(self):
@@ -348,13 +347,12 @@ class SimpleWorkflowTests(unittest.TestCase):
             self.assertEqual(rig.configfile.saved, {})
             self.assertLessEqual(len(rig.home_calls), rig.workflow.max_attempts)
 
-    def test_same_command_resumes_raised_threshold_after_early_impact(self):
+    def test_same_command_automatically_raises_threshold_after_early_impact(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 19.999})
         rig.calibrate(save=0, START_THRESHOLD=1, STEP=.25)
-        self.assertEqual(rig.workflow.session["candidate"], 1.25)
-        self.assertEqual(rig.workflow.session["state"], "waiting")
-        rig.calibrate(START_THRESHOLD=1, STEP=.25)
+        self.assertIsNone(rig.workflow.session)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
         self.assertEqual([call["threshold"] for call in rig.home_calls], [1.] + [1.25] * 11)
 
     def test_saved_vector_model_uses_same_detector_but_legacy_models_stay_legacy(self):

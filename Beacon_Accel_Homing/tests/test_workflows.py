@@ -261,12 +261,19 @@ class Line:
 class Stepper:
     def __init__(self, name, axes):
         self.name, self.axes = name, axes
+        self.mcu_position = 0
 
     def get_name(self):
         return self.name
 
     def is_active_axis(self, axis):
         return axis in self.axes
+
+    def get_step_dist(self):
+        return 0.000001
+
+    def get_mcu_position(self):
+        return self.mcu_position
 
 
 class Rail:
@@ -292,6 +299,10 @@ class Kin:
 
     def get_steppers(self):
         return self.steppers
+
+    def calc_position(self, positions):
+        a, b = positions["stepper_x"], positions["stepper_y"]
+        return [(a + b) * 0.5, (a - b) * 0.5, positions["stepper_z"]]
 
     def clear_homing_state(self, axes):
         for i, axis in enumerate("xyz"):
@@ -352,6 +363,12 @@ class Toolhead:
 
     def manual_move(self, coords, speed):
         self.moves.append((list(coords), speed))
+        delta = [(value - self.position[i]) if value is not None else 0.0
+                 for i, value in enumerate(coords)]
+        for stepper in self.kin.steppers:
+            displacement = ((delta[0] + delta[1] if stepper.name == "stepper_x" else delta[0] - delta[1])
+                            if stepper.axes == "xy" else delta["xyz".index(stepper.axes)])
+            stepper.mcu_position += round(displacement / stepper.get_step_dist())
         for index, value in enumerate(coords):
             if value is not None:
                 self.position[index] = value
@@ -482,6 +499,7 @@ class Rig:
                     "onset_sample_version": 1, "onset_sample": onset_sample,
                     "onset_sample_matches": 1, "onset_sample_index": 2,
                     "onset_g": record.get("onset_g"), "impact_peak_g": record.get("impact_peak_g"),
+                    "impact_metric": record.get("impact_metric", "selected_axis"),
                     "direction": record.get("direction", -1),
                     "homing_speed_mm_s": self.owner.rails_by_axis[axis].info.speed,
                     "homing_accel_mm_s2": self.owner.homing_accel}}
@@ -526,6 +544,9 @@ class Rig:
         if len(axes) != 1 or axes[0] not in "xy":
             raise AssertionError("unexpected stock G28 axes " + str(axes))
         axis = axes[0]
+        for stepper in self.toolhead.kin.get_steppers():
+            if stepper.is_active_axis(axis):
+                self.lines[stepper.name].enabled = True
         self.scripts.append("G28 " + axis.upper())
         if self.workflow.session is None:
             self.toolhead.kin.limits["xy".index(axis)] = self.owner.rails_by_axis[axis].get_range()
@@ -546,21 +567,43 @@ class Rig:
         if isinstance(result, Exception):
             raise result
         _center, expected = self.workflow._geometry(axis)
-        record = {"axis": axis, "result": "impact", "travel_mm": expected,
+        record = {"axis": axis, "pass": 1, "result": "impact", "travel_mm": expected,
                   "onset_g": 4.0, "impact_peak_g": 7.0, "moving": True,
                   "threshold_g": self.owner.threshold_g[axis], "arm_time_s": self.capture_stops + 0.001,
                   "onset_time_s": self.capture_stops + 0.002, "direction": -1}
         if self.workflow.session.get("mode") == "calibration":
             record["impact_metric"] = "xyz_magnitude"
         record.update(result)
+        value = record.get("travel_mm_exact", record.get("travel_mm"))
+        if (self.workflow.session.get("mode") == "calibration"
+                and type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 20):
+            record.setdefault("travel_mm_exact", value)
+        sign = 1.0 if self.owner.rails_by_axis[axis].info.positive_dir else -1.0
+        record.setdefault("trigger_travel_mm_signed", (None if type(value) not in (int, float) else
+                                                       value * sign))
         if "halt_travel_mm_signed" not in record:
             value = record.get("travel_mm")
             record["halt_travel_mm_signed"] = (None if not isinstance(value, (int, float)) else
-                value * (1.0 if self.owner.rails_by_axis[axis].info.positive_dir else -1.0))
+                                               value * sign)
         self.owner.last[axis] = record
         index = "xy".index(axis)
         self.toolhead.kin.limits[index] = self.owner.rails_by_axis[axis].get_range()
         self.toolhead.position[index] = self.owner.rails_by_axis[axis].info.position_endstop
+        trigger, halt = record["trigger_travel_mm_signed"], record["halt_travel_mm_signed"]
+        if all(type(value) in (int, float) and math.isfinite(value) for value in (trigger, halt)):
+            self.toolhead.position[index] += halt - trigger
+        positions = []
+        for stepper in self.toolhead.kin.get_steppers():
+            if stepper.is_active_axis(axis):
+                factor = -1 if axis == "y" and stepper.name == "stepper_y" and stepper.axes == "xy" else 1
+                ticks = lambda value: (round(value * factor / stepper.get_step_dist())
+                                       if type(value) in (int, float) and math.isfinite(value) else 0)
+                start = stepper.mcu_position
+                stepper.mcu_position = start + ticks(halt)
+                positions.append(types.SimpleNamespace(stepper=stepper, stepper_name=stepper.name,
+                                                        start_pos=start, trig_pos=start + ticks(trigger),
+                                                        halt_pos=stepper.mcu_position))
+        self.workflow.note_calibration_halt(record, positions)
         self.workflow.check_home_result(record)
         self.homing_events.append(("end", axis))
         for callback in self.handlers["homing:home_rails_end"]:
@@ -573,6 +616,17 @@ class Rig:
             arguments["SAVE_CONFIG"] = save
         arguments.update(params)
         self.workflow.cmd_CALIBRATE(GCmd(**arguments))
+
+    def wait_calibration(self, axis="X", save=None, **params):
+        """Construct the retained manual-wait state without the automatic trial loop."""
+        arguments = {"AXIS": axis, "CENTERED": 1, **params}
+        if save is not None:
+            arguments["SAVE_CONFIG"] = save
+        self.workflow._begin(GCmd(**arguments), "calibration", axis.lower())
+        self.workflow.session["state"] = "running"
+        self.workflow._home(axis.lower(), self.workflow.session["candidate"])
+        self.workflow._next_calibration_candidate("synthetic retained wait")
+        self.workflow._wait_center("synthetic retained manual-centering wait")
 
     def effects(self):
         return copy.deepcopy({
@@ -803,7 +857,7 @@ class SafeZHomingWorkflowTests(unittest.TestCase):
                             rig.objects["homing_override"] = object()
                     if mode == "waiting":
                         rig.home_results.append({"travel_mm": 2.0})
-                        rig.calibrate(save=0)
+                        rig.wait_calibration(save=0)
                         mutate()
                         resume = lambda: rig.calibrate(save=0)
                     elif mode == "test":
@@ -1104,7 +1158,7 @@ class HomingOverrideWorkflowTests(unittest.TestCase):
                             override.in_script = True
                     if mode == "waiting":
                         rig.home_results.append({"travel_mm": 2.0})
-                        rig.calibrate(save=0)
+                        rig.wait_calibration(save=0)
                         mutate()
                         resume = lambda: rig.calibrate(save=0)
                     else:
@@ -1176,36 +1230,24 @@ class CalibrationTests(unittest.TestCase):
             self.assertEqual(len(metadata["onset_g"]), 10)
             self.assertFalse(metadata["physical_position_verified"])
 
-    def test_short_false_home_waits_without_reposition_then_same_command_preserves_candidate(self):
+    def test_short_false_home_returns_then_same_command_retries_without_manual_wait(self):
         for short in (0.0, 10.0, 19.0, 19.999):
             rig = Rig()
             rig.home_results.append({"travel_mm": short})
             rig.calibrate()
-            session = rig.workflow.session
-            run = session["run_id"]
-            self.assertEqual(rig.toolhead.moves, [])
-            self.assertEqual(rig.scripts, ["G28 X"])
+            self.assertIsNone(rig.workflow.session)
             self.assertEqual(rig.home_calls[0]["threshold"], 1.0)
-            self.assertEqual(session["candidate"], 1.25)
-            self.assertEqual(session["successes"], 0)
-            self.assertEqual(session["attempts"], 1)
-            self.assertEqual(session["state"], "waiting")
-            self.assertNotIn("token", session)
-            self.assertEqual(set(rig.disabled), {"stepper_x", "stepper_y"})
-            self.assertEqual(rig.toolhead.kin.get_status(0)["homed_axes"], "z")
+            self.assertEqual(rig.disabled, [])
             self.assertTrue(rig.lines["stepper_z"].enabled)
             self.assertTrue(rig.lines["stepper_z1"].enabled)
             self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
-            self.assertTrue(any("ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1" in text
-                                for text in rig.output))
-            self.assertFalse(any("ACCEL_HOMING_CONFIRM" in text or "TOKEN" in text
-                                 for text in rig.output))
-            rig.calibrate()
+            self.assertFalse(any("Move XY manually" in text for text in rig.output))
+            if short:
+                self.assertEqual(rig.toolhead.moves[0], ([short, None, None], 50.))
             self.assertEqual(rig.home_calls[1]["threshold"], 1.25)
             self.assertEqual(rig.home_calls[1]["attempt"], 2)
             self.assertEqual(rig.home_calls[1]["homed_axes"], "z")
             self.assertEqual(rig.scripts, ["G28 X"] * 12 + ["SAVE_CONFIG"])
-            self.assertEqual(rig.workflow.last_result["run_id"], run)
             self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
 
     def test_pressed_result_is_never_a_success_even_with_apparent_step_travel(self):
@@ -1221,11 +1263,10 @@ class CalibrationTests(unittest.TestCase):
         rig = Rig()
         rig.home_results.extend([{}, {}, {"travel_mm": 8.0}])
         rig.calibrate()
-        self.assertEqual(len(rig.toolhead.moves), 2)
-        self.assertEqual(rig.workflow.session["successes"], 0)
-        self.assertFalse(rig.workflow.session["candidate_qualified"])
-        self.assertEqual(rig.workflow.session["attempts"], 3)
-        rig.calibrate()
+        self.assertEqual(len(rig.toolhead.moves), 14)
+        self.assertEqual(rig.home_calls[3]["successes"], 0)
+        self.assertFalse(rig.home_calls[3]["candidate_qualified"])
+        self.assertEqual(rig.home_calls[3]["attempt"], 4)
         self.assertEqual(rig.workflow.last_result["successes"], 10)
         self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
         self.assertEqual(len(rig.scripts), 15)
@@ -1248,11 +1289,8 @@ class CalibrationTests(unittest.TestCase):
             if ceiling == "sensor_scale":
                 rig.owner.full_scale_g = 0.625
             if ceiling == "attempts":
-                rig.home_results.append({"travel_mm": 2.0})
-                rig.calibrate()
-                rig.workflow.session["attempts"] = rig.workflow.max_attempts
-            else:
-                rig.home_results.append({"travel_mm": 2.0})
+                rig.workflow.max_attempts = 1
+            rig.home_results.append({"travel_mm": 2.0})
             with self.assertRaisesRegex(CommandError, "ceiling|maximum"):
                 rig.calibrate()
             self.assertIsNone(rig.workflow.session)
@@ -1559,7 +1597,7 @@ class CalibrationGridTests(unittest.TestCase):
                 with self.subTest(axis=axis, options=options):
                     rig = Rig(options)
                     rig.home_results.append({"travel_mm": 2.0})
-                    rig.calibrate(axis, save=0)
+                    rig.wait_calibration(axis, save=0)
                     self.assertEqual(rig.scripts, ["G28 " + axis])
                     self.assertEqual(rig.home_calls[0]["threshold"], start)
                     self.assertEqual(rig.workflow.session["candidate"], start + step)
@@ -1572,7 +1610,7 @@ class CalibrationGridTests(unittest.TestCase):
                     self.assertFalse(status["explicit_calibration_grid"])
                     self.assertFalse(rig.workflow.calibration_reference(axis.lower()))
 
-    def test_explicit_grid_survives_resume_and_does_not_change_configuration(self):
+    def test_explicit_grid_survives_automatic_retries_and_does_not_change_configuration(self):
         for axis in ("X", "Y"):
             with self.subTest(axis=axis):
                 rig = Rig({"calibration_start_threshold": .5, "calibration_step": .5})
@@ -1583,11 +1621,7 @@ class CalibrationGridTests(unittest.TestCase):
                                      rig.workflow.calibration_reference("y" if current == "x" else "x")))
                 rig.on_home = observe
                 rig.calibrate(axis, save=0, START_THRESHOLD=1, STEP=.25)
-                self.assertEqual(rig.workflow.session["candidate"], 1.25)
-                self.assertTrue(rig.workflow.get_status(0)["active"]["explicit_calibration_grid"])
-                rig.calibrate(axis)
-                self.assertEqual(rig.workflow.session["candidate"], 1.5)
-                rig.calibrate(axis, START_THRESHOLD=1, STEP=.25)
+                self.assertIsNone(rig.workflow.session)
                 self.assertEqual([call["threshold"] for call in rig.home_calls],
                                  [1.0, 1.25] + [1.5] * 11)
                 self.assertEqual(rig.scripts, ["G28 " + axis] * 13)
@@ -1633,7 +1667,7 @@ class CalibrationGridTests(unittest.TestCase):
     def test_resume_cannot_change_original_grid_even_to_current_candidate(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 2.0})
-        rig.calibrate(save=0, START_THRESHOLD=1, STEP=.25)
+        rig.wait_calibration(save=0, START_THRESHOLD=1, STEP=.25)
         session = rig.workflow.session
         for parameters, message in (({"START_THRESHOLD": 1.25}, "START_THRESHOLD cannot change"),
                                     ({"STEP": .5}, "STEP cannot change")):
@@ -1800,23 +1834,14 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
         for early in (8.0, 19.999):
             with self.subTest(early=early):
                 rig = Rig()
-                rig.home_results.extend([{}, {"travel_mm": 151.0}, {"travel_mm": early}])
+                rig.home_results.extend([{}, {"travel_mm": 151.0}, {"travel_mm": early}]
+                                        + [{"travel_mm": 148.0}] * 11)
                 rig.calibrate(save=0)
-                session = rig.workflow.session
-                self.assertEqual(session["candidate"], 1.25)
-                self.assertEqual(session["state"], "waiting")
-                self.assertEqual(session["successes"], 0)
-                self.assertEqual(session["validation_records"], [])
-                self.assertIsNone(session["repeatability_spread_mm"])
-                self.assertIsNone(session["candidate_attempt"])
-                self.assertFalse(session["candidate_qualified"])
-                self.assertEqual(len(rig.toolhead.moves), 2)
-                self.assertEqual(rig.configfile.saved, {})
-                status = rig.workflow.get_status(0)["active"]
-                self.assertEqual(status["repeatability_limit_mm"], 2.0)
-                self.assertIsNone(status["repeatability_spread_mm"])
-                rig.home_results.extend([{"travel_mm": 148.0}] * 11)
-                rig.calibrate()
+                restart = rig.home_calls[3]
+                self.assertEqual(restart["threshold"], 1.25)
+                self.assertEqual(restart["successes"], 0)
+                self.assertFalse(restart["candidate_qualified"])
+                self.assertEqual(restart["homed_axes"], "z")
                 metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
                 self.assertEqual(metadata["min_commanded_travel_mm"], 148.0)
                 self.assertEqual(metadata["max_commanded_travel_mm"], 148.0)
@@ -1827,9 +1852,8 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
     def test_repeatability_failure_after_early_retry_increments_and_restarts_everything(self):
         rig = Rig()
         rig.home_results.extend([{}, {"travel_mm": 150.0}, {"travel_mm": 8.0}])
-        rig.calibrate(save=0)
         rig.home_results.extend([{}] + [{"travel_mm": 150.0}] * 9 + [{"travel_mm": 152.01}])
-        rig.calibrate()
+        rig.calibrate(save=0)
         self.assertEqual([c["threshold"] for c in rig.home_calls],
                          [1.0] * 3 + [1.25] * 11 + [1.5] * 11)
         self.assertEqual(rig.workflow.last_result["threshold_g"], 1.5)
@@ -1925,7 +1949,7 @@ class GuardTests(unittest.TestCase):
     def test_resume_rechecks_runtime_policy_before_another_home(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 8.0})
-        rig.calibrate(save=0)
+        rig.wait_calibration(save=0)
         rig.policy_error = "synthetic runtime policy changed"
         with self.assertRaisesRegex(CommandError, "runtime policy changed"):
             rig.calibrate()
@@ -1944,7 +1968,7 @@ class GuardTests(unittest.TestCase):
                     rig = Rig()
                     if waiting:
                         rig.home_results.append({"travel_mm": 2.0})
-                        rig.calibrate()
+                        rig.wait_calibration()
                     before = rig.effects()
                     with self.assertRaisesRegex(CommandError, "CENTERED=1"):
                         rig.workflow.cmd_CALIBRATE(GCmd(AXIS="X", **params))
@@ -1977,7 +2001,7 @@ class GuardTests(unittest.TestCase):
                 rig.toolhead.kin = kin
                 z_limit = kin.limits[2]
                 rig.home_results.append({"travel_mm": 2.0})
-                rig.calibrate()
+                rig.wait_calibration()
                 self.assertEqual(kin.get_status(0)["homed_axes"], "z" if z_homed else "")
                 self.assertEqual(kin.limits[2], z_limit)
                 self.assertEqual(rig.toolhead.position[2:], [40.0, 6.0])
@@ -2026,7 +2050,7 @@ class GuardTests(unittest.TestCase):
     def test_current_command_does_not_mark_idle_printing_and_own_retry_release_can_continue(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 2.0})
-        rig.calibrate()
+        rig.wait_calibration()
         self.assertEqual(rig.idle_state, "Printing")
         rig.calibrate()
         self.assertEqual(rig.workflow.last_result["result"], "calibrated")
@@ -2069,7 +2093,7 @@ class GuardTests(unittest.TestCase):
     def test_new_workflow_external_home_and_setting_change_are_blocked_while_waiting(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 2.0})
-        rig.calibrate()
+        rig.wait_calibration()
         before = rig.effects()
         with self.assertRaisesRegex(CommandError, "already active"):
             rig.calibrate("Y")
@@ -2109,7 +2133,7 @@ class GuardTests(unittest.TestCase):
     def test_calibration_resume_keeps_save_config_choice_and_rejects_conflicting_override(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 2.0})
-        rig.calibrate(save=0)
+        rig.wait_calibration(save=0)
         before = rig.effects()
         with self.assertRaisesRegex(CommandError, "SAVE_CONFIG cannot change"):
             rig.calibrate(save=1)
@@ -2130,7 +2154,7 @@ class GuardTests(unittest.TestCase):
                       lambda r: setattr(r.toolhead, "busy", (20.0, 10.0, True))):
             rig = Rig()
             rig.home_results.append({"travel_mm": 2.0})
-            rig.calibrate()
+            rig.wait_calibration()
             setup(rig)
             with self.assertRaises(CommandError):
                 rig.calibrate()
@@ -2141,7 +2165,7 @@ class GuardTests(unittest.TestCase):
     def test_late_resume_is_rejected_even_if_timeout_callback_has_not_run(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 2.0})
-        rig.calibrate()
+        rig.wait_calibration()
         rig.reactor.now = rig.workflow.session["expires"]
         with self.assertRaisesRegex(CommandError, "expired"):
             rig.calibrate()
@@ -2153,7 +2177,7 @@ class GuardTests(unittest.TestCase):
         for method in ("cancel", "timeout"):
             rig = Rig()
             rig.home_results.append({"travel_mm": 2.0})
-            rig.calibrate()
+            rig.wait_calibration()
             if method == "cancel":
                 rig.workflow.cmd_CANCEL(GCmd())
             else:
@@ -2174,8 +2198,6 @@ class ModelTests(unittest.TestCase):
                     if early:
                         calibrated.home_results.append({"travel_mm": 2.0})
                     calibrated.calibrate(axis.upper())
-                    if early:
-                        calibrated.calibrate(axis.upper())
                     threshold = 1.25 if early else 1.0
                     self.assertEqual(calibrated.home_calls[0]["threshold"], 1.0)
                     if early:
@@ -2262,7 +2284,7 @@ class TestAndChartWorkflowTests(unittest.TestCase):
                     rig = Rig()
                     if waiting:
                         rig.home_results.append({"travel_mm": 2.0})
-                        rig.calibrate(save=0)
+                        rig.wait_calibration(save=0)
                     before = rig.effects()
                     with mock.patch.object(rig.workflow, "_require_centered") as centered, \
                             mock.patch.object(rig.workflow, "_chart_preflight") as preflight, \
@@ -2383,7 +2405,7 @@ class TestAndChartWorkflowTests(unittest.TestCase):
                         rig = Rig()
                         if waiting:
                             rig.home_results.append({"travel_mm": 2.0})
-                            rig.calibrate(save=0)
+                            rig.wait_calibration(save=0)
                         before = rig.effects()
                         with self.assertRaisesRegex(CommandError, "CENTERED=1"):
                             getattr(rig.workflow, callback)(GCmd(**params))
@@ -2531,7 +2553,7 @@ class TestAndChartWorkflowTests(unittest.TestCase):
             with self.subTest(ending=ending):
                 rig = Rig()
                 rig.home_results.append({"travel_mm": 2.0})
-                rig.calibrate(save=0)
+                rig.wait_calibration(save=0)
                 session = rig.workflow.session
                 self.assertEqual(session["state"], "waiting")
                 self.assertTrue(any("ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1" in line for line in rig.output))
