@@ -186,6 +186,11 @@ motor/fan state as it is; neither manual centering nor `CENTERED=1` is required.
 It does not home, move, enable/release motors, save a model or restart Klipper.
 `SAVE_CONFIG` is not accepted by this command.
 
+Each new per-axis `ACCEL_HOMING_CALIBRATE` invocation also acquires these three
+windows before its first home. It uses a fresh measurement rather than a prior
+standalone result and does not repeat it for candidate retries. Acquisition,
+context or summary-export failure aborts before calibration movement.
+
 Each of three separate one-second windows subtracts its own XYZ mean. One PNG
 contains all three signed XYZ plots on the same vertical scale, with absolute
 peaks, RMS and the separate starting candidates. Exact metrics, sensor context,
@@ -208,8 +213,9 @@ ages and allowed limits. An aborted noise result also retains this object as
 fault summary. An older homing baseline's ages do not describe a later noise
 measurement failure.
 
-For each X/Y axis, the largest absolute peak from all three windows receives
-the greater of a **20% or 0.1 g** margin, then rounds upward on the configured
+For each X/Y component in the standalone diagnostic, the largest absolute peak
+from all three windows receives the greater of a **20% or 0.1 g** margin,
+then rounds upward on the configured
 `calibration_start_threshold + n * calibration_step` grid. For example, a
 2 g X peak gives a 2.5 g initial candidate with the default 1 g start and
 0.25 g step.
@@ -219,11 +225,26 @@ fit. An unknown sensor range also leaves candidates unavailable. Complete
 measurements and charts remain available in either case. An incomplete or
 faulted run has no recommendation.
 
-These stationary hints are diagnostic only. Simple `ACCEL_HOMING_CALIBRATE`
-always starts on its configured or explicitly supplied start/step grid and
-does not consume noise seeds. Existing manual thresholds, saved models and
-ordinary homing thresholds are unchanged by noise measurement. See
-[the current calibration algorithm](SIMPLE_CALIBRATION.md).
+These component hints remain diagnostic. Automatic calibration instead uses
+its own fresh **XYZ-magnitude** peak, matching its detector, to choose the
+initial candidate on the configured start/step grid. An explicit `STEP` changes
+the grid spacing and still allows this selection. `START_THRESHOLD` overrides
+the initial value but does not skip measurement. Without that override, an
+unknown range or an over-ceiling candidate aborts before movement rather than
+falling back or clamping. Existing manual thresholds, saved models and ordinary
+homing thresholds are unchanged by measurement. See
+[the current calibration algorithm](SIMPLE_CALIBRATION.md) and
+[numerical limits](COMPATIBILITY.md#stationary-accelerometer-noise-measurement).
+Stationary vibration does not measure motor-start or travel transients and
+does not establish a certified minimum impact threshold.
+
+Calibration status/result `stationary_noise` identifies the fresh run, three
+iterations, `impact_metric: xyz_magnitude`, `noise_magnitude_peak_g`, selected
+`start_threshold_g`, `summary_paths` and `initial_threshold_source`
+(`stationary_noise` or `explicit_start_threshold`). Saved model metadata keeps
+`stationary_noise_measurement`; `stationary_noise_seed` is present only when
+noise chose the initial value. An aborted noise-stage result identifies
+`purpose: calibration_preflight` and `calibration_axis`.
 
 `homing_retract_dist: 0` keeps one touch per home. The separate plugin setting
 `back_off_dist` defaults to 5 mm (0 disables; finite 0–20 mm) and controls the
@@ -267,11 +288,15 @@ G28 macros and nested/unknown wrapper chains remain rejected. See
 [the source contract and limits](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
 Calibration uses the [impact-after-20 mm discovery and ten-check cycle](SIMPLE_CALIBRATION.md).
-The command syntax and defaults remain:
+The default command measures noise before selecting its initial candidate:
 
 ```gcode
-ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
+ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
 ```
+
+The default grid starts at 1 g with 0.25 g steps. Existing configured start/step
+values remain in use. To force a 1 g initial candidate and 0.25 g increments,
+use `START_THRESHOLD=1 STEP=0.25`; the noise measurement still runs first.
 
 X or Y selects movement; all three sensor channels contribute to the
 baseline-subtracted magnitude. Discovery continues until an impact; reaching
@@ -305,6 +330,7 @@ retain the legacy selected-axis path.
 Simple calibration and axes using a saved XYZ-magnitude model acquire at least
 50 fresh contiguous offset samples over `baseline_time` (100 ms by default),
 but do not enforce quietness or use the noise envelope to prove movement.
+Calibration's three initial noise windows are separate from this per-move offset.
 Missing, stale, future, irregular, invalid or saturated reference data still
 aborts. The acceleration threshold is active immediately after arming.
 `ACCEL_HOMING_STATUS` labels this policy explicitly.

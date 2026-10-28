@@ -423,17 +423,23 @@ assign coordinates to mark either axis homed.
 Then run in the printer console:
 
 ```gcode
-ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
+ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
 ```
 
 `CENTERED=1` states that the toolhead is already physically centered and
-authorizes the first candidate home, starting at 1.0 g by default. It does not
-measure the manual position. An impact at or before 20 mm automatically returns
+authorizes the first candidate home after three fresh one-second stationary
+noise windows and their summary export succeed. The measurement leaves motor
+and fan state unchanged and does not measure the manual position. Its
+XYZ-magnitude peak selects an initial candidate on the configured grid, whose
+default origin/step are 1.0/0.25 g. A failed measurement or export aborts before
+movement. An impact at or before 20 mm automatically returns
 only the tested axis to its estimated starting point, settles, and retries
 discovery at the next threshold step if all return checks pass. No additional
 command is needed. Faults, no impact or uncertain return evidence abort.
-The default 0.25 g step makes the first retry 1.25 g. Explicit start/step
-parameters override older configuration; stationary-noise hints are diagnostic.
+Each retry raises the current candidate by the selected step. An explicit
+`STEP` changes grid spacing without disabling noise selection.
+`START_THRESHOLD=1 STEP=0.25` forces that initial value and step while still
+performing the noise measurement. No prior standalone NOISE result is reused.
 Use `AXIS=Y` to calibrate only Y instead.
 
 An impact beyond 20 mm selects the candidate, followed by ten centered checks.
@@ -455,7 +461,9 @@ its existing behavior, and the derived raw trigger limit must remain finite
 and positive. Installation and updates preserve existing manual values.
 Explicit existing `calibration_start_threshold` and `calibration_step` values
 are preserved. Set them to `1.0` and `0.25`, leave both absent for the new
-defaults, or use the per-command parameters above. Updating does not replace a saved model's threshold;
+defaults, or use the per-command parameters above. These settings define the
+grid for noise-based selection unless `START_THRESHOLD` is explicit.
+Updating does not replace a saved model's threshold;
 run calibration to create a new one. Previous models remain loadable, but
 updating does not qualify their historical distances under the current 2 mm rule.
 

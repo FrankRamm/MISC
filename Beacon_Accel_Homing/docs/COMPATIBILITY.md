@@ -397,8 +397,9 @@ arguments remain unmapped. Main `printer.cfg`
 containment does not establish the root. This correction has source review only;
 the affected host's warning cause and current preview route were not verified.
 
-For each X/Y axis, let `peak` be its largest absolute mean-removed deviation
-across all three windows. The initial candidate is the smallest configured
+For each X/Y component in the standalone diagnostic, let `peak` be its largest
+absolute mean-removed deviation across all three windows. The initial candidate
+is the smallest configured
 `calibration_start_threshold + n * calibration_step` value at least
 `max(calibration_start_threshold, 1.2 * peak, peak + 0.1 g)`. Thus a 2 g peak
 gives 2.5 g with the default 1 g start and 0.25 g step. Exact measured peaks and the
@@ -409,24 +410,40 @@ An unknown physical sensor range also prevents a candidate; either case still
 exports all three valid measured windows and their statistics.
 
 These are **initial calibration candidates, NOT calibrated impact thresholds**.
-Only a later separate `ACCEL_HOMING_CALIBRATE` command without explicit
-`START_THRESHOLD` or `STEP` consumes the matching axis's candidate, leaving
-ordinary/manual thresholds and saved models alone. Either explicit grid
-parameter skips automatic seed selection for that run.
-Unused candidates last until restart and are discarded when sensor or
-calibration context changes; a new run, cancellation, shutdown or manual
-threshold change also clears them. Saving X normally restarts Klipper, so
-remeasure stationary vibration before Y to obtain a new Y candidate.
+Standalone X/Y component hints remain diagnostic; a later calibration does not
+consume them. Each new `ACCEL_HOMING_CALIBRATE AXIS=X|Y CENTERED=1` invocation
+requires its own three-window stationary measurement and completed summary
+export before its first movement. Candidate retries and same-run continuations
+do not repeat that measurement. Saving X normally restarts Klipper; the new Y
+command measures again automatically. Measurement/context/export failures
+abort before movement, with no fallback to a configured initial value.
+
+For automatic selection, each window removes its own full XYZ mean and measures
+`sqrt(dx^2 + dy^2 + dz^2)` for every sample. Let `peak` be the largest such
+**magnitude** across all three windows. The required value is
+`max(calibration_start_threshold, 1.2 * peak, peak + 0.1 g)` and is rounded
+upward on `calibration_start_threshold + n * STEP`. An explicit `STEP` supplies
+the grid spacing; otherwise `calibration_step` is used. This matches the simple
+calibration detector rather than using a mapped X or Y component hint.
+Without an explicit `START_THRESHOLD`, an unknown range or a candidate above
+`min(calibration_max_threshold, 15 g, 0.8 * sensor_full_scale_g)` aborts before
+movement; it is never clamped downward or taken from an older run.
+An explicit `START_THRESHOLD` retains its validated initial value even when
+noise suggests another value, but measurement and summary export still must
+succeed. These parameters remain fixed during the run. Noise acquisition alone
+does not change manual thresholds or saved models.
 See the [current calibration sequence](SIMPLE_CALIBRATION.md) for threshold
 selection, automatic early-impact returns and ten-check qualification.
 
 Stationary vibration in the current motor/fan state does not predict motor
 enable, hold-to-run-current or first-step transients. It does not certify
 contact detection or guarantee that noise will be filtered. Calibration still
-requires a fresh offset reference and proof of movement, while skipping its
-quiet-range gate. Ordinary homing and the other workflows retain quietness
-qualification. Raw impact eligibility, freshness/fault gates and timing limits
-remain active.
+requires a fresh offset reference for every move. Neither the initial noise
+measurement nor the XYZ-magnitude detector adds a quiet-range gate or
+acceleration-derived proof of movement. Legacy selected-axis models/manual
+overrides retain their quiet-reference and movement-proof path. Raw impact
+eligibility, freshness/fault gates and timing limits remain active. The
+noise-based initial value is a heuristic, not a certified minimum.
 
 ## Centered calibration
 
@@ -439,12 +456,14 @@ measurement. The workflow does not assign a center coordinate or mark either
 axis homed before the actual home. No further confirmation is requested; the
 first homing pass starts after stationary preparation succeeds.
 
-The first home tests the candidate threshold, starting at 1.0 g by default.
+The first home tests the candidate selected from the fresh noise measurement,
+or the explicit `START_THRESHOLD` value.
 Calibration and saved models accept finite thresholds from 0.5 to 15 g, with
 the configured calibration ceiling and sensor-range limit still applied.
-The default step is 0.25 g, so the first early-trigger retry uses 1.25 g.
+The default step is 0.25 g; each early-trigger retry adds that selected step.
 `START_THRESHOLD=1 STEP=0.25` selects those values explicitly for a run and
-does not consume stationary-noise hints. Parameters are validated before
+still performs the three-window measurement before movement. Supplying only
+`STEP` preserves automatic initial selection. Parameters are validated before
 workflow effects, stored in the session, and cannot change mid-run.
 Previous models at 1 g and 2 g remain valid. Manual `threshold`, `x_threshold`
 and `y_threshold` settings in either section, and both `SET_ACCEL_HOMING` and

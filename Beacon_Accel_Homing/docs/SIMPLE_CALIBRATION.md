@@ -4,20 +4,51 @@ The existing command syntax is unchanged:
 
 ```gcode
 ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1
-ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1 START_THRESHOLD=1 STEP=0.25
+ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1
 ```
 
 Use one axis per invocation. `AXIS` selects the printer direction to move,
 not an accelerometer channel. Physically center XY, leave both axes unhomed,
 keep Z supported/clear, and supervise with an accessible emergency stop.
-`CENTERED=1` authorizes movement immediately. Default start/step are 1.00/0.25 g;
-explicit older configuration is retained, and command parameters override it.
+`CENTERED=1` authorizes movement after stationary preparation succeeds.
+
+## Stationary noise before movement
+
+Every new per-axis calibration command first acquires three disjoint one-second
+stationary-noise windows and exports their summary. This runs once before the
+first candidate home, not before each threshold retry or same-run continuation.
+X and Y each get a new measurement, including after a save/restart. A previous
+standalone `ACCEL_HOMING_CALIBRATE_NOISE` result is never reused.
+
+The measurement requires an idle, unpaused printer, an empty motion queue and
+an exclusive sensor stream. It leaves motor enable/current and fan state as
+they are. A failed measurement, changed context, sensor fault or failed summary
+export aborts calibration before movement; it does not fall back to a default
+threshold.
+
+Without an explicit `START_THRESHOLD`, fresh noise selects the initial
+candidate using the same baseline-subtracted XYZ magnitude as the detector.
+The configured grid starts at 1.00 g with 0.25 g steps by default. Existing
+`calibration_start_threshold` and `calibration_step` settings remain the grid
+origin and spacing. An explicit `STEP` changes that spacing and still permits
+noise-based selection. For an advanced initial-value override:
+
+```gcode
+ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
+```
+
+This still performs the fresh noise measurement, but starts at the supplied
+1.00 g and then uses 0.25 g increments. Command parameters are fixed for the
+run. The noise-selected threshold is an initial candidate, not a calibrated
+impact threshold or a certified minimum. Stationary measurements do not cover
+motion, motor enabling, hold-to-run current changes or first-step transients.
+See the [numerical policy and limits](COMPATIBILITY.md#stationary-accelerometer-noise-measurement).
 
 ## Detector
 
 Each move acquires a fresh resting XYZ offset (normally 100 ms, at least
-50 contiguous samples). It does not test stationary peak-to-peak quietness or
-run a separate noise calibration. For each sample it evaluates
+50 contiguous samples), separate from the initial three noise windows.
+It does not test stationary peak-to-peak quietness. For each sample it evaluates
 `sqrt((ax-bx)^2 + (ay-by)^2 + (az-bz)^2)` in g, with the offset fixed for the move.
 The first sample at or above the candidate threshold requests an immediate
 stop. The later recorded impact peak does not delay stopping. Channel
@@ -118,9 +149,11 @@ to use the new calibrated model; thresholds from different metrics are not
 interchangeable. Existing axes_map remains useful for other Klipper features.
 
 `ACCEL_HOMING_CALIBRATE_NOISE` remains a separate stationary diagnostic. Its
-threshold hints are not automatically consumed by simple calibration.
+mapped X/Y component hints do not select a later calibration's initial value;
+that calibration uses its own fresh XYZ-magnitude measurement.
 `ACCEL_HOMING_STATUS` reports the discovery/validation phase, threshold,
-restart count and current ten-check spread.
+restart count and current ten-check spread. Its `stationary_noise` summary
+identifies the fresh measurement, magnitude peak, initial-value source and PNG.
 
 ## Limits of this method
 
@@ -130,6 +163,6 @@ assume no skipped steps, slipping belts or blocked motion. Repeatable contact
 with the wrong obstruction can pass. An impact beyond 20 mm is a candidate,
 not independent proof that the intended endstop was reached. Assigning an
 endstop coordinate and returning to its midpoint assumes genuine contact;
-supervise actual travel and stop on unexpected behavior. This early-return
-revision was reviewed from source only; its regression sources were not run
-and no printer hardware or service was accessed.
+supervise actual travel and stop on unexpected behavior. This stationary-noise
+preflight revision was reviewed from source only; its regression sources were
+not run and no printer hardware or service was accessed.
