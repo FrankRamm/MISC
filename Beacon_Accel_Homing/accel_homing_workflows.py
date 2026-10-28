@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import types
 import sys
+import tempfile
 import urllib.parse
 import uuid
 
@@ -1522,6 +1523,51 @@ class AccelHomingWorkflows:
             axes = (axis,)
         self._start_xy(gcmd, "charts", axes=axes)
 
+    def _accuracy_capture_directory(self):
+        roots = [Path(self.charts_directory).resolve()]
+        if self.chart_config_root is not None:
+            roots.append(Path(self.chart_config_root).resolve())
+        main_config = self.chart_start_args.get("config_file")
+        if main_config:
+            roots.append(Path(main_config).expanduser().resolve().parent)
+        # TMPDIR may point into Moonraker's watched config tree. Check each
+        # parent before creating a directory there; /tmp and /var/tmp are
+        # explicit Linux fallbacks when the environment selects that tree.
+        for candidate in dict.fromkeys((tempfile.gettempdir(), "/tmp", "/var/tmp")):
+            parent = Path(candidate).resolve()
+            if any(parent == root or root in parent.parents for root in roots):
+                continue
+            try:
+                return tempfile.TemporaryDirectory(prefix="accel_homing_accuracy_", dir=str(parent))
+            except OSError:
+                continue
+        raise self._error("cannot prepare temporary accuracy captures outside the chart/config directories")
+
+    @staticmethod
+    def _public_accuracy_results(session):
+        return {axis: {key: value for key, value in item.items()
+                       if key not in ("capture_paths", "discovery_capture_paths", "rejection_capture_paths")}
+                for axis, item in session["axis_results"].items()}
+
+    def _cleanup_accuracy_captures(self, temporary, session, error_active):
+        if session is not None:
+            session.pop("capture_directory", None)
+            for item in session.get("axis_results", {}).values():
+                for key in ("capture_paths", "discovery_capture_paths", "rejection_capture_paths"):
+                    item.pop(key, None)
+        try:
+            temporary.cleanup()
+        except Exception as exc:
+            logging.exception("accel_homing: unable to remove temporary accuracy captures")
+            if (session is not None and self.last_result is not None
+                    and self.last_result.get("run_id") == session["run_id"]):
+                self.last_result["capture_cleanup_error"] = str(exc)
+                if self.last_result["result"] == "complete":
+                    self.last_result.update(result="aborted", reason="temporary accuracy capture cleanup failed: %s" % exc)
+            # An original motion/restoration/cancellation error keeps priority.
+            if not error_active:
+                raise self._error("temporary accuracy capture cleanup failed: %s" % exc) from exc
+
     def cmd_ACCURACY(self, gcmd):
         requested = str(gcmd.get("AXIS", "XY")).strip().lower()
         if requested not in ("x", "y", "xy"):
@@ -1534,41 +1580,48 @@ class AccelHomingWorkflows:
         self._require_centered(gcmd)
         self._chart_preflight()
         axes = list(requested)
-        self._begin(gcmd, "accuracy", axes=axes)
-        session = self.session
-        session.update(state="running", axes=axes, samples_requested=samples,
-                       attempt_limit=len(axes) * (samples + 1), sample_index=0,
-                       configured_speeds={axis: self.owner.rails_by_axis[axis].get_homing_info().speed
-                                          for axis in axes},
-                       pending_record=None, last_arm_time=None,
-                       axis_results={axis: {"requested_samples": samples, "complete": False,
-                                            "discovery": None, "discovery_capture_paths": None,
-                                            "trials": [], "statistics": None,
-                                            "capture_paths": [], "rejected": None}
-                                     for axis in axes})
-        self._info("Accuracy uses the configured homing speed and threshold. CENTERED=1 "
-                   "confirms manually centered XY with nozzle clearance; each axis's first "
-                   "home is discovery only and is excluded from measured statistics")
+        temporary = self._accuracy_capture_directory()
+        session = None
         try:
-            self._accuracy_trials(session)
-            self._check_running(session)
-            # Validate all exported captures and prospective summary inputs
-            # before terminal release. Publish afterward so a release failure
-            # receives an aborted summary retaining accepted measurements.
+            self._begin(gcmd, "accuracy", axes=axes)
+            session = self.session
+            session.update(state="running", axes=axes, samples_requested=samples,
+                           capture_directory=str(Path(temporary.name).resolve()),
+                           attempt_limit=len(axes) * (samples + 1), sample_index=0,
+                           configured_speeds={axis: self.owner.rails_by_axis[axis].get_homing_info().speed
+                                              for axis in axes},
+                           pending_record=None, last_arm_time=None,
+                           axis_results={axis: {"requested_samples": samples, "complete": False,
+                                                "discovery": None, "discovery_capture_paths": None,
+                                                "trials": [], "statistics": None,
+                                                "capture_paths": [], "rejected": None}
+                                         for axis in axes})
+            self._info("Accuracy uses the configured homing speed and threshold. CENTERED=1 "
+                       "confirms manually centered XY with nozzle clearance; each axis's first "
+                       "home is discovery only and is excluded from measured statistics")
             try:
-                validate_accuracy(self.charts_directory, session["run_id"], session["axis_results"],
-                                  **self._chart_options(session))
-            except (ValueError, OSError) as exc:
-                raise self._error("accuracy summary validation failed: %s" % exc) from exc
-            axis, record, _source = session["terminal_home"]
-            self._release_terminal_home(axis, record)
-            self._finish({"result": "complete"})
-            if self.last_result["result"] != "complete":
-                raise self._error(self.last_result.get("reason", "accuracy export failed"))
-        except Exception as exc:
-            if self.session is session:
-                self._finish({"result": "aborted", "reason": str(exc)}, release=True)
-            raise
+                self._accuracy_trials(session)
+                self._check_running(session)
+                # Validate temporary capture bytes before terminal release.
+                # Final publication follows restoration, so release failures
+                # receive an aborted summary retaining accepted measurements.
+                try:
+                    validate_accuracy(self.charts_directory, session["run_id"], session["axis_results"],
+                                      capture_directory=session["capture_directory"],
+                                      **self._chart_options(session))
+                except (ValueError, OSError) as exc:
+                    raise self._error("accuracy summary validation failed: %s" % exc) from exc
+                axis, record, _source = session["terminal_home"]
+                self._release_terminal_home(axis, record)
+                self._finish({"result": "complete"})
+                if self.last_result["result"] != "complete":
+                    raise self._error(self.last_result.get("reason", "accuracy export failed"))
+            except Exception as exc:
+                if self.session is session:
+                    self._finish({"result": "aborted", "reason": str(exc)}, release=True)
+                raise
+        finally:
+            self._cleanup_accuracy_captures(temporary, session, sys.exc_info()[0] is not None)
 
     @staticmethod
     def _accuracy_statistics(records):
@@ -1594,7 +1647,7 @@ class AccelHomingWorkflows:
                     axis_result["statistics"] = self._accuracy_statistics(axis_result["trials"])
                     axis_result["complete"] = len(axis_result["trials"]) == session["samples_requested"]
                 try:
-                    paths = write_capture(self.charts_directory,
+                    paths = write_capture(session["capture_directory"],
                                           "%s_a%03d" % (session["run_id"], session["attempts"]),
                                           axis, capture, record, **self._chart_options(session))
                 except (ValueError, OSError) as exc:
@@ -1603,9 +1656,6 @@ class AccelHomingWorkflows:
                     # Bound memory to one capture, even on export rejection.
                     del capture
                 self._check_running(session)
-                session["paths"].append({"axis": axis, "phase": record["workflow_phase"],
-                                         "sample_index": sample_index,
-                                         "workflow_attempt": record["workflow_attempt"], **paths})
                 if quality != "good":
                     axis_result["rejection_capture_paths"] = paths
                     raise self._error(reason + "; no automatic move follows this result; manually recenter")
@@ -1652,13 +1702,14 @@ class AccelHomingWorkflows:
                   "fixed_thresholds_g": {axis: session["saved_thresholds"][axis]
                                          for axis in session["axes"]},
                   "configured_homing_speeds_mm_s": dict(session["configured_speeds"]),
-                  "attempts": session["attempts"], "axis_results": session["axis_results"],
+                  "attempts": session["attempts"], "axis_results": self._public_accuracy_results(session),
                   "records": list(session["records"]), "paths": list(session["paths"]), **ending}
+        paths = {}
         try:
-            paths = write_accuracy(self.charts_directory, session["run_id"],
-                                   session["axis_results"], result["result"], result.get("reason"),
-                                   **self._chart_options(session))
-            result["summary_paths"] = paths
+            write_accuracy(self.charts_directory, session["run_id"],
+                           session["axis_results"], result["result"], result.get("reason"),
+                           capture_directory=session["capture_directory"], published_paths=paths,
+                           **self._chart_options(session))
             self._show_pngs(paths, "Accuracy")
         except Exception as exc:
             logging.exception("accel_homing: unable to export accuracy summary")
@@ -1666,6 +1717,8 @@ class AccelHomingWorkflows:
             if result["result"] == "complete":
                 result["result"] = "aborted"
                 result["reason"] = "accuracy summary export failed: %s" % exc
+        if paths:
+            result["summary_paths"] = dict(paths)
         self._info("Accuracy run %s: %s. Commanded travel is reported to 0.001 mm; "
                    "these measurements do not certify physical stop position" % (
                        session["run_id"], result["result"]))
@@ -1713,7 +1766,7 @@ class AccelHomingWorkflows:
                           configured_homing_speeds_mm_s=dict(session["configured_speeds"]),
                           completed_samples={axis: len(item["trials"])
                                              for axis, item in session["axis_results"].items()},
-                          axis_results=session["axis_results"])
+                          axis_results=self._public_accuracy_results(session))
         elif session is not None and session["mode"] == "noise":
             active = {"mode": "noise", "state": session["state"], "run_id": session["run_id"],
                       "iteration": session["iteration"], "iterations_requested": NOISE_ITERATIONS,

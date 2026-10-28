@@ -1,5 +1,23 @@
 # Offline verification
 
+## Temporary accuracy captures and colon filenames — 2026-10-28
+
+This change was reviewed from source only. Regression sources were updated but
+**not executed or imported**; no plugin import, compilation, rendering, printer
+connection or printer command was performed. Historical test counts below do
+not verify this revision.
+
+The regression sources cover per-run temporary captures outside the watched
+chart/config roots, including a redirected temporary root; cleanup after final
+export, abort/cancel and setup/export failure; original motion-error priority;
+separate capture-source receipt/hash checks; public metadata without removed
+paths; prior-chart preservation; and already-published X paths when Y export
+fails. The maximum XY source fixture uses 102 temporary per-home PNGs, then keeps
+only two bounded final summaries with 100 accepted traces. Filename sources
+expect local `HH:MM:SS`, including collision suffixes and encoded inline URLs.
+Filesystem chart fixtures target the Linux Klipper host because Windows filenames
+do not support colons.
+
 ## Accuracy statistics and export errors — 2026-10-28
 
 This correction has been reviewed from source only. Its added regression
@@ -313,7 +331,7 @@ fixtures cover early invalid-axis rejection, selected-axis capture/final release
 single-axis installations, unchanged manual XY preparation and failure cleanup.
 Omitting `AXIS` retains the existing X-then-Y path. The historical executed
 counts below do not validate this change. The current PNG layout, local display
-timestamps and portable filenames also remain outside that executed run.
+timestamps and descriptive filenames also remain outside that executed run.
 
 Separately authorized PC runs executed the isolated chart renderer with
 simulated data. Final capture, accuracy and three-window noise PNGs were
@@ -401,7 +419,7 @@ timeout with temporary-file cleanup. Matplotlib/NumPy/Pillow do not appear in
 the parent process's module set. Other synthetic workflow fixtures inject a
 small valid-PNG renderer; they verify orchestration/provenance rather than
 repeating the real plotting dependency startup for every fake home. The
-maximum XY accuracy fixture retains 102 per-home PNGs and two bounded overviews,
+historical maximum XY accuracy fixture retained 102 per-home PNGs and two bounded overviews,
 with 100 accepted traces and population statistics. Validation yields between
 PNG files and can cancel before publication. PNG checks reject bad CRCs,
 duplicate headers, truncation/trailing bytes and oversized dimensions.
@@ -554,8 +572,9 @@ max-minus-min range, population standard deviation and population variance
 (divide by the measured count). Discovery/manual centering stays excluded.
 Qualified observations remain in the report when their range is at or above
 1.5 mm; this command does not apply calibration's acceptance rule. Failed or
-cancelled runs retain completed captures and report their measured/requested
-counts as incomplete. Fewer than two measured homes leave standard deviation
+cancelled runs retain measured observations and any published final summaries,
+remove temporary per-home PNGs, and report their measured/requested counts as
+incomplete. Fewer than two measured homes leave standard deviation
 and variance unavailable. Tests cover cancellation and shutdown during waits,
 recenter/export errors and a final restoration error; none can publish a
 successful run after that failure.
@@ -567,8 +586,9 @@ impact data. Exact detector threshold/onset/peak values survive a 0.001 g
 configured threshold; negative/permuted native sensor mappings retain the
 machine-axis sign. Capture conversion happens after trigger handling, and
 raw sample arrays are released after each trial and excluded from status.
-Per-home PNGs and per-axis overview PNGs preserve measured-acceleration plots,
-precise signed trigger thresholds and commanded-travel statistics. Raw arrays
+Temporary per-home PNGs are validated before the final per-axis overview PNGs
+preserve measured-acceleration plots, precise signed trigger thresholds and
+commanded-travel statistics. Only the final overviews are retained. Raw arrays
 are released after bounded trace/metric preparation; private immutable receipts
 are excluded from status JSON. No image pixels or sidecars are used to invent
 sensor samples. Synthetic visual checks do not validate physical centering,

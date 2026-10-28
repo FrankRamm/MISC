@@ -116,11 +116,15 @@ TEST, CHARTS and ACCURACY need the same manual preparation as calibration.
 | `ACCEL_HOMING_CALIBRATE_NOISE` | Optional stationary diagnostic; no movement and no automatic calibration seeding. |
 | `ACCEL_HOMING_TEST CENTERED=1` | Test X and Y. |
 | `ACCEL_HOMING_CHARTS_GENERATE AXIS=X CENTERED=1` | Chart X; use `AXIS=Y` or omit `AXIS` for both. |
-| `ACCEL_HOMING_ACCURACY AXIS=X SAMPLES=10 CENTERED=1` | Measure repeated X commanded-travel variation and export PNG charts. |
+| `ACCEL_HOMING_ACCURACY AXIS=X SAMPLES=10 CENTERED=1` | Measure repeated X commanded-travel variation and keep one final accuracy PNG per requested axis. |
 | `ACCEL_HOMING_CANCEL` | Cancel pending work; not an emergency stop. |
 
 Noise measurement is diagnostic only; it does not choose the starting threshold for simple calibration.
 New saved models preserve XYZ-magnitude detection for ordinary homing after restart.
+
+ACCURACY removes its temporary per-home PNGs after saving the final summaries,
+and on abort/cancel. Chart filenames use local time, for example
+`Accel Homing Accuracy X - 2026-10-27 23:59:42.png`.
 
 ## Uninstall
 

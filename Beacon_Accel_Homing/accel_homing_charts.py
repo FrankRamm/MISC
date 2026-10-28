@@ -190,7 +190,7 @@ def _clock():
             "created_local": local.isoformat(),
             "timestamp": local.strftime("%Y-%m-%d %H:%M:%S"),
             "timezone": "UTC%s:%s" % (offset[:3], offset[3:]),
-            "filename_time": local.strftime("%Y-%m-%d %H-%M-%S")}
+            "filename_time": local.strftime("%Y-%m-%d %H:%M:%S")}
 
 
 def _identity(run_id, axis):
@@ -361,7 +361,8 @@ def _capture_reference(directory, paths, run_id, axis, record, simulated, check_
 
 
 def validate_accuracy(directory, run_id, axis_results, result="complete", reason=None,
-                      simulated=False, renderer=None, check_running=None):
+                      simulated=False, renderer=None, check_running=None,
+                      capture_directory=None):
     _identity(run_id, "x")
     def cooperate():
         _check_running(check_running)
@@ -369,18 +370,24 @@ def validate_accuracy(directory, run_id, axis_results, result="complete", reason
         if reactor is not None:
             reactor.pause(reactor.monotonic() + 0.001)
         _check_running(check_running)
-    axes = _validate_accuracy(Path(directory).expanduser().resolve(), run_id, axis_results,
+    source = Path(directory if capture_directory is None else capture_directory).expanduser().resolve()
+    axes = _validate_accuracy(source, run_id, axis_results,
                               result, reason, simulated, check_running=cooperate)
     _check_running(check_running)
     return axes
 
 
 def write_accuracy(directory, run_id, axis_results, result, reason=None, simulated=False,
-                   renderer=None, check_running=None):
+                   renderer=None, check_running=None, capture_directory=None,
+                   published_paths=None):
     axes = validate_accuracy(directory, run_id, axis_results, result, reason, simulated,
-                             renderer=renderer, check_running=check_running)
+                             renderer=renderer, check_running=check_running,
+                             capture_directory=capture_directory)
     clock = _clock()
-    paths = {}
+    # Retain already-published axes if a later render/publication fails.
+    paths = {} if published_paths is None else published_paths
+    if not isinstance(paths, dict) or paths:
+        raise ValueError("Accuracy published paths must start as an empty mapping")
     for axis, item in axes.items():
         traces = [reference.receipt.trace for reference in item["capture_paths"] if reference is not None]
         payload = {"kind": "accuracy", "axis": axis, "result": result, "reason": reason,
