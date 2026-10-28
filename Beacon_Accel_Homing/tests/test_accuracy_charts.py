@@ -758,6 +758,25 @@ class NoisePNGTests(unittest.TestCase):
                         charts.write_noise(temp, "identity", changed, recommendation, "complete",
                                            simulated=True, renderer=renderer)
 
+    def test_optional_magnitude_noise_peak_is_validated_against_full_capture_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            item, capture = simulated_noise_window(temp, "magnitude", 1, peak=.6)
+            legacy_record = item["record"]
+            self.assertNotIn("noise_magnitude_peak_g", legacy_record)
+            baseline = capture["baseline_g"]
+            peak = max(math.sqrt(math.fsum((sample[index + 1] - baseline[index]) ** 2
+                                          for index in range(3)))
+                       for sample in capture["samples"])
+            self.assertGreater(peak, legacy_record["noise_peak_g"]["x"])
+            measured = dict(legacy_record, noise_magnitude_peak_g=peak)
+            paths = charts.write_noise_capture(temp, "magnitude", 1, capture, measured, simulated=True)
+            self.assertEqual(dict(paths), {})
+            for bad_peak in (None, True, -1., math.nan, math.inf,
+                             legacy_record["noise_peak_g"]["x"], peak + .01):
+                with self.subTest(bad_peak=bad_peak), self.assertRaises(ValueError):
+                    charts.write_noise_capture(temp, "magnitude", 1, capture,
+                                               dict(measured, noise_magnitude_peak_g=bad_peak), simulated=True)
+
 
 if __name__ == "__main__":
     unittest.main()

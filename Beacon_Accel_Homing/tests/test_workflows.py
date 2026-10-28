@@ -403,6 +403,8 @@ class Rig:
         self.home_results = collections.deque()
         self.on_home = None
         self.capture_active, self.capture_stops = False, 0
+        self.noise_calls, self.noise_window_count = [], 0
+        self.on_noise, self.amplitudes, self.calibration_charts = None, (.01, .005, .002), None
         self.bad_capture = None
         self.toolhead = Toolhead(self)
         self.lines = {s.name: Line(s.name, self.disabled) for s in self.toolhead.kin.steppers}
@@ -434,6 +436,11 @@ class Rig:
             preflight_motion_policy=self.preflight_motion_policy,
             _end_session=self.end_session, cmd_STATUS=lambda g: g.respond_info("core status"))
         self.owner._homed = lambda axis: axis in self.toolhead.kin.get_status(0)["homed_axes"]
+        self.owner.noise_session = None
+        self.owner.noise_sensor_context = self.sensor_context
+        self.owner.start_noise_measurement = self.start_noise
+        self.owner.stop_noise_measurement = self.stop_noise
+        self.owner.collect_noise_window = self.collect_noise
         for method in ("_retract_completed_home", "release_workflow_home", "_limit_accel",
                        "_restore_accel", "_set_accel"):
             setattr(self.owner, method, types.MethodType(getattr(plugin.BeaconAccelHoming, method), self.owner))
@@ -507,6 +514,39 @@ class Rig:
     def create_gcode_command(self, command, commandline, params):
         self.created_commands.append((command, commandline, dict(params)))
         return GCmd(command, commandline, **params)
+
+    def sensor_context(self):
+        return {"sensor": self.owner.sensor_name, "backend": "synthetic_noise",
+                "scale_id": 0, "scale_name": "16g", "count_g": 0.001,
+                "full_scale_g": self.owner.full_scale_g,
+                "capture_axes_map": [[0, 1], [1, 1], [2, 1]],
+                "sensor_axes_map": [[0, 1], [1, 1], [2, 1]], "sensor_rate_hz": 1000.0}
+
+    def start_noise(self):
+        self.noise_calls.append("start")
+        self.noise_window_count = 0
+        self.owner.noise_session = object()
+        return self.sensor_context()
+
+    def stop_noise(self):
+        self.noise_calls.append("stop")
+        self.owner.noise_session = None
+
+    def collect_noise(self, check_running, duration):
+        check_running()
+        self.noise_window_count += 1
+        iteration = self.noise_window_count
+        self.noise_calls.append(iteration)
+        if self.on_noise:
+            self.on_noise(iteration)
+        check_running()
+        start = 10.0 + iteration * 1.1
+        baseline = (0.25 * iteration, -0.2 * iteration, 1.0)
+        samples = [(start + number / 1000.0,) + tuple(
+            bias + amplitude * (0 if number == 1000 else 1 if number % 2 else -1)
+            for bias, amplitude in zip(baseline, self.amplitudes)) for number in range(1001)]
+        return {"samples": samples, "dropped": 0, "fault": None,
+                "cutoff_time_s": start - 0.001, "_noise_context": self.sensor_context()}
 
     def use_safe_z_home(self):
         safe = SafeZHoming(self)
@@ -611,6 +651,9 @@ class Rig:
         self.idle_state = "Printing"
 
     def calibrate(self, axis="X", save=None, **params):
+        if "charts_directory" not in self.config.options and self.calibration_charts is None:
+            self.calibration_charts = tempfile.TemporaryDirectory(prefix="accel-homing-calibration-")
+            self.workflow.charts_directory = self.calibration_charts.name
         arguments = {"AXIS": axis, "CENTERED": 1}
         if save is not None:
             arguments["SAVE_CONFIG"] = save

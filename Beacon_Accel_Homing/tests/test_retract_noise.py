@@ -387,45 +387,7 @@ class NoiseAcquisitionTests(unittest.TestCase):
 class NoiseRig(Rig):
     def __init__(self, options=None, amplitudes=(2.0, 0.05, 0.02)):
         super().__init__(options)
-        self.noise_calls = []
-        self.on_noise = None
         self.amplitudes = amplitudes
-        self.owner.noise_session = None
-        self.owner.noise_sensor_context = self.sensor_context
-        self.owner.start_noise_measurement = self.start_noise
-        self.owner.stop_noise_measurement = self.stop_noise
-        self.owner.collect_noise_window = self.collect_noise
-
-    def sensor_context(self):
-        return {"sensor": self.owner.sensor_name, "backend": "synthetic_noise",
-                "scale_id": 0, "scale_name": "16g", "count_g": 0.001,
-                "full_scale_g": self.owner.full_scale_g,
-                "capture_axes_map": [[0, 1], [1, 1], [2, 1]],
-                "sensor_axes_map": [[0, 1], [1, 1], [2, 1]], "sensor_rate_hz": 1000.0}
-
-    def start_noise(self):
-        self.noise_calls.append("start")
-        self.owner.noise_session = object()
-        return self.sensor_context()
-
-    def stop_noise(self):
-        self.noise_calls.append("stop")
-        self.owner.noise_session = None
-
-    def collect_noise(self, check_running, duration):
-        check_running()
-        iteration = len([call for call in self.noise_calls if isinstance(call, int)]) + 1
-        self.noise_calls.append(iteration)
-        if self.on_noise:
-            self.on_noise(iteration)
-        check_running()
-        start = 10.0 + iteration * 1.1
-        baseline = (0.25 * iteration, -0.2 * iteration, 1.0)
-        samples = [(start + number / 1000.0,) + tuple(
-            bias + amplitude * (0 if number == 1000 else 1 if number % 2 else -1)
-            for bias, amplitude in zip(baseline, self.amplitudes)) for number in range(1001)]
-        return {"samples": samples, "dropped": 0, "fault": None,
-                "cutoff_time_s": start - 0.001, "_noise_context": self.sensor_context()}
 
 
 class NoiseWorkflowTests(unittest.TestCase):
@@ -498,28 +460,29 @@ class NoiseWorkflowTests(unittest.TestCase):
                 self.assertAlmostEqual(item["record"]["baseline_g"]["z"], 1.0)
             rig.toolhead.kin.limits[:2] = [(1.0, -1.0), (1.0, -1.0)]
             rig.calibrate(save=0)
-            self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 11)
+            self.assertEqual([call["threshold"] for call in rig.home_calls], [2.5] * 11)
+            self.assertEqual(rig.noise_calls, ["start", 1, 2, 3, "stop"] * 2)
             self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
             self.assertEqual(rig.workflow.noise_seeds, {})
 
-    def test_either_explicit_grid_parameter_bypasses_noise_seed(self):
+    def test_only_explicit_start_bypasses_fresh_magnitude_seed(self):
         for parameters, expected_start, expected_step in (
                 ({"START_THRESHOLD": 1, "STEP": .25}, 1.0, .25),
                 ({"START_THRESHOLD": 1}, 1.0, .5),
-                ({"STEP": .25}, .5, .25)):
+                ({"STEP": .25}, 2.5, .25)):
             with self.subTest(parameters=parameters), tempfile.TemporaryDirectory() as temp:
                 rig = NoiseRig({"charts_directory": temp, "calibration_start_threshold": .5,
                                 "calibration_step": .5})
                 rig.workflow.cmd_NOISE(GCmd())
                 seeds = dict(rig.workflow.noise_seeds)
-                self.assertGreater(seeds["x"], expected_start)
+                self.assertGreater(seeds["x"], .5)
                 rig.calibrate(save=0, **parameters)
                 self.assertEqual([call["threshold"] for call in rig.home_calls], [expected_start] * 11)
                 self.assertEqual(rig.workflow.last_result["start_threshold_g"], expected_start)
                 self.assertEqual(rig.workflow.last_result["threshold_step_g"], expected_step)
                 self.assertEqual(rig.workflow.noise_seeds, {})
                 metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
-                self.assertNotIn("stationary_noise_seed", metadata)
+                self.assertEqual("stationary_noise_seed" in metadata, "START_THRESHOLD" not in parameters)
 
     def test_idle_queue_preflight_rejects_even_fifty_ms_flushed_motion_and_no_stock_g28_needed(self):
         for busy in ((10.05, 10.0, True), (10.0, 10.0, False)):
@@ -568,7 +531,7 @@ class NoiseWorkflowTests(unittest.TestCase):
             rig.workflow.cmd_NOISE(GCmd())
             rig.owner.rails_by_axis["x"].info.speed = 80.0
             rig.calibrate(save=0)
-            self.assertEqual(rig.home_calls[0]["threshold"], 1.0)
+            self.assertEqual(rig.home_calls[0]["threshold"], 2.5)
             self.assertEqual(rig.workflow.noise_seeds, {})
         with tempfile.TemporaryDirectory() as temp:
             rig = NoiseRig({"charts_directory": temp, "calibration_max_threshold": 2.0})
