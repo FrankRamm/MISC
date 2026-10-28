@@ -22,11 +22,13 @@ import urllib.parse
 import uuid
 
 try:
-    from .accel_homing_charts import (PNGRenderer, default_dependency_directory, preflight_renderer,
+    from .accel_homing_charts import (_accuracy_statistics as accuracy_statistics,
+                                      PNGRenderer, default_dependency_directory, preflight_renderer,
                                       validate_accuracy, write_accuracy, write_capture, write_noise,
                                       write_noise_capture)
 except ImportError:
-    from accel_homing_charts import (PNGRenderer, default_dependency_directory, preflight_renderer,
+    from accel_homing_charts import (_accuracy_statistics as accuracy_statistics,
+                                     PNGRenderer, default_dependency_directory, preflight_renderer,
                                      validate_accuracy, write_accuracy, write_capture, write_noise,
                                      write_noise_capture)
 
@@ -1197,6 +1199,10 @@ class AccelHomingWorkflows:
         result = record.get("result")
         travel = record.get("travel_mm")
         session = self.session
+        if session is not None and session.get("mode") == "accuracy" and "travel_mm_exact" in record:
+            exact = record["travel_mm_exact"]
+            if (type(exact) not in (int, float) or not math.isfinite(exact) or exact <= 0):
+                return "fatal", "invalid exact commanded travel measurement"
         if session is not None and session.get("mode") == "calibration":
             travel = record.get("travel_mm_exact", travel)
             if (not isinstance(travel, (int, float)) or isinstance(travel, bool)
@@ -1549,8 +1555,11 @@ class AccelHomingWorkflows:
             # Validate all exported captures and prospective summary inputs
             # before terminal release. Publish afterward so a release failure
             # receives an aborted summary retaining accepted measurements.
-            validate_accuracy(self.charts_directory, session["run_id"], session["axis_results"],
-                              **self._chart_options(session))
+            try:
+                validate_accuracy(self.charts_directory, session["run_id"], session["axis_results"],
+                                  **self._chart_options(session))
+            except (ValueError, OSError) as exc:
+                raise self._error("accuracy summary validation failed: %s" % exc) from exc
             axis, record, _source = session["terminal_home"]
             self._release_terminal_home(axis, record)
             self._finish({"result": "complete"})
@@ -1563,19 +1572,7 @@ class AccelHomingWorkflows:
 
     @staticmethod
     def _accuracy_statistics(records):
-        if not records:
-            return None
-        travels = [record["travel_mm"] for record in records]
-        count = len(travels)
-        mean = math.fsum(travels) / count
-        variance = (math.fsum((value - mean) ** 2 for value in travels) / count
-                    if count >= 2 else None)
-        return {"count": count, "min_mm": min(travels), "max_mm": max(travels),
-                "mean_mm": mean, "spread_mm": AccelHomingWorkflows._repeatability_spread(records),
-                "stddev_mm": math.sqrt(variance) if variance is not None else None,
-                "variance_mm2": variance,
-                "variance_definition": ("population (divide by N)" if count >= 2 else
-                                        "population (divide by N); at least 2 measured homes required")}
+        return accuracy_statistics(records)
 
     def _accuracy_trials(self, session):
         for axis_index, axis in enumerate(session["axes"]):
@@ -1600,6 +1597,8 @@ class AccelHomingWorkflows:
                     paths = write_capture(self.charts_directory,
                                           "%s_a%03d" % (session["run_id"], session["attempts"]),
                                           axis, capture, record, **self._chart_options(session))
+                except (ValueError, OSError) as exc:
+                    raise self._error("accuracy capture export failed: %s" % exc) from exc
                 finally:
                     # Bound memory to one capture, even on export rejection.
                     del capture

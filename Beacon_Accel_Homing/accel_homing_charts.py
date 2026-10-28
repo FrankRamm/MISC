@@ -463,10 +463,19 @@ def write_noise(directory, run_id, iterations, recommendation, result, reason=No
 def _finite(value):
     return type(value) in (int, float) and math.isfinite(value)
 
+
+def _measured_travel(record):
+    # Older records only have the console-rounded field. An invalid exact
+    # measurement must be rejected, rather than hidden by that fallback.
+    return record.get("travel_mm_exact", record.get("travel_mm"))
+
+
 def _accuracy_statistics(trials):
-    values = [trial["travel_mm"] for trial in trials]
+    values = [_measured_travel(trial) for trial in trials]
     if not values:
         return None
+    if any(not _finite(value) or value <= 0 for value in values):
+        raise ValueError("Accuracy trial has invalid commanded travel")
     variance = statistics.pvariance(values) if len(values) >= 2 else None
     result = {"count": len(values), "min_mm": min(values), "max_mm": max(values),
               "mean_mm": statistics.mean(values), "spread_mm": max(values) - min(values),
@@ -489,8 +498,10 @@ def _check_accuracy_record(record, run_id, axis, phase, index, attempts, measure
         raise ValueError("Accuracy trial attempt is invalid or duplicated")
     attempts.add(attempt)
     if measured:
+        travel = _measured_travel(record)
         if record.get("result") != "impact" or record.get("capture_valid") is False \
                 or not _finite(record.get("travel_mm")) or record["travel_mm"] <= 0 \
+                or not _finite(travel) or travel <= 0 \
                 or not _finite(record.get("onset_g")) \
                 or not _finite(record.get("impact_peak_g")) or record["impact_peak_g"] < 0 \
                 or not _finite(record.get("threshold_g")) or record["threshold_g"] <= 0 \
@@ -825,7 +836,7 @@ def _plot_capture(figure, payload):
     peak_name = "XYZ magnitude" if vector else "|%s|" % payload["axis"].upper()
     axis.plot([peak[0]], [peak_value], "o", color="#192d45", markersize=4)
     _axes_summary(axis, ["Samples: %d  |  Travel: %s mm  |  Onset: %s s / %s g" % (
-                            captured["sample_count"], _number(record.get("travel_mm"), 6),
+                            captured["sample_count"], _number(_measured_travel(record), 6),
                             _number(elapsed, 4), _number(record.get("onset_g"))),
                          "Detector peak: %s g  |  Captured %s peak: %s g" % (
                             _number(record.get("impact_peak_g")), peak_name, _number(abs(peak_value)))])
@@ -850,7 +861,7 @@ def _plot_accuracy(figure, payload):
     travel.set_xlabel("Accepted measured home")
     travel.ticklabel_format(axis="y", style="plain", useOffset=False)
     if trials:
-        travel.plot(range(1, len(trials) + 1), [row["travel_mm"] for row in trials], "o-",
+        travel.plot(range(1, len(trials) + 1), [_measured_travel(row) for row in trials], "o-",
                     color="#1769aa", markersize=4)
         travel.set_xlim(.5, max(1.5, len(trials) + .5))
     else:

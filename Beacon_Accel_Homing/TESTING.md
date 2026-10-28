@@ -1,5 +1,18 @@
 # Offline verification
 
+## Accuracy statistics and export errors — 2026-10-28
+
+This correction has been reviewed from source only. Its added regression
+tests have **not been executed**; no plugin or test module was imported,
+and no printer or printer service was accessed. The 708-test result in the
+next section belongs to the preceding revision and does not verify this change.
+
+The new regressions cover shared statistics from unrounded commanded travel,
+fallback for older records, matching chart travel, rejection of malformed exact
+measurements or altered statistics, controlled validation/export command errors,
+and propagation of motion and restoration failures. Calibration's existing
+repeatability calculation and acceptance rules are unchanged.
+
 ## Impact-after-20 mm discovery and selected-axis centering
 
 The updated package passed **708 offline tests** with no failures, errors or
