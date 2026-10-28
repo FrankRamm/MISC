@@ -54,19 +54,27 @@ while idle.
 ## Calibrate X, then Y
 
 Use an already working, firmly mounted sensor that moves with the tested axis,
-with the correct `axes_map`. Workflows require Cartesian/CoreXY, independent Z
+without requiring sensor-to-printer axis mapping for this detector.
+Workflows require Cartesian/CoreXY, independent Z
 and stock `G28` (standard `safe_z_home` or `homing_override` is supported);
 see [compatibility](docs/COMPATIBILITY.md).
 
-By default, calibration starts at **1.0 g** and increases by **0.25 g** after
-an early trigger. It needs ten validation homes after discovery, with travel
-spread below 1.5 mm. Calibration skips the stationary peak-to-peak quietness
-gate, while still collecting a fresh resting offset and enforcing sensor-data
-and motion checks.
+Calibration uses **three-axis acceleration magnitude** about a fresh resting
+offset, with **no quietness gate or acceleration-derived motion proof**.
+It starts at **1.0 g**, with **0.25 g** increments by default.
 
-Between accepted calibration trials, the selected axis returns to center with
-the configured `homing_accel` cap, then settles for 0.25 s before the next
-reference is collected. `calibration_settle_time` controls that stationary wait.
+A **20 mm screening move** selects the candidate without needing an endstop
+collision. It then returns to the same center and performs **ten** endstop
+checks. The screening distance is excluded. **Max distance minus min distance
+<= 2.00 mm passes**; a larger ten-check spread raises the threshold one step,
+clears the entire window and automatically restarts screening and validation.
+An impact before 20 mm stops immediately, raises the threshold, and requires
+manual recentering and the next command. Data faults/no impact still abort.
+
+Returns reverse measured halted step travel, including stop overshoot, rather
+than assume each hit was the endstop. The homing acceleration cap and default
+0.25 s settling wait remain. Step counts are not physical-position feedback.
+[Complete algorithm and limitations](docs/SIMPLE_CALIBRATION.md).
 
 1. Keep the printer idle and unpaused. **Center XY by hand and leave both
    axes unhomed in Klipper.** Keep Z supported and ensure nozzle/bed clearance:
@@ -88,7 +96,7 @@ reference is collected. `calibration_settle_time` controls that stationary wait.
 
 If asked to recenter, repeat the preparation and the **same command** to resume.
 The explicit start and step above override older configuration values and
-skip any stored noise-derived starting candidate. A resumed run keeps its
+do not consume stationary-noise hints. A resumed run keeps its
 current candidate; repeating `START_THRESHOLD=1` does not reset it to 1 g.
 After physically validating both axes, use the printer's normal homing controls.
 
@@ -103,13 +111,14 @@ TEST, CHARTS and ACCURACY need the same manual preparation as calibration.
 | `ACCEL_HOMING_STATUS` | Show settings, progress and results. |
 | `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1` | Calibrate X; saves X and restarts Klipper. |
 | `ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1` | Calibrate Y; saves Y and restarts Klipper. |
-| `ACCEL_HOMING_CALIBRATE_NOISE` | Optional stationary measurement after preparation, before calibration; no movement. |
+| `ACCEL_HOMING_CALIBRATE_NOISE` | Optional stationary diagnostic; no movement and no automatic calibration seeding. |
 | `ACCEL_HOMING_TEST CENTERED=1` | Test X and Y. |
 | `ACCEL_HOMING_CHARTS_GENERATE AXIS=X CENTERED=1` | Chart X; use `AXIS=Y` or omit `AXIS` for both. |
 | `ACCEL_HOMING_ACCURACY AXIS=X SAMPLES=10 CENTERED=1` | Measure repeated X commanded-travel variation and export PNG charts. |
 | `ACCEL_HOMING_CANCEL` | Cancel pending work; not an emergency stop. |
 
-Noise candidates expire on restart; repeat the measurement before Y if using them.
+Noise measurement is diagnostic only; it does not choose the starting threshold for simple calibration.
+New saved models preserve XYZ-magnitude detection for ordinary homing after restart.
 
 ## Uninstall
 

@@ -786,8 +786,11 @@ def _threshold(axis, record, label=True):
     if not _finite(threshold) or threshold <= 0:
         return
     direction = record.get("direction", 0)
-    limits = [direction * threshold] if direction in (-1, 1) else [-threshold, threshold]
-    name = ("Trigger %+.4g g" % limits[0] if len(limits) == 1 else
+    vector = record.get("impact_metric") == "xyz_magnitude"
+    limits = ([threshold] if vector else
+              [direction * threshold] if direction in (-1, 1) else [-threshold, threshold])
+    name = ("XYZ magnitude trigger %s g" % _number(threshold, 4) if vector else
+            "Trigger %+.4g g" % limits[0] if len(limits) == 1 else
             "Trigger ±%s g" % _number(threshold, 4))
     for index, value in enumerate(limits):
         axis.axhline(value, color="#744b98", linestyle="--", linewidth=1.1,
@@ -801,6 +804,11 @@ def _plot_capture(figure, payload):
     axis = figure.subplots()
     _axes_style(axis)
     _traces(axis, trace)
+    vector = record.get("impact_metric") == "xyz_magnitude"
+    magnitude = [(row[0], math.sqrt(sum(value * value for value in row[1:4]))) for row in trace]
+    if vector:
+        axis.plot([row[0] for row in magnitude], [row[1] for row in magnitude],
+                  linewidth=1.2, label="XYZ magnitude")
     _threshold(axis, record)
     onset = record.get("onset_time_s", record.get("onset_time"))
     elapsed = None
@@ -811,13 +819,16 @@ def _plot_capture(figure, payload):
         else:
             elapsed = None
     channel = {"x": 1, "y": 2}[payload["axis"]]
-    peak = max(trace, key=lambda row: abs(row[channel]))
-    axis.plot([peak[0]], [peak[channel]], "o", color="#192d45", markersize=4)
+    peak = (max(magnitude, key=lambda row: row[1]) if vector else
+            max(trace, key=lambda row: abs(row[channel])))
+    peak_value = peak[1] if vector else peak[channel]
+    peak_name = "XYZ magnitude" if vector else "|%s|" % payload["axis"].upper()
+    axis.plot([peak[0]], [peak_value], "o", color="#192d45", markersize=4)
     _axes_summary(axis, ["Samples: %d  |  Travel: %s mm  |  Onset: %s s / %s g" % (
                             captured["sample_count"], _number(record.get("travel_mm"), 6),
                             _number(elapsed, 4), _number(record.get("onset_g"))),
-                         "Detector peak: %s g  |  Captured |%s| peak: %s g" % (
-                            _number(record.get("impact_peak_g")), payload["axis"].upper(), _number(abs(peak[channel])))])
+                         "Detector peak: %s g  |  Captured %s peak: %s g" % (
+                            _number(record.get("impact_peak_g")), peak_name, _number(abs(peak_value)))])
     axis.legend(loc="best", fontsize=8)
     _finish_layout(figure, "Stationary baseline removed. Commanded travel is not physical stop accuracy.")
 
@@ -832,7 +843,8 @@ def _plot_accuracy(figure, payload):
                     _number(stats["min_mm"], 6), _number(stats["max_mm"], 6),
                     _number(stats["stddev_mm"]), _number(stats.get("variance_mm2")))]
     _title(figure, payload, "Accel Homing Accuracy " + payload["axis"].upper())
-    axes = figure.subplots(4, 1)
+    vector = bool(trials and trials[0].get("impact_metric") == "xyz_magnitude")
+    axes = figure.subplots(5 if vector else 4, 1)
     travel = axes[0]
     _axes_style(travel, "Travel (mm)", zero=False)
     travel.set_xlabel("Accepted measured home")
@@ -851,10 +863,20 @@ def _plot_accuracy(figure, payload):
             axis.plot([row[0] for row in trace], [row[channel] for row in trace], color=color,
                       alpha=.35 if len(traces) > 1 else 1., linewidth=.7,
                       label="%s (%d homes)" % (letter, len(traces)) if index == 0 else None)
-        if channel == {"x": 1, "y": 2}[payload["axis"]] and trials:
+        if not vector and channel == {"x": 1, "y": 2}[payload["axis"]] and trials:
             _threshold(axis, trials[0])
         if traces:
             axis.legend(fontsize=8, loc="best")
+    if vector:
+        axis = axes[4]
+        _axes_style(axis, "XYZ magnitude (g)")
+        for index, trace in enumerate(traces):
+            axis.plot([row[0] for row in trace],
+                      [math.sqrt(sum(value * value for value in row[1:4])) for row in trace],
+                      linewidth=.7, alpha=.35 if len(traces) > 1 else 1.,
+                      label="XYZ magnitude" if index == 0 else None)
+        _threshold(axis, trials[0])
+        axis.legend(fontsize=8, loc="best")
     _finish_layout(figure, "Commanded travel only; not physical stop accuracy. Qualifier excluded. Population statistics.", payload.get("reason"))
 
 

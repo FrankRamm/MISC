@@ -423,6 +423,9 @@ class Rig:
         self.workflow = AccelHomingWorkflows(self.owner, self.config)
         self.workflow.renderer = FakePNGRenderer()
         self.owner.workflows = self.workflow
+        # State-machine fixture: screen and endstop moves share a synthetic
+        # result source. Real HomingMove screening is exercised separately.
+        self.workflow._screen_homing_move = self.screen_home
 
     def lookup_object(self, name, default=None):
         return self.objects.get(name, default)
@@ -514,6 +517,10 @@ class Rig:
             return
         raise AssertionError("unexpected command " + script)
 
+    def screen_home(self, axis):
+        # Reuse the injected result stream, not real G28 or a printer.
+        self.stock_home(GCmd(**{axis.upper(): ""}))
+
     def stock_home(self, gcmd):
         axes = [axis.lower() for axis in "XYZ" if gcmd.get(axis, None) is not None]
         if not axes:
@@ -550,11 +557,29 @@ class Rig:
                   "onset_g": 4.0, "impact_peak_g": 7.0, "moving": True,
                   "threshold_g": self.owner.threshold_g[axis], "arm_time_s": self.capture_stops + 0.001,
                   "onset_time_s": self.capture_stops + 0.002, "direction": -1}
+        screening = self.workflow.home_plan is not None
+        if self.workflow.session.get("mode") == "calibration":
+            record["impact_metric"] = "xyz_magnitude"
+            if screening:
+                record.update(result="screen_complete", travel_mm=20.0,
+                              screen_completed=True, screen_target_mm=20.0,
+                              screen_step_tolerance_mm=0.0125)
+                # Injected travel denotes an impact, rather than a completed
+                # endpoint. This permits exact boundary and early-hit tests.
+                if "travel_mm" in result:
+                    record.update(result="impact", screen_completed=False)
         record.update(result)
+        if "halt_travel_mm_signed" not in record:
+            value = record.get("travel_mm")
+            record["halt_travel_mm_signed"] = (None if not isinstance(value, (int, float)) else
+                value * (1.0 if self.owner.rails_by_axis[axis].info.positive_dir else -1.0))
         self.owner.last[axis] = record
         index = "xy".index(axis)
         self.toolhead.kin.limits[index] = self.owner.rails_by_axis[axis].get_range()
         self.toolhead.position[index] = self.owner.rails_by_axis[axis].info.position_endstop
+        if screening:
+            center = self.workflow._geometry(axis)[0]
+            self.toolhead.position[index] = center + (record.get("halt_travel_mm_signed") or 0.0)
         self.workflow.check_home_result(record)
         self.homing_events.append(("end", axis))
         for callback in self.handlers["homing:home_rails_end"]:
@@ -838,8 +863,8 @@ class SafeZHomingWorkflowTests(unittest.TestCase):
                 self.assertEqual(safe.calls, [])
                 self.assertEqual(rig.toolhead.moves, [])
                 if error_type is CommandError:
-                    self.assertIn("stepper_z", rig.disabled)
-                    self.assertFalse(rig.lines["stepper_z"].enabled)
+                    self.assertNotIn("stepper_z", rig.disabled)
+                    self.assertTrue(rig.lines["stepper_z"].enabled)
 
     def test_invalid_internal_home_axis_is_rejected_without_dispatch_or_capture(self):
         for axis in ("", "z", "xy", "X", None):
@@ -1116,7 +1141,7 @@ class HomingOverrideWorkflowTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
-    def test_first_home_is_the_real_candidate_trial_from_unhomed_xy_without_seed(self):
+    def test_first_trial_is_screening_and_is_excluded_from_validation(self):
         rig = Rig()
         # Unhomed reported coordinates do not establish the physical center.
         rig.toolhead.position[:2] = [12.0, 19.0]
@@ -1168,7 +1193,7 @@ class CalibrationTests(unittest.TestCase):
             self.assertFalse(metadata["physical_position_verified"])
 
     def test_short_false_home_waits_without_reposition_then_same_command_preserves_candidate(self):
-        for short in (0.0, 10.0, 40.0, 110.0):
+        for short in (0.0, 10.0, 19.0, 19.999):
             rig = Rig()
             rig.home_results.append({"travel_mm": short})
             rig.calibrate()
@@ -1202,10 +1227,11 @@ class CalibrationTests(unittest.TestCase):
     def test_pressed_result_is_never_a_success_even_with_apparent_step_travel(self):
         rig = Rig()
         rig.home_results.append({"result": "pressed", "travel_mm": 150.0, "moving": False})
-        rig.calibrate()
-        self.assertEqual(rig.workflow.session["successes"], 0)
+        with self.assertRaisesRegex(CommandError, "sensor/homing failure"):
+            rig.calibrate()
+        self.assertEqual(rig.configfile.saved, {})
         self.assertEqual(rig.toolhead.moves, [])
-        self.assertEqual(rig.workflow.session["candidate"], 1.25)
+        self.assertIsNone(rig.workflow.session)
 
     def test_success_count_resets_after_threshold_changes(self):
         rig = Rig()
@@ -1220,16 +1246,14 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
         self.assertEqual(len(rig.scripts), 15)
 
-    def test_suspicious_long_travel_or_no_motion_abort_without_threshold_escalation(self):
-        for bad in ({"travel_mm": 200.0}, {"moving": False}, {"travel_mm": None},
-                    {"result": "no_data"}):
+    def test_faults_or_missing_step_travel_abort_without_threshold_escalation(self):
+        for bad in ({"travel_mm": None}, {"result": "no_data"}, {"travel_mm": math.nan}):
             rig = Rig()
             rig.home_results.append(bad)
             with self.assertRaises(CommandError):
                 rig.calibrate()
             self.assertIsNone(rig.workflow.session)
             self.assertEqual(rig.toolhead.moves, [])
-            self.assertEqual(rig.scripts, ["G28 X"])
             self.assertEqual(rig.owner.threshold_g["x"], 8.0)
             self.assertEqual(rig.toolhead.kin.get_status(0)["homed_axes"], "z")
 
@@ -1335,6 +1359,11 @@ class CalibrationRecenterTests(unittest.TestCase):
         rig.workflow._begin(GCmd(SAVE_CONFIG=0), mode, axis)
         rig.workflow.session["state"] = "running"
         rig.toolhead.kin.limits["xy".index(axis)] = rig.owner.rails_by_axis[axis].get_range()
+        if mode == "calibration":
+            center = rig.workflow._geometry(axis)[0]
+            record = {"axis": axis, "halt_travel_mm_signed": rig.toolhead.position["xy".index(axis)] - center}
+            rig.owner.last[axis] = record
+            rig.workflow.session["terminal_home"] = (axis, record, record)
         return rig
 
     def test_return_is_capped_waited_settled_and_restored_on_selected_axis(self):
@@ -1668,29 +1697,24 @@ class CalibrationGridTests(unittest.TestCase):
 
 
 class RepeatabilityCalibrationTests(unittest.TestCase):
-    def test_exact_one_point_five_range_is_rejected_including_decimal_endpoints(self):
-        for axis, low, high in (("X", 150.0, 151.5), ("X", 150.1, 151.6),
-                                ("X", 127.1, 128.6), ("Y", 100.0, 101.5)):
+    def test_exact_two_mm_range_passes_including_decimal_endpoints(self):
+        for axis, low, high in (("X", 150.0, 152.0), ("X", 150.1, 152.1),
+                                ("X", 127.1, 129.1), ("Y", 100.0, 102.0)):
             with self.subTest(axis=axis, low=low, high=high):
                 rig = Rig()
                 rig.home_results.extend([{}] + [{"travel_mm": low}] * 9 + [{"travel_mm": high}])
-                with self.assertRaisesRegex(CommandError, "spread 1.5 mm.*strictly < 1.50 mm"):
-                    rig.calibrate(axis)
-                self.assertEqual(rig.scripts, ["G28 " + axis] * 11)
-                self.assertEqual(len(rig.toolhead.moves), 10)
+                rig.calibrate(axis, save=0)
                 self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 11)
-                self.assertEqual(rig.configfile.saved, {})
-                self.assertEqual(rig.workflow.last_result["result"], "aborted")
+                self.assertEqual(rig.workflow.last_result["repeatability_spread_mm"], 2.0)
+                self.assertEqual(rig.workflow.last_result["restarts"], 0)
+                self.assertEqual(rig.workflow.last_result["result"], "calibrated")
                 self.assertIsNone(rig.workflow.session)
                 self.assertEqual(rig.owner.threshold_g, {"x": 8.0, "y": 9.0})
-                self.assertEqual(rig.owner.back_off_dist, 5.0)
-                self.assertEqual(rig.toolhead.kin.get_status(0)["homed_axes"], "z")
                 self.assertTrue(rig.lines["stepper_z"].enabled)
-                self.assertTrue(rig.lines["stepper_z1"].enabled)
                 self.assertFalse(rig.capture_active)
 
     def test_just_below_limit_passes_all_ten_and_records_spread_for_both_save_modes(self):
-        high = 151.499
+        high = 151.999
         for save in (0, 1):
             with self.subTest(save=save):
                 rig = Rig()
@@ -1701,44 +1725,44 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
                 self.assertEqual(metadata["min_commanded_travel_mm"], 150.0)
                 self.assertEqual(metadata["max_commanded_travel_mm"], high)
-                self.assertLess(metadata["repeatability_spread_mm"], 1.5)
-                self.assertEqual(metadata["repeatability_limit_mm"], 1.5)
+                self.assertLess(metadata["repeatability_spread_mm"], 2.0)
+                self.assertEqual(metadata["repeatability_limit_mm"], 2.0)
                 self.assertEqual(rig.workflow.last_result["repeatability_spread_mm"],
                                  metadata["repeatability_spread_mm"])
-                self.assertEqual(rig.workflow.last_result["repeatability_limit_mm"], 1.5)
+                self.assertEqual(rig.workflow.last_result["repeatability_limit_mm"], 2.0)
                 self.assertEqual(rig.scripts.count("SAVE_CONFIG"), save)
-                self.assertTrue(any("strictly < 1.50 mm" in message for message in rig.output))
+                self.assertTrue(any("<= 2.00 mm" in message for message in rig.output))
 
-    def test_geometry_qualified_outlier_aborts_immediately_without_recenter_or_escalation(self):
+    def test_outlier_is_evaluated_only_after_all_ten_then_restarts_screening(self):
         for axis, center in (("X", 150.0), ("Y", 100.0)):
-            for offset in (-1.6, 1.6):
+            for offset in (-2.001, 2.001):
                 with self.subTest(axis=axis, offset=offset):
                     rig = Rig()
-                    rig.home_results.extend([{}, {"travel_mm": center},
-                                             {"travel_mm": center + offset}] + [{}] * 8)
-                    with self.assertRaisesRegex(CommandError, "repeatability.*without raising.*no automatic move"):
-                        rig.calibrate(axis)
-                    self.assertEqual(rig.scripts, ["G28 " + axis] * 3)
-                    self.assertEqual(len(rig.toolhead.moves), 2)
-                    self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 3)
-                    self.assertEqual(rig.configfile.saved, {})
-                    self.assertIsNone(rig.workflow.session)
-                    self.assertEqual(rig.workflow.last_result["result"], "aborted")
+                    rig.home_results.extend([{}] + [{"travel_mm": center}] * 8 +
+                                            [{"travel_mm": center + offset}, {"travel_mm": center}])
+                    rig.calibrate(axis, save=0)
+                    self.assertEqual([c["threshold"] for c in rig.home_calls], [1.0] * 11 + [1.25] * 11)
+                    self.assertFalse(rig.home_calls[11]["candidate_qualified"])
+                    self.assertEqual(rig.home_calls[11]["successes"], 0)
+                    self.assertEqual(rig.home_calls[12]["successes"], 0)
+                    self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
+                    self.assertEqual(rig.workflow.last_result["restarts"], 1)
 
-    def test_reported_three_point_six_two_five_range_cannot_produce_a_saved_model(self):
+    def test_reported_three_point_six_two_five_range_restarts_with_an_empty_window(self):
         travels = [152.0, 152.034, 153.713, 153.075, 151.981,
                    153.728, 155.606, 154.919, 153.347, 152.003]
-        self.assertEqual(workflow_module.AccelHomingWorkflows._repeatability_spread(
+        self.assertEqual(AccelHomingWorkflows._repeatability_spread(
             [{"travel_mm": value} for value in travels]), 3.625)
         rig = Rig()
-        rig.home_results.extend([{}] + [{"travel_mm": value} for value in travels])
-        with self.assertRaisesRegex(CommandError, "repeatability"):
-            rig.calibrate()
-        # The third validation already makes the completed ten-home window impossible.
-        self.assertEqual(len(rig.home_calls), 4)
-        self.assertEqual(len(rig.toolhead.moves), 3)
-        self.assertEqual(rig.configfile.saved, {})
-        self.assertNotIn("SAVE_CONFIG", rig.scripts)
+        rig.home_results.extend([{}] + [{"travel_mm": value} for value in travels] +
+                                [{}] + [{"travel_mm": 149.0}] * 10)
+        rig.calibrate(save=0)
+        self.assertEqual(len(rig.home_calls), 22)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
+        self.assertEqual(rig.workflow.last_result["repeatability_spread_mm"], 0.0)
+        metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
+        self.assertEqual(metadata["min_commanded_travel_mm"], 149.0)
+        self.assertEqual(metadata["max_commanded_travel_mm"], 149.0)
 
     def test_discovery_and_manual_center_are_excluded_from_ten_distinct_validation_homes(self):
         for axis, travel in (("X", 150.0), ("Y", 100.0)):
@@ -1788,7 +1812,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
         self.assertEqual(rig.scripts, ["G28 X"] * 11 + ["G28 Y"] * 11)
 
     def test_early_hit_resets_window_before_new_candidate_and_fresh_discovery(self):
-        for early in (8.0, 119.0):
+        for early in (8.0, 19.999):
             with self.subTest(early=early):
                 rig = Rig()
                 rig.home_results.extend([{}, {"travel_mm": 151.0}, {"travel_mm": early}])
@@ -1804,7 +1828,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 self.assertEqual(len(rig.toolhead.moves), 2)
                 self.assertEqual(rig.configfile.saved, {})
                 status = rig.workflow.get_status(0)["active"]
-                self.assertEqual(status["repeatability_limit_mm"], 1.5)
+                self.assertEqual(status["repeatability_limit_mm"], 2.0)
                 self.assertIsNone(status["repeatability_spread_mm"])
                 rig.home_results.extend([{"travel_mm": 148.0}] * 11)
                 rig.calibrate()
@@ -1815,18 +1839,17 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
                 self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 3 + [1.25] * 11)
 
-    def test_repeatability_failure_after_retry_still_cannot_stage_or_raise_threshold(self):
+    def test_repeatability_failure_after_early_retry_increments_and_restarts_everything(self):
         rig = Rig()
         rig.home_results.extend([{}, {"travel_mm": 150.0}, {"travel_mm": 8.0}])
+        rig.calibrate(save=0)
+        rig.home_results.extend([{}] + [{"travel_mm": 150.0}] * 9 + [{"travel_mm": 152.01}])
         rig.calibrate()
-        rig.home_results.extend([{}, {"travel_mm": 150.0}, {"travel_mm": 151.5}])
-        with self.assertRaisesRegex(CommandError, "repeatability"):
-            rig.calibrate()
-        self.assertEqual([call["threshold"] for call in rig.home_calls], [1.0] * 3 + [1.25] * 3)
-        self.assertEqual(rig.configfile.saved, {})
-        self.assertEqual(rig.scripts, ["G28 X"] * 6)
-        self.assertEqual(len(rig.toolhead.moves), 4)
-        self.assertIsNone(rig.workflow.session)
+        self.assertEqual([c["threshold"] for c in rig.home_calls],
+                         [1.0] * 3 + [1.25] * 11 + [1.5] * 11)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 1.5)
+        self.assertEqual(rig.workflow.last_result["restarts"], 2)
+        self.assertEqual(rig.workflow.last_result["successes"], 10)
 
     def test_status_reports_current_validation_spread_and_fixed_limit(self):
         rig = Rig()
@@ -1840,7 +1863,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
         self.assertEqual(states[2]["repeatability_spread_mm"], 0.0)
         self.assertEqual(states[-1]["successes"], 9)
         self.assertEqual(states[-1]["repeatability_spread_mm"], 0.8)
-        self.assertTrue(all(status["repeatability_limit_mm"] == 1.5 for status in states))
+        self.assertTrue(all(status["repeatability_limit_mm"] == 2.0 for status in states))
 
     def test_save_guard_rejects_malformed_or_unqualified_windows_before_any_write(self):
         mutations = {
@@ -1859,7 +1882,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 -1, dict(w.session["validation_records"][-1])),
             "bad geometry": lambda w: w.session["validation_records"][-1].update(travel_mm=1.0),
             "nonfinite distance": lambda w: w.session["validation_records"][-1].update(travel_mm=math.nan),
-            "forged spread summary": lambda w: w.session["validation_records"][-1].update(travel_mm=151.5),
+            "forged spread summary": lambda w: w.session["validation_records"][-1].update(travel_mm=152.001),
             "missing save mode": lambda w: w.session.pop("save_config"),
         }
         for name, mutate in mutations.items():

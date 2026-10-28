@@ -1,5 +1,52 @@
 # Offline verification
 
+## Simple vector calibration with 20 mm screening — 2026-10-27
+
+The integrated package passed **704 offline tests**, including **29 new**
+vector/screening/return/model/chart regressions:
+
+```bash
+python -B -m unittest discover -s Beacon_Accel_Homing/tests -v
+```
+
+The local run completed in 16.091 seconds with no failures, errors or skips.
+`git diff --check` passed. No printer or printer service was accessed. All
+measurement fixtures are synthetic; these results do not certify mechanical
+endstop contact, physical travel, repeatability or stopping latency.
+
+The current workflow is documented in [SIMPLE_CALIBRATION.md](docs/SIMPLE_CALIBRATION.md).
+It replaces calibration discovery collisions with a bounded 20 mm screening
+move, keeps all ten validation impacts separate, accepts an exactly 2 mm spread,
+and retries a failed complete set at the next candidate with a new screen and
+an empty measurement window. Early hits still stop and request manual recentering.
+The command syntax, optional start/step overrides, save behavior, selected X/Y
+motion, attempt ceiling, threshold ceiling and data fault cleanup are exercised.
+
+Detector tests exercise the real prepared generic backend, noisy offset
+references, all sensor channels/signs, diagonal vectors, exact threshold
+crossing, original onset sample identity, separate post-trigger peaks, legacy
+startup-deadline bypass, and retained sensor-data/travel watchdogs. Native raw
+vector and sample-gap cases are included. Legacy native/generic estimator tests
+remain for old models and manual thresholds; those paths are not silently
+converted to vector detection.
+
+The screening adapter is exercised with a fake HomingMove implementing the
+verified `probe_pos=True, check_triggered=False` contract: both axes and both
+travel directions, endpoint step quantization, early impacts, no stock G28
+screen dispatch, missing API and missing halted-distance failures. This is not
+a full firmware/MCU replay. Return tests reverse signed halted step travel,
+including overshoot, rather than a falsely assumed physical endstop coordinate.
+Cancellation/cleanup and Z-state preservation are covered by the workflow suite.
+
+Saved vector models are tested through ordinary-home preparation to retain
+the same detection metric and omit quietness/motion-proof checks after reload.
+Charts show the XYZ magnitude and its positive threshold; old scalar plots
+remain unchanged. Spread calculations retain step precision rather than the
+console's three-decimal rounding, with only binary representation noise removed.
+Stationary-noise hints are diagnostic and no longer seed this calibration.
+
+Earlier sections below describe the historical policies of their revisions.
+
 ## Generic startup evidence and calibration return settling — 2026-10-27
 
 The package passed **675 tests** with:
