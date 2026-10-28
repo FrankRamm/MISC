@@ -1432,45 +1432,42 @@ class CalibrationRecenterTests(unittest.TestCase):
             rig.workflow.session["terminal_home"] = (axis, record, record)
         return rig
 
-    def test_return_is_capped_waited_settled_and_restored_on_selected_axis(self):
-        for axis in ("x", "y"):
-            for live, cap, expected in ((60000., 5000., 5000.), (1000., 5000., 1000.),
-                                        (60000., 0., 60000.)):
-                with self.subTest(axis=axis, live=live, cap=cap):
-                    rig = self.machine(axis, live_accel=live, cap=cap)
-                    toolhead, events = rig.toolhead, []
-                    move, wait, dwell, set_accel = (toolhead.manual_move, toolhead.wait_moves,
-                                                   toolhead.dwell, toolhead.set_max_velocities)
-                    def moving(coordinates, speed):
-                        events.append(("move", toolhead.accel))
-                        move(coordinates, speed)
-                    def waiting():
-                        events.append(("wait", toolhead.accel))
-                        wait()
-                    def dwelling(seconds):
-                        events.append(("dwell", seconds, toolhead.accel))
-                        dwell(seconds)
-                    def acceleration(velocity, value, scv, mcr):
-                        events.append(("accel", value))
-                        set_accel(velocity, value, scv, mcr)
-                    with mock.patch.object(toolhead, "manual_move", side_effect=moving), \
-                            mock.patch.object(toolhead, "wait_moves", side_effect=waiting), \
-                            mock.patch.object(toolhead, "dwell", side_effect=dwelling), \
-                            mock.patch.object(toolhead, "set_max_velocities", side_effect=acceleration):
-                        rig.workflow._recenter(axis)
-                    expected_events = [("move", expected), ("wait", expected),
-                                       ("dwell", .25, expected), ("wait", expected)]
-                    if expected != live:
-                        expected_events = [("accel", expected)] + expected_events + [("accel", live)]
-                    self.assertEqual(events, expected_events)
-                    self.assertEqual(toolhead.accel, live)
-                    self.assertIsNone(rig.owner.saved_accel)
-                    coordinates = [None, None, None]
-                    coordinates["xy".index(axis)] = (150., 100.)["xy".index(axis)]
-                    self.assertEqual(toolhead.moves, [(coordinates, 50.)])
+    def test_calibration_and_accuracy_return_with_same_normal_acceleration_and_settle(self):
+        for mode in ("calibration", "accuracy"):
+            for axis in ("x", "y"):
+                for live, cap in ((60000., 5000.), (1000., 5000.), (60000., 0.)):
+                    with self.subTest(mode=mode, axis=axis, live=live, cap=cap):
+                        rig = self.machine(axis, mode=mode, live_accel=live, cap=cap)
+                        toolhead, events = rig.toolhead, []
+                        move, wait, dwell = toolhead.manual_move, toolhead.wait_moves, toolhead.dwell
+                        def moving(coordinates, speed):
+                            events.append(("move", toolhead.accel))
+                            move(coordinates, speed)
+                        def waiting():
+                            events.append(("wait", toolhead.accel))
+                            wait()
+                        def dwelling(seconds):
+                            events.append(("dwell", seconds, toolhead.accel))
+                            dwell(seconds)
+                        with mock.patch.object(toolhead, "manual_move", side_effect=moving), \
+                                mock.patch.object(toolhead, "wait_moves", side_effect=waiting), \
+                                mock.patch.object(toolhead, "dwell", side_effect=dwelling), \
+                                mock.patch.object(rig.owner, "_limit_accel") as limit, \
+                                mock.patch.object(rig.owner, "_restore_accel") as restore:
+                            rig.workflow._recenter(axis)
+                        self.assertEqual(events, [("move", live), ("wait", live),
+                                                  ("dwell", .25, live), ("wait", live)])
+                        limit.assert_not_called()
+                        restore.assert_not_called()
+                        self.assertEqual(toolhead.accel, live)
+                        self.assertEqual(toolhead.accel_log, [])
+                        self.assertIsNone(rig.owner.saved_accel)
+                        coordinates = [None, None, None]
+                        coordinates["xy".index(axis)] = (150., 100.)["xy".index(axis)]
+                        self.assertEqual(toolhead.moves, [(coordinates, 50.)])
 
-    def test_noncalibration_returns_keep_live_acceleration_without_added_dwell(self):
-        for mode in ("test", "charts", "accuracy"):
+    def test_test_and_chart_returns_keep_live_acceleration_without_added_dwell(self):
+        for mode in ("test", "charts"):
             with self.subTest(mode=mode):
                 rig = self.machine(mode=mode)
                 with mock.patch.object(rig.owner, "_limit_accel") as limit, \
@@ -1482,13 +1479,13 @@ class CalibrationRecenterTests(unittest.TestCase):
                 self.assertEqual(rig.toolhead.dwells, [])
                 self.assertEqual(rig.toolhead.accel, 60000.)
 
-    def test_zero_settle_keeps_acceleration_cap_and_setting_is_bounded_and_reported(self):
+    def test_zero_settle_keeps_normal_acceleration_and_setting_is_bounded_and_reported(self):
         rig = self.machine(settle=0.)
         with mock.patch.object(rig.toolhead, "wait_moves", wraps=rig.toolhead.wait_moves) as wait:
             rig.workflow._recenter("x")
         self.assertEqual(wait.call_count, 1)
         self.assertEqual(rig.toolhead.dwells, [])
-        self.assertEqual(rig.toolhead.accel_log, [5000., 60000.])
+        self.assertEqual(rig.toolhead.accel_log, [])
         self.assertEqual(rig.workflow.get_status(0)["active"]["calibration_settle_time_s"], 0.)
         for value in (-.001, 2.001, float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(ConfigError):
@@ -1539,8 +1536,8 @@ class CalibrationRecenterTests(unittest.TestCase):
                             interrupt("dwell")
                     def ending():
                         end_session()
-                        # Real core _end_session also restores any active cap;
-                        # _recenter's finally must remain safe after this.
+                        # Real core _end_session restores the homing cap before
+                        # _recenter; cancellation must not apply another cap.
                         rig.owner._restore_accel()
                     with mock.patch.object(rig.workflow, "_recenter", side_effect=centering), \
                             mock.patch.object(rig.toolhead, "manual_move", side_effect=moving), \
@@ -1555,7 +1552,7 @@ class CalibrationRecenterTests(unittest.TestCase):
                     self.assertEqual(rig.toolhead.moves, [([150., None, None], 50.)])
                     self.assertEqual(rig.toolhead.accel, 60000.)
                     self.assertIsNone(rig.owner.saved_accel)
-                    self.assertEqual(rig.toolhead.accel_log, [5000., 60000.])
+                    self.assertEqual(rig.toolhead.accel_log, [])
                     self.assertIsNone(rig.workflow.session)
                     self.assertEqual(rig.configfile.saved, {})
 
@@ -1795,18 +1792,19 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 self.assertEqual(rig.scripts.count("SAVE_CONFIG"), save)
                 self.assertTrue(any("<= 2.00 mm" in message for message in rig.output))
 
-    def test_outlier_is_evaluated_only_after_all_ten_then_restarts_discovery(self):
+    def test_ninth_check_outlier_is_rejected_immediately_then_restarts_discovery(self):
         for axis, center in (("X", 150.0), ("Y", 100.0)):
             for offset in (-2.001, 2.001):
                 with self.subTest(axis=axis, offset=offset):
                     rig = Rig()
                     rig.home_results.extend([{}] + [{"travel_mm": center}] * 8 +
-                                            [{"travel_mm": center + offset}, {"travel_mm": center}])
+                                            [{"travel_mm": center + offset}, {}] +
+                                            [{"travel_mm": center}] * 10)
                     rig.calibrate(axis, save=0)
-                    self.assertEqual([c["threshold"] for c in rig.home_calls], [1.0] * 11 + [1.25] * 11)
-                    self.assertFalse(rig.home_calls[11]["candidate_qualified"])
+                    self.assertEqual([c["threshold"] for c in rig.home_calls], [1.0] * 10 + [1.25] * 11)
+                    self.assertFalse(rig.home_calls[10]["candidate_qualified"])
+                    self.assertEqual(rig.home_calls[10]["successes"], 0)
                     self.assertEqual(rig.home_calls[11]["successes"], 0)
-                    self.assertEqual(rig.home_calls[12]["successes"], 0)
                     self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
                     self.assertEqual(rig.workflow.last_result["restarts"], 1)
 
@@ -1816,10 +1814,12 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
         self.assertEqual(AccelHomingWorkflows._repeatability_spread(
             [{"travel_mm": value} for value in travels]), 3.625)
         rig = Rig()
-        rig.home_results.extend([{}] + [{"travel_mm": value} for value in travels] +
+        # The seventh validation sample first takes the running spread above
+        # 2 mm; the remaining historic samples must never run at this threshold.
+        rig.home_results.extend([{}] + [{"travel_mm": value} for value in travels[:7]] +
                                 [{}] + [{"travel_mm": 149.0}] * 10)
         rig.calibrate(save=0)
-        self.assertEqual(len(rig.home_calls), 22)
+        self.assertEqual(len(rig.home_calls), 19)
         self.assertEqual(rig.workflow.last_result["threshold_g"], 1.25)
         self.assertEqual(rig.workflow.last_result["repeatability_spread_mm"], 0.0)
         metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])

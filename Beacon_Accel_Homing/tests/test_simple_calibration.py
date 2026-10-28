@@ -170,12 +170,13 @@ class ImpactDiscoveryTests(unittest.TestCase):
                 w.session["state"] = "running"
                 initial = rig.toolhead.get_position()
                 z_limits = rig.toolhead.kin.limits[2]
-                rig.home_results.append({"travel_mm": 106.188})
+                travel = w._geometry(axis)[1] * .95
+                rig.home_results.append({"travel_mm": travel})
                 record, capture = w._home(axis, 1.0)
                 self.assertEqual(rig.scripts, ["G28 " + axis.upper()])
                 self.assertEqual(record["result"], "impact")
                 self.assertEqual(record["workflow_phase"], "discovery")
-                self.assertEqual(record["travel_mm"], 106.188)
+                self.assertEqual(record["travel_mm"], travel)
                 self.assertEqual(w._quality(axis, record)[0], "good")
                 self.assertFalse(w.session["candidate_qualified"])
                 self.assertEqual(w.session["validation_records"], [])
@@ -204,9 +205,10 @@ class ImpactDiscoveryTests(unittest.TestCase):
                     self.assertEqual(rig.configfile.saved, {})
                     self.assertIsNone(rig.workflow.session)
 
-    def test_impact_must_be_strictly_after_twenty_mm_without_display_rounding(self):
+    def test_twenty_mm_rule_and_geometry_both_use_unrounded_commanded_travel(self):
         for travel, quality in ((0., "early"), (19.9999, "early"), (20., "early"),
-                                (20.0001, "good"), (106.188, "good")):
+                                (20.0001, "implausible"), (106.188, "implausible"),
+                                (120., "good"), (180., "good"), (180.0001, "implausible")):
             for phase in ("discovery", "validation"):
                 rig = Rig()
                 w = rig.workflow
@@ -226,7 +228,7 @@ class ImpactDiscoveryTests(unittest.TestCase):
                 rail.info.position_endstop = rail.get_range()[1 if positive else 0]
                 rig.toolhead.position[:2] = [12., 19.]
                 center = rig.workflow._geometry(axis)[0]
-                rig.home_results.extend([{"travel_mm": 37.5}] + [{"travel_mm": center}] * 10)
+                rig.home_results.extend([{"travel_mm": center * .95}] + [{"travel_mm": center}] * 10)
                 rig.calibrate(axis.upper(), save=0)
                 self.assertEqual(len(rig.home_calls), 11)
                 self.assertEqual(rig.home_calls[0]["position"][:2], [12., 19.])
@@ -293,7 +295,7 @@ class ImpactDiscoveryTests(unittest.TestCase):
 
     def test_failed_spread_requires_another_discovery_impact_before_ten_new_checks(self):
         rig = Rig()
-        rig.home_results.extend([{"travel_mm": 37.5}] + [{"travel_mm": 150.}] * 9 +
+        rig.home_results.extend([{"travel_mm": 145.}] + [{"travel_mm": 150.}] * 9 +
                                 [{"travel_mm": 152.001}, {"result": "no_trigger", "travel_mm": 150.}])
         with self.assertRaisesRegex(CommandError, "failure"):
             rig.calibrate(save=0)
@@ -304,7 +306,7 @@ class ImpactDiscoveryTests(unittest.TestCase):
 
     def test_exactly_two_mm_passes_after_ten_checks_without_retry(self):
         rig = Rig()
-        rig.home_results.extend([{"travel_mm": 37.5}] + [{"travel_mm": 150.}] * 9 + [{"travel_mm": 152.}])
+        rig.home_results.extend([{"travel_mm": 145.}] + [{"travel_mm": 150.}] * 9 + [{"travel_mm": 152.}])
         rig.calibrate(save=0)
         self.assertEqual(len(rig.home_calls), 11)
         self.assertEqual(rig.workflow.last_result["threshold_g"], 1.)
@@ -314,6 +316,9 @@ class ImpactDiscoveryTests(unittest.TestCase):
 class SimpleWorkflowTests(unittest.TestCase):
     def test_discovery_hit_is_excluded_and_ten_checks_need_no_motion_flag(self):
         rig = Rig()
+        # Match this travel to the configured geometry instead of accepting a
+        # repeatable but materially short hit on the default 300 mm axis.
+        rig.owner.rails_by_axis["x"].bounds = (0., 212.376)
         rig.home_results.extend([{}] + [{"moving": False, "motion_seen": False, "travel_mm": 106.188}] * 10)
         rig.calibrate(save=0)
         self.assertEqual(len(rig.home_calls), 11)
