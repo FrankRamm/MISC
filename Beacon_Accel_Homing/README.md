@@ -65,20 +65,23 @@ Calibration detects **three-axis acceleration magnitude** about a fresh resting
 offset, with **no quietness gate or acceleration-derived motion proof**.
 Stationary noise does not measure movement or motor-start transients.
 
-An **impact after more than 20 mm of travel** selects the candidate. Reaching
-20 mm without an impact does not stop or qualify the move. It then centers
-**only the calibrated X or Y axis** and performs **ten** endstop checks from
-that axis's configured midpoint. The first discovery impact is excluded.
-**Max distance minus min distance <= 2.00 mm passes**; a larger ten-check spread
-raises the threshold one step, clears the entire window, recenters that axis,
-and automatically restarts impact discovery and validation.
+An **impact after more than 20 mm of travel** must also match the configured
+midpoint-to-endstop distance within `calibration_travel_tolerance` (20% by
+default). Reaching 20 mm alone never qualifies the move. After discovery, it
+centers **only the calibrated X or Y axis** and requires **ten** checks with
+**max distance minus min distance <= 2.00 mm**. Discovery is excluded.
+A spread **greater than 2.00 mm rejects the candidate immediately**, raises
+the threshold one step and restarts discovery with ten fresh checks.
+An implausible impact beyond 20 mm aborts without recentering; manually center
+XY before starting a new command. Distance checks do not prove physical contact.
 An impact at or before 20 mm stops immediately. If the return checks pass,
 the axis automatically returns to its estimated starting point, settles,
 and retries discovery at the next threshold step. Data faults, no impact
 or uncertain return evidence abort.
 
-After a qualifying impact, returns target the configured axis midpoint.
-The homing acceleration cap and default 0.25 s settling wait remain.
+CALIBRATE and ACCURACY midpoint returns use ordinary acceleration and the same
+explicit settling wait (default 0.25 s). Early reversals keep their existing
+cap and wait. Homing speed and its acceleration cap are unchanged.
 Step counts are not physical-position feedback.
 [Complete algorithm and limitations](docs/SIMPLE_CALIBRATION.md).
 

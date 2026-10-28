@@ -649,10 +649,35 @@ class AccelHomingWorkflows:
             # Do not certify a rejected trigger, or release the other motors.
             self.owner.toolhead.get_kinematics().limits[AXES[session["axis"]]] = (1.0, -1.0)
 
+    def _mark_implausible_calibration(self, axis, source_record, reason):
+        session = self.session
+        if (not isinstance(session, dict) or session.get("mode") != "calibration"
+                or session.get("state") != "running" or session.get("axis") != axis
+                or not session.get("axis_touched") or self.owner.last.get(axis) is not source_record
+                or source_record is session.get("home_old_record")
+                or session.get("home_generation") != self.owner.operation_generation):
+            raise self._error("implausible travel has no current calibration home evidence")
+        message = (reason + "; calibration aborted without an automatic return or threshold "
+                   "increase; selected-axis home is invalid. Manually recenter XY and "
+                   "start a new ACCEL_HOMING_CALIBRATE command with CENTERED=1")
+        announce = not session.get("axis_only_cleanup", False)
+        session["axis_only_cleanup"] = {"source": source_record, "attempt": session["attempts"],
+                                        "generation": session["home_generation"]}
+        if announce:
+            # Retain this instruction even if later capture/stream cleanup fails.
+            self._info(message)
+        return message
+
     def note_calibration_halt(self, record, positions):
-        """Retain one immutable early-pass snapshot before stock G28 can adjust it."""
+        """Mark suspect frames and retain early evidence before stock G28 cleanup."""
         axis = record.get("axis")
-        if not self.calibration_reference(axis) or self._quality(axis, record)[0] != "early":
+        if not self.calibration_reference(axis):
+            return
+        quality, reason = self._quality(axis, record)
+        if quality == "implausible":
+            self._mark_implausible_calibration(axis, record, reason)
+            return
+        if quality != "early":
             return
         session = self.session
         session["early_return_cleanup"] = True
@@ -1151,6 +1176,8 @@ class AccelHomingWorkflows:
         old_record = self.owner.last.get(axis)
         if session["mode"] == "calibration":
             session.update(axis_touched=True, early_return_cleanup=False,
+                           axis_only_cleanup=False,
+                           home_old_record=old_record,
                            home_generation=self.owner.operation_generation,
                            home_position=tuple(self.owner.toolhead.get_position()),
                            home_limits=tuple(self.owner.toolhead.get_kinematics().limits))
@@ -1199,10 +1226,15 @@ class AccelHomingWorkflows:
                                           else self.owner.threshold_g[axis])
         record["workflow_phase"] = ("validation" if session["candidate_qualified"] else "discovery") \
             if session["mode"] == "calibration" else session["mode"]
-        early_calibration = (session["mode"] == "calibration"
-                             and self._quality(axis, record)[0] == "early")
+        calibration_quality, calibration_reason = (self._quality(axis, record)
+                                                   if session["mode"] == "calibration" else (None, None))
+        early_calibration = calibration_quality == "early"
         if early_calibration:
             session["early_return_cleanup"] = True
+        elif calibration_quality == "implausible":
+            # Stock G28 assigned an endstop coordinate to an implausible hit.
+            # Preserve other-axis/Z state even if capture validation now fails.
+            self._mark_implausible_calibration(axis, source_record, calibration_reason)
         if session["mode"] == "accuracy":
             record = self._remember_accuracy_record(session, axis, old_record, record)
         if session["mode"] == "calibration" and capture.get("fault"):
@@ -1395,7 +1427,17 @@ class AccelHomingWorkflows:
                 return "fatal", "sensor/homing failure (%s)" % result
             if travel <= CALIBRATION_MIN_TRAVEL_MM:
                 return "early", "early trigger at %.3f mm (impact must occur after 20 mm)" % travel
-            return "good", "impact after more than 20 mm of commanded travel"
+            _center, expected = self._geometry(axis)
+            minimum = expected * (1.0 - self.travel_tolerance)
+            maximum = expected * (1.0 + self.travel_tolerance)
+            if not math.isfinite(expected) or not minimum <= travel <= maximum:
+                return "implausible", ("commanded travel %.6f mm is outside the plausible "
+                                       "midpoint-to-stop range %.6f..%.6f mm "
+                                       "(expected %.6f mm, tolerance %.1f%%)" % (
+                                           travel, minimum, maximum, expected,
+                                           self.travel_tolerance * 100.0))
+            # Step travel and nominal geometry do not prove physical contact.
+            return "good", "impact after 20 mm with plausible midpoint-to-stop commanded travel"
         if result not in ("impact", "pressed"):
             return "fatal", "sensor/homing failure (%s)" % result
         if not isinstance(travel, (int, float)) or not math.isfinite(travel):
@@ -1426,6 +1468,9 @@ class AccelHomingWorkflows:
         # Called only after _quality accepted this exact axis's current home.
         session = self.session
         self._check_running(session)
+        if (self.owner.homing_active or self.owner.attempt is not None
+                or self.owner.saved_accel is not None):
+            raise self._error("return to center requires completed homing with restored normal acceleration")
         if axis not in self.owner.toolhead.get_kinematics().get_status(
                 self.reactor.monotonic()).get("homed_axes", ""):
             raise self._error("axis lost homing before return to center")
@@ -1437,35 +1482,28 @@ class AccelHomingWorkflows:
                     or self.owner.last.get(axis) is not terminal[2]):
                 raise self._error("calibration return has no current measured move")
             if self._quality(axis, terminal[1])[0] != "good":
-                raise self._error("calibration return requires a current impact after 20 mm")
+                raise self._error("calibration return requires a current impact after 20 mm "
+                                  "with plausible midpoint-to-stop travel")
             # Stock homing has assigned the selected axis's endstop coordinate.
             # Use its configured midpoint, not the distance from the manually
             # estimated discovery start. The other coordinates remain unchanged.
         coordinates[AXES[axis]] = center
         info = self.owner.rails_by_axis[axis].get_homing_info()
         toolhead = self.owner.toolhead
-        if session["mode"] != "calibration":
-            toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
-            toolhead.wait_moves()
-            self._check_running(session)
-            return
-        try:
-            # Match the homing acceleration cap during calibration returns,
-            # then allow ringdown to decay before acquiring the next reference.
-            self.owner._limit_accel()
-            self._check_running(session)
-            toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
-            self._check_running(session)
-            toolhead.wait_moves()
-            self._check_running(session)
-            if session["calibration_settle_time_s"]:
-                toolhead.dwell(session["calibration_settle_time_s"])
-                self._check_running(session)
-                toolhead.wait_moves()
-                self._check_running(session)
-        finally:
-            self.owner._restore_accel()
+        # _home -> _end_session restored the ordinary acceleration limit.
+        # Calibration and accuracy must return and settle under the same policy.
+        # Never restore an unexplained active cap here or reduce homing speed.
+        toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
         self._check_running(session)
+        toolhead.wait_moves()
+        self._check_running(session)
+        settle = (self.calibration_settle_time
+                  if session["mode"] in ("calibration", "accuracy") else 0.0)
+        if settle:
+            toolhead.dwell(settle)
+            self._check_running(session)
+            toolhead.wait_moves()
+            self._check_running(session)
 
     def _next_calibration_candidate(self, reason):
         session = self.session
@@ -1597,6 +1635,9 @@ class AccelHomingWorkflows:
             discovery = not session["candidate_qualified"]
             record, _capture = self._home(axis, session["candidate"])
             quality, reason = self._quality(axis, record)
+            if quality == "implausible":
+                raise self._error(self._mark_implausible_calibration(
+                    axis, session["terminal_home"][2], reason))
             if quality == "fatal":
                 raise self._error(reason + "; calibration aborted without raising the threshold")
             if quality == "early":
@@ -1624,16 +1665,17 @@ class AccelHomingWorkflows:
             spread = session["repeatability_spread_mm"] = self._repeatability_spread(session["validation_records"])
             self._info("%s calibration %.2f g: %d/10 endstop checks; commanded travel spread %s mm" % (
                 axis.upper(), session["candidate"], session["successes"], spread))
-            if session["successes"] < REQUIRED_SUCCESSES:
-                self._recenter(axis)
-                continue
             if spread > CALIBRATION_REPEATABILITY_MM:
-                # All ten checks are evaluated together. A new threshold gets
-                # a new discovery impact and a completely empty validation set.
-                reason = "%s ten-check spread %s mm exceeds 2 mm" % (axis.upper(), spread)
+                # No later trial can reduce this running max-min spread.
+                # Reject immediately, then require fresh discovery and ten checks.
+                reason = "%s validation spread %s mm exceeds 2 mm after %d checks" % (
+                    axis.upper(), spread, session["successes"])
                 candidate = self._next_calibration_candidate(reason)
                 session["last_rejected_spread_mm"] = spread
                 self._info(reason + "; restart from impact discovery at %.2f g" % candidate)
+                self._recenter(axis)
+                continue
+            if session["successes"] < REQUIRED_SUCCESSES:
                 self._recenter(axis)
                 continue
             self._save_model()
@@ -1705,6 +1747,8 @@ class AccelHomingWorkflows:
                     "calibration_algorithm": SIMPLE_CALIBRATION, "impact_metric": "xyz_magnitude",
                     "minimum_impact_travel_mm": CALIBRATION_MIN_TRAVEL_MM,
                     "discovery_impact_required": True, "recenter_policy": "selected_axis_midpoint",
+                    "travel_plausibility_required": True,
+                    "recenter_acceleration_policy": "restored_normal_limit",
                     "onset_g": [r.get("onset_g") for r in qualified],
                     "impact_peak_g": [r.get("impact_peak_g") for r in qualified],
                     "calibration_start_threshold_g": session["start_threshold_g"],
@@ -1776,7 +1820,8 @@ class AccelHomingWorkflows:
                 self._finish({"result": "aborted", "reason": str(exc)},
                              release=(session["mode"] == "calibration"
                                       and session.get("axis_touched", False)
-                                      and not session.get("early_return_cleanup", False)))
+                                      and not session.get("early_return_cleanup", False)
+                                      and not session.get("axis_only_cleanup", False)))
             raise
 
     def _continue_calibration(self):
@@ -1794,7 +1839,8 @@ class AccelHomingWorkflows:
         except Exception as exc:
             if self.session is not None:
                 self._finish({"result": "aborted", "reason": str(exc)},
-                             release=not self.session.get("early_return_cleanup", False))
+                             release=(not self.session.get("early_return_cleanup", False)
+                                      and not self.session.get("axis_only_cleanup", False)))
             raise
 
     def cmd_CANCEL(self, gcmd):

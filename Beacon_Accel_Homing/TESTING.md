@@ -1,5 +1,38 @@
 # Offline verification
 
+## Running spread, travel plausibility and shared returns — 2026-10-28
+
+This change was reviewed from source only. Regression sources were updated but
+**not executed or imported**; no plugin import, compilation, rendering, printer
+connection or printer command was performed. `git diff --check` is the only
+executed check for this revision. Historical test counts below do not verify it.
+
+Regression sources: `tests/test_calibration_validation.py`,
+`tests/test_simple_calibration.py` and `tests/test_workflows.py`.
+They cover rejecting a running max-minus-min spread greater
+than 2 mm as soon as it appears, without waiting for ten validation impacts;
+exactly 2 mm remains accepted, but success still needs ten passing checks after
+a separate discovery. A retry clears the entire window and requires a fresh
+discovery, within the existing attempt and threshold ceilings.
+
+They also cover inclusive midpoint-to-endstop travel plausibility at the
+existing `calibration_travel_tolerance` (default 20%), for discovery and every
+validation impact beyond 20 mm, on both axes and homing directions. An
+implausible >20 mm hit aborts without reverse/midpoint return, threshold
+increase or model write, invalidates only the suspect axis's homed state and
+requires manual XY centering before a new command. Bounded automatic reversal
+and retry for impacts at or below 20 mm are retained. These are commanded-step
+plausibility checks, not contact or physical-position proof.
+
+CALIBRATE and ACCURACY midpoint return sources use ordinary acceleration and
+the same explicit `calibration_settle_time` wait. Bounded early reversals keep
+their existing cap and wait; homing speed, its acceleration cap and
+TEST/CHARTS returns remain unchanged. Fresh three-window stationary-noise
+preflight and summary export remain mandatory before calibration movement.
+Earlier descriptions of the 1.5 mm rule, waiting for complete windows and capped
+midpoint returns describe historical revisions, not current calibration.
+Current behavior is documented in [SIMPLE_CALIBRATION.md](docs/SIMPLE_CALIBRATION.md).
+
 ## Stationary-noise preflight before calibration — 2026-10-28
 
 This change was reviewed from source only. Regression sources were updated but
