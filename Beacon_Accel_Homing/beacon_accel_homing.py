@@ -1255,9 +1255,6 @@ class BeaconAccelHoming:
         else:
             retract = max(info.retract_dist, getattr(info, "min_home_dist", 0.0) or 0.0)
             travel, speed = 2.0 * retract + 3.0, info.second_homing_speed
-        plan = self.workflows.home_plan
-        if plan is not None and plan["axis"] == axis:
-            travel = plan["travel_mm"]
         # The toolhead never moves faster than its max_velocity.
         speed = min(speed, max_velocity)
         if self.backend is not None:

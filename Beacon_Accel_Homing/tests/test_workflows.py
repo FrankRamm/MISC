@@ -423,9 +423,6 @@ class Rig:
         self.workflow = AccelHomingWorkflows(self.owner, self.config)
         self.workflow.renderer = FakePNGRenderer()
         self.owner.workflows = self.workflow
-        # State-machine fixture: screen and endstop moves share a synthetic
-        # result source. Real HomingMove screening is exercised separately.
-        self.workflow._screen_homing_move = self.screen_home
 
     def lookup_object(self, name, default=None):
         return self.objects.get(name, default)
@@ -517,10 +514,6 @@ class Rig:
             return
         raise AssertionError("unexpected command " + script)
 
-    def screen_home(self, axis):
-        # Reuse the injected result stream, not real G28 or a printer.
-        self.stock_home(GCmd(**{axis.upper(): ""}))
-
     def stock_home(self, gcmd):
         axes = [axis.lower() for axis in "XYZ" if gcmd.get(axis, None) is not None]
         if not axes:
@@ -557,17 +550,8 @@ class Rig:
                   "onset_g": 4.0, "impact_peak_g": 7.0, "moving": True,
                   "threshold_g": self.owner.threshold_g[axis], "arm_time_s": self.capture_stops + 0.001,
                   "onset_time_s": self.capture_stops + 0.002, "direction": -1}
-        screening = self.workflow.home_plan is not None
         if self.workflow.session.get("mode") == "calibration":
             record["impact_metric"] = "xyz_magnitude"
-            if screening:
-                record.update(result="screen_complete", travel_mm=20.0,
-                              screen_completed=True, screen_target_mm=20.0,
-                              screen_step_tolerance_mm=0.0125)
-                # Injected travel denotes an impact, rather than a completed
-                # endpoint. This permits exact boundary and early-hit tests.
-                if "travel_mm" in result:
-                    record.update(result="impact", screen_completed=False)
         record.update(result)
         if "halt_travel_mm_signed" not in record:
             value = record.get("travel_mm")
@@ -577,9 +561,6 @@ class Rig:
         index = "xy".index(axis)
         self.toolhead.kin.limits[index] = self.owner.rails_by_axis[axis].get_range()
         self.toolhead.position[index] = self.owner.rails_by_axis[axis].info.position_endstop
-        if screening:
-            center = self.workflow._geometry(axis)[0]
-            self.toolhead.position[index] = center + (record.get("halt_travel_mm_signed") or 0.0)
         self.workflow.check_home_result(record)
         self.homing_events.append(("end", axis))
         for callback in self.handlers["homing:home_rails_end"]:
@@ -863,8 +844,11 @@ class SafeZHomingWorkflowTests(unittest.TestCase):
                 self.assertEqual(safe.calls, [])
                 self.assertEqual(rig.toolhead.moves, [])
                 if error_type is CommandError:
-                    self.assertNotIn("stepper_z", rig.disabled)
-                    self.assertTrue(rig.lines["stepper_z"].enabled)
+                    # Discovery now invokes stock G28, just like validation.
+                    # Preserve its fatal all-motor-off policy; do not suppress
+                    # the firmware's cleanup to keep Z enabled after a fault.
+                    self.assertIn("stepper_z", rig.disabled)
+                    self.assertFalse(rig.lines["stepper_z"].enabled)
 
     def test_invalid_internal_home_axis_is_rejected_without_dispatch_or_capture(self):
         for axis in ("", "z", "xy", "X", None):
@@ -1141,7 +1125,7 @@ class HomingOverrideWorkflowTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
-    def test_first_trial_is_screening_and_is_excluded_from_validation(self):
+    def test_first_trial_is_discovery_impact_and_is_excluded_from_validation(self):
         rig = Rig()
         # Unhomed reported coordinates do not establish the physical center.
         rig.toolhead.position[:2] = [12.0, 19.0]
@@ -1361,7 +1345,8 @@ class CalibrationRecenterTests(unittest.TestCase):
         rig.toolhead.kin.limits["xy".index(axis)] = rig.owner.rails_by_axis[axis].get_range()
         if mode == "calibration":
             center = rig.workflow._geometry(axis)[0]
-            record = {"axis": axis, "halt_travel_mm_signed": rig.toolhead.position["xy".index(axis)] - center}
+            record = {"axis": axis, "result": "impact", "travel_mm": center,
+                      "impact_metric": "xyz_magnitude"}
             rig.owner.last[axis] = record
             rig.workflow.session["terminal_home"] = (axis, record, record)
         return rig
@@ -1733,7 +1718,7 @@ class RepeatabilityCalibrationTests(unittest.TestCase):
                 self.assertEqual(rig.scripts.count("SAVE_CONFIG"), save)
                 self.assertTrue(any("<= 2.00 mm" in message for message in rig.output))
 
-    def test_outlier_is_evaluated_only_after_all_ten_then_restarts_screening(self):
+    def test_outlier_is_evaluated_only_after_all_ten_then_restarts_discovery(self):
         for axis, center in (("X", 150.0), ("Y", 100.0)):
             for offset in (-2.001, 2.001):
                 with self.subTest(axis=axis, offset=offset):

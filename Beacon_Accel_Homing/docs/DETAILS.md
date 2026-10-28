@@ -166,7 +166,7 @@ homing. The workflow restores the previous active thresholds when it ends.
 The staged model supplies its threshold after saving and reloading, unless a
 manual override takes priority. An ordinary `RESTART` discards unsaved staged
 values. A clean calibration has one
-bounded 20 mm screen and ten validation homes: eleven monitored moves in total.
+discovery impact beyond 20 mm and ten validation homes: eleven monitored moves in total.
 With `SAVE_CONFIG=0`, the completed axis remains homed. Before calibrating the
 other axis, use your machine's appropriate controls to leave both XY axes
 unhomed and physically center XY by hand again.
@@ -267,7 +267,7 @@ retain their existing behavior. Dual carriages, shared XY/Z enables,
 G28 macros and nested/unknown wrapper chains remain rejected. See
 [the source contract and limits](COMPATIBILITY.md#safe_z_home-and-xy-only-workflows).
 
-Calibration uses the [20 mm screen and ten-check cycle](SIMPLE_CALIBRATION.md).
+Calibration uses the [impact-after-20 mm discovery and ten-check cycle](SIMPLE_CALIBRATION.md).
 The command syntax and defaults remain:
 
 ```gcode
@@ -275,22 +275,26 @@ ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 START_THRESHOLD=1 STEP=0.25
 ```
 
 X or Y selects movement; all three sensor channels contribute to the
-baseline-subtracted magnitude. The screen completes at 20 mm without requiring
-contact. Only the following ten impacts count toward repeatability. A ten-check
-spread <=2 mm passes; >2 mm increases by STEP, clears the whole window and
-automatically restarts screening. An impact before 20 mm instead stops,
-increases the candidate and waits for manual recentering and the same command.
-A resumed command keeps its advanced candidate; START_THRESHOLD/STEP cannot
-change mid-run. The 40-attempt default budget includes screens and validations
-across all retries; the default threshold ceiling remains 12 g or 80% of range.
-Sensor faults or a move with no impact abort instead of raising thresholds.
+baseline-subtracted magnitude. Discovery continues until an impact; reaching
+20 mm alone never selects a candidate. An impact after strictly more than
+20 mm qualifies the candidate, then only that axis returns to its configured
+midpoint. Only the following ten centered impacts count toward repeatability.
+A ten-check spread <=2 mm passes; >2 mm increases by STEP, clears the whole
+window, recenters that axis and restarts impact discovery. An impact at or
+before 20 mm instead stops, increases the candidate and waits for manual
+recentering and the same command. A resumed command keeps its advanced
+candidate; START_THRESHOLD/STEP cannot change mid-run. The 40-attempt default
+budget includes discovery and validation across all retries; the default
+threshold ceiling remains 12 g or 80% of range. Sensor faults or a move with
+no impact abort instead of raising thresholds.
 
 The initial physical center is confirmed by the operator while XY is unhomed.
-For a screen the selected coordinate is temporarily assigned that center,
-then a bounded HomingMove runs without declaring its endpoint to be an endstop.
-All returns reverse measured halted step travel, including post-trigger
-steps, with the existing acceleration cap and default 0.25 s settling interval.
-They assume no skipped steps or mechanical slip. New saved models preserve
+Discovery and validation both use verified stock axis homing. After its impact,
+the selected axis is returned to `(position_min + position_max) / 2`, with the
+existing acceleration cap and default 0.25 s settling interval. Other axes
+are not commanded to move. Centering assumes the accepted impact was the
+endstop and no steps slipped; it is not encoder feedback. Stock G28 fatal
+errors may disable all motors, so keep Z supported. New saved models preserve
 the same vector detector for ordinary homing; old models/manual overrides
 retain the legacy selected-axis path.
 
@@ -485,8 +489,8 @@ interval, acceleration or current to admit a requested speed.
 
 The **2 mm simple-calibration rule is a separate repeatability test**:
 `max(distance) - min(distance) <= 2.0 mm` across ten validation impacts,
-excluding the 20 mm screen. A failed complete set advances the candidate and
-starts a fresh screen and ten checks. Legacy ACCURACY retains its existing
+excluding the discovery impact. A failed complete set advances the candidate and
+requires a new impact beyond 20 mm before ten fresh centered checks. Legacy ACCURACY retains its existing
 qualification limits; it is not the simple calibration command.
 It is not a per-home travel cap or a physical stopping-distance guarantee.
 Neither the startup deadline nor optional nominal travel limits include

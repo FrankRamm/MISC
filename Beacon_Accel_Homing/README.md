@@ -63,17 +63,19 @@ Calibration uses **three-axis acceleration magnitude** about a fresh resting
 offset, with **no quietness gate or acceleration-derived motion proof**.
 It starts at **1.0 g**, with **0.25 g** increments by default.
 
-A **20 mm screening move** selects the candidate without needing an endstop
-collision. It then returns to the same center and performs **ten** endstop
-checks. The screening distance is excluded. **Max distance minus min distance
-<= 2.00 mm passes**; a larger ten-check spread raises the threshold one step,
-clears the entire window and automatically restarts screening and validation.
-An impact before 20 mm stops immediately, raises the threshold, and requires
-manual recentering and the next command. Data faults/no impact still abort.
+An **impact after more than 20 mm of travel** selects the candidate. Reaching
+20 mm without an impact does not stop or qualify the move. It then centers
+**only the calibrated X or Y axis** and performs **ten** endstop checks from
+that axis's configured midpoint. The first discovery impact is excluded.
+**Max distance minus min distance <= 2.00 mm passes**; a larger ten-check spread
+raises the threshold one step, clears the entire window, recenters that axis,
+and automatically restarts impact discovery and validation.
+An impact at or before 20 mm stops immediately, raises the threshold, and
+requires manual recentering and the next command. Data faults/no impact abort.
 
-Returns reverse measured halted step travel, including stop overshoot, rather
-than assume each hit was the endstop. The homing acceleration cap and default
-0.25 s settling wait remain. Step counts are not physical-position feedback.
+Returns target the configured axis midpoint after stock homing assigns the
+endstop coordinate. The homing acceleration cap and default 0.25 s settling
+wait remain. Step counts are not physical-position feedback.
 [Complete algorithm and limitations](docs/SIMPLE_CALIBRATION.md).
 
 1. Keep the printer idle and unpaused. **Center XY by hand and leave both

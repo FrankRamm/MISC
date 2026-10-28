@@ -1,4 +1,4 @@
-"""Integrated 20 mm screening/vector detection regressions; no physical printer."""
+"""Integrated impact-after-20 mm/vector detection regressions; no physical printer."""
 import itertools
 import json
 import math
@@ -19,7 +19,7 @@ def prepared(axis="x"):
     obj, endstop = backend_tests.RaisedBaselineFloorTest().machine(
         threshold=1.0, axis=axis, spreads=(1.313, .604, .281))
     obj.workflows.session = {"mode": "calibration", "state": "running", "axis": axis,
-                             "algorithm": "screen20_vector_v1"}
+                             "algorithm": "impact20_vector_v2"}
     obj.workflows.in_home, obj.workflows.home_axis = True, axis
     obj._prepare_reference()
     when = obj.backend.last_sample_time + 16 / 3200.0
@@ -91,17 +91,17 @@ class VectorDetectorTests(unittest.TestCase):
         self.assertAlmostEqual(attempt.impact_peak * attempt.count_g, 3.0)
         self.assertEqual(len(attempt.endstop.trigger_log.messages), 1)
 
-    def test_live_noisy_stream_survives_old_startup_deadline_without_velocity_proof(self):
+    def test_live_stream_does_not_stop_at_twenty_mm_or_old_startup_deadline(self):
         obj, attempt = prepared()
         with mock.patch.object(obj, "_motion_state", side_effect=AssertionError("motion estimator called")):
-            for number in range(-15, 400, 16):
+            for number in range(-15, 1800, 16):
                 rows = [(attempt.arm_time + n / 3200.,
                          (.30 if n % 2 else -.30) * G, .04 * G, G)
                         for n in range(number, number + 16)]
                 feed(obj, rows)
                 obj._watchdog(obj.reactor.now)
                 self.assertFalse(attempt.done, attempt.reason)
-        self.assertGreater(obj.reactor.now - attempt.arm_time, .1)
+        self.assertGreater(obj.reactor.now - attempt.arm_time, 20. / attempt.effective_speed)
 
     def test_stale_data_still_stops_the_simple_move(self):
         obj, attempt = prepared()
@@ -157,130 +157,175 @@ class VectorDetectorTests(unittest.TestCase):
         self.assertEqual(record["motion_proof"]["result"], "not_required")
 
 
-class ScreeningAdapterTests(unittest.TestCase):
-    def setup_adapter(self, axis="x", positive=False, result="no_trigger", travel=20.0):
-        rig = Rig()
-        w = rig.workflow
-        rail = rig.owner.rails_by_axis[axis]
-        rail.info.positive_dir = positive
-        rail.info.position_endstop = rail.get_range()[1] if positive else rail.get_range()[0]
-        endstop = types.SimpleNamespace(get_steppers=lambda: [types.SimpleNamespace(get_step_dist=lambda: .0125)])
-        rig.owner.endstops[axis] = endstop
-        rail.get_endstops = lambda: [(endstop, axis)]
-        rig.owner._handle_rails_begin = mock.Mock()
-        w._screen_homing_move = types.MethodType(AccelHomingWorkflows._screen_homing_move, w)
-        w._begin(GCmd(SAVE_CONFIG=0), "calibration", axis)
-        w.session["state"] = "running"
-        calls = []
-        class Move:
-            def __init__(self, printer, endstops):
-                calls.append((printer, endstops))
-            def homing_move(self, target, speed, **options):
-                calls.append((list(target), speed, options))
-                center = w._geometry(axis)[0]
-                sign = 1.0 if positive else -1.0
-                rig.toolhead.position["xy".index(axis)] = center + sign * travel
-                rig.owner.last[axis] = {
-                    "axis": axis, "result": result, "impact_metric": "xyz_magnitude",
-                    "travel_mm": travel, "travel_mm_exact": travel,
-                    "halt_travel_mm_signed": sign * travel, "arm_time_s": .001,
-                    "onset_time_s": .002 if result == "impact" else None,
-                    "onset_g": 1.3 if result == "impact" else None,
-                    "impact_peak_g": 2.0 if result == "impact" else None,
-                    "threshold_g": 1.0, "moving": False, "direction": 0}
-        return rig, Move, calls
-
-    def test_real_screening_adapter_requests_exact_bounded_move_not_a_home(self):
+class ImpactDiscoveryTests(unittest.TestCase):
+    def test_discovery_is_a_full_selected_axis_home_requiring_an_impact(self):
         for axis, positive in itertools.product("xy", (False, True)):
             with self.subTest(axis=axis, positive=positive):
-                rig, Move, calls = self.setup_adapter(axis, positive)
+                rig = Rig()
+                rail = rig.owner.rails_by_axis[axis]
+                rail.info.positive_dir = positive
+                rail.info.position_endstop = rail.get_range()[1 if positive else 0]
+                w = rig.workflow
+                w._begin(GCmd(SAVE_CONFIG=0), "calibration", axis)
+                w.session["state"] = "running"
                 initial = rig.toolhead.get_position()
                 z_limits = rig.toolhead.kin.limits[2]
-                with mock.patch.object(workflow_module, "_HomingMove", Move):
-                    record, capture = rig.workflow._home(axis, 1.0, screening=True)
-                center = rig.workflow._geometry(axis)[0]
-                target = center + (20 if positive else -20)
-                self.assertEqual(calls[1][0]["xy".index(axis)], target)
-                self.assertEqual(calls[1][2], {"probe_pos": True, "check_triggered": False})
-                self.assertEqual(rig.home_calls, [])  # No stock G28 dispatched for screening.
-                self.assertEqual(record["result"], "screen_complete")
-                self.assertEqual(record["workflow_phase"], "screening")
-                self.assertEqual(rig.workflow._quality(axis, record)[0], "good")
-                self.assertFalse(record["moving"])
-                self.assertIsNone(record["onset_g"])
-                self.assertEqual(rig.toolhead.position[2:], initial[2:])
-                self.assertEqual(rig.toolhead.kin.limits[2], z_limits)
-                rig.workflow._recenter(axis)
-                self.assertEqual(rig.toolhead.position["xy".index(axis)], center)
-                self.assertTrue(rig.lines["stepper_z"].enabled)
+                rig.home_results.append({"travel_mm": 106.188})
+                record, capture = w._home(axis, 1.0)
+                self.assertEqual(rig.scripts, ["G28 " + axis.upper()])
+                self.assertEqual(record["result"], "impact")
+                self.assertEqual(record["workflow_phase"], "discovery")
+                self.assertEqual(record["travel_mm"], 106.188)
+                self.assertEqual(w._quality(axis, record)[0], "good")
+                self.assertFalse(w.session["candidate_qualified"])
+                self.assertEqual(w.session["validation_records"], [])
+                self.assertEqual(rig.toolhead.moves, [])
                 self.assertFalse(rig.capture_active)
-                self.assertIsNone(rig.workflow.home_plan)
+                w._recenter(axis)
+                expected = [None, None, None]
+                expected["xy".index(axis)] = w._geometry(axis)[0]
+                self.assertEqual(rig.toolhead.moves, [(expected, 50.)])
+                for i in range(4):
+                    if i != "xy".index(axis):
+                        self.assertEqual(rig.toolhead.position[i], initial[i])
+                self.assertEqual(rig.toolhead.kin.limits[2], z_limits)
 
-    def test_early_impact_does_not_get_endpoint_quantization_tolerance(self):
-        rig, Move, calls = self.setup_adapter(result="impact", travel=19.999)
-        with mock.patch.object(workflow_module, "_HomingMove", Move):
-            record, capture = rig.workflow._home("x", 1.0, screening=True)
-        self.assertEqual(rig.workflow._quality("x", record)[0], "early")
-        self.assertEqual(rig.toolhead.moves, [])
+    def test_reaching_twenty_mm_or_a_completed_endpoint_never_qualifies(self):
+        for result in ("no_trigger", "screen_complete", "travel"):
+            for travel in (20., 20.001, 106.188):
+                with self.subTest(result=result, travel=travel):
+                    rig = Rig()
+                    rig.home_results.append({"result": result, "travel_mm": travel,
+                                             "screen_completed": True, "screen_target_mm": 20.})
+                    with self.assertRaisesRegex(CommandError, "failure"):
+                        rig.calibrate(save=0)
+                    self.assertEqual(len(rig.home_calls), 1)
+                    self.assertEqual(rig.toolhead.moves, [])
+                    self.assertEqual(rig.configfile.saved, {})
+                    self.assertIsNone(rig.workflow.session)
 
-    def test_endpoint_rounding_is_allowed_only_for_completed_no_impact_screen(self):
-        rig, Move, calls = self.setup_adapter(travel=19.995)
-        with mock.patch.object(workflow_module, "_HomingMove", Move):
-            record, capture = rig.workflow._home("x", 1.0, screening=True)
-        self.assertEqual(rig.workflow._quality("x", record)[0], "good")
-        rig, Move, calls = self.setup_adapter(travel=19.0)
-        with mock.patch.object(workflow_module, "_HomingMove", Move), self.assertRaisesRegex(CommandError, "endpoint"):
-            rig.workflow._home("x", 1.0, screening=True)
+    def test_impact_must_be_strictly_after_twenty_mm_without_display_rounding(self):
+        for travel, quality in ((0., "early"), (19.9999, "early"), (20., "early"),
+                                (20.0001, "good"), (106.188, "good")):
+            for phase in ("discovery", "validation"):
+                rig = Rig()
+                w = rig.workflow
+                w._begin(GCmd(SAVE_CONFIG=0), "calibration", "x")
+                w.session["state"] = "running"
+                record = {"result": "impact", "impact_metric": "xyz_magnitude",
+                          "travel_mm": round(travel, 3), "travel_mm_exact": travel,
+                          "workflow_phase": phase}
+                self.assertEqual(w._quality("x", record)[0], quality)
 
-    def test_unavailable_homingmove_aborts_before_moving(self):
-        rig, Move, calls = self.setup_adapter()
-        with mock.patch.object(workflow_module, "_HomingMove", None), self.assertRaises(CommandError):
-            rig.workflow._home("x", 1.0, screening=True)
-        self.assertEqual(calls, [])
-        self.assertEqual(rig.toolhead.moves, [])
+    def test_first_impact_is_excluded_then_only_selected_axis_centers(self):
+        for axis, positive in itertools.product("xy", (False, True)):
+            with self.subTest(axis=axis, positive=positive):
+                rig = Rig()
+                rail = rig.owner.rails_by_axis[axis]
+                rail.info.positive_dir = positive
+                rail.info.position_endstop = rail.get_range()[1 if positive else 0]
+                rig.toolhead.position[:2] = [12., 19.]
+                center = rig.workflow._geometry(axis)[0]
+                rig.home_results.extend([{"travel_mm": 37.5}] + [{"travel_mm": center}] * 10)
+                rig.calibrate(axis.upper(), save=0)
+                self.assertEqual(len(rig.home_calls), 11)
+                self.assertEqual(rig.home_calls[0]["position"][:2], [12., 19.])
+                for call in rig.home_calls[1:]:
+                    self.assertEqual(call["position"]["xy".index(axis)], center)
+                    self.assertEqual(call["position"][1 - "xy".index(axis)], [19., 12.]["xy".index(axis)])
+                for coords, _speed in rig.toolhead.moves:
+                    self.assertTrue(all(value is None for i, value in enumerate(coords)
+                                        if i != "xy".index(axis)))
+                metadata = json.loads(rig.configfile.saved[("accel_homing_model default", axis + "_metadata")])
+                self.assertEqual(metadata["min_commanded_travel_mm"], center)
+                self.assertEqual(metadata["max_commanded_travel_mm"], center)
+                self.assertEqual(metadata["repeatability_spread_mm"], 0.)
+                self.assertEqual(metadata["recenter_policy"], "selected_axis_midpoint")
 
-    def test_relative_return_includes_halt_overshoot_not_nominal_center(self):
+    def test_recenter_requires_a_current_qualified_impact(self):
+        for result, travel in (("screen_complete", 20.), ("no_trigger", 100.), ("impact", 20.)):
+            rig = Rig()
+            w = rig.workflow
+            w._begin(GCmd(SAVE_CONFIG=0), "calibration", "x")
+            w.session["state"] = "running"
+            record = {"result": result, "travel_mm": travel, "impact_metric": "xyz_magnitude"}
+            rig.owner.last["x"] = record
+            w.session["terminal_home"] = ("x", dict(record), record)
+            rig.toolhead.kin.limits[0] = (0., 300.)
+            with self.assertRaisesRegex(CommandError, "current impact"):
+                w._recenter("x")
+            self.assertEqual(rig.toolhead.moves, [])
+
+    def test_changed_terminal_record_cannot_authorize_recenter(self):
         rig = Rig()
         w = rig.workflow
         w._begin(GCmd(SAVE_CONFIG=0), "calibration", "x")
         w.session["state"] = "running"
-        record = {"halt_travel_mm_signed": -106.325}
-        rig.owner.last["x"] = record
-        w.session["terminal_home"] = ("x", dict(record), record)
-        rig.toolhead.position[0] = -.137
-        rig.toolhead.kin.limits[0] = (0., 300.)
-        w._recenter("x")
-        self.assertAlmostEqual(rig.toolhead.position[0], 106.188)
-        self.assertNotEqual(rig.toolhead.position[0], 150.)
-
-    def test_missing_halt_travel_aborts_instead_of_assuming_center(self):
-        rig = Rig()
-        w = rig.workflow
-        w._begin(GCmd(SAVE_CONFIG=0), "calibration", "x")
-        w.session["state"] = "running"
-        record = {"halt_travel_mm_signed": None}
-        rig.owner.last["x"] = record
-        w.session["terminal_home"] = ("x", record, record)
-        rig.toolhead.kin.limits[0] = (0., 300.)
-        with self.assertRaisesRegex(CommandError, "halted step travel"):
+        record, _capture = w._home("x", 1.)
+        rig.owner.last["x"] = dict(rig.owner.last["x"])
+        with self.assertRaisesRegex(CommandError, "current measured move"):
             w._recenter("x")
         self.assertEqual(rig.toolhead.moves, [])
 
+    def test_old_no_contact_discovery_cannot_be_saved(self):
+        rig = Rig()
+        save = rig.workflow._save_model
+        def tamper_then_save():
+            session = rig.workflow.session
+            discovery = session["records"][session["candidate_attempt"] - 1]
+            discovery.update(result="screen_complete", screen_completed=True)
+            save()
+        with mock.patch.object(rig.workflow, "_save_model", side_effect=tamper_then_save):
+            with self.assertRaisesRegex(CommandError, "cannot save"):
+                rig.calibrate(save=0)
+        self.assertEqual(rig.configfile.saved, {})
+
+    def test_exactly_twenty_mm_hit_advances_and_same_command_resumes(self):
+        rig = Rig()
+        rig.home_results.append({"travel_mm": 20.})
+        rig.calibrate(save=0, START_THRESHOLD=1, STEP=.25)
+        self.assertEqual(rig.workflow.session["candidate"], 1.25)
+        self.assertEqual(rig.workflow.session["validation_records"], [])
+        status = rig.workflow.get_status(0)["active"]
+        self.assertEqual(status["phase"], "discovery")
+        self.assertTrue(status["discovery_impact_required"])
+        rig.calibrate(START_THRESHOLD=1, STEP=.25)
+        self.assertEqual([c["threshold"] for c in rig.home_calls], [1.] + [1.25] * 11)
+
+    def test_failed_spread_requires_another_discovery_impact_before_ten_new_checks(self):
+        rig = Rig()
+        rig.home_results.extend([{"travel_mm": 37.5}] + [{"travel_mm": 150.}] * 9 +
+                                [{"travel_mm": 152.001}, {"result": "no_trigger", "travel_mm": 150.}])
+        with self.assertRaisesRegex(CommandError, "failure"):
+            rig.calibrate(save=0)
+        self.assertEqual([c["threshold"] for c in rig.home_calls], [1.] * 11 + [1.25])
+        self.assertFalse(rig.home_calls[-1]["candidate_qualified"])
+        self.assertEqual(rig.home_calls[-1]["successes"], 0)
+        self.assertEqual(rig.configfile.saved, {})
+
+    def test_exactly_two_mm_passes_after_ten_checks_without_retry(self):
+        rig = Rig()
+        rig.home_results.extend([{"travel_mm": 37.5}] + [{"travel_mm": 150.}] * 9 + [{"travel_mm": 152.}])
+        rig.calibrate(save=0)
+        self.assertEqual(len(rig.home_calls), 11)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 1.)
+        self.assertEqual(rig.workflow.last_result["repeatability_spread_mm"], 2.)
+
 
 class SimpleWorkflowTests(unittest.TestCase):
-    def test_no_impact_screen_is_excluded_and_ten_checks_need_no_motion_flag(self):
+    def test_discovery_hit_is_excluded_and_ten_checks_need_no_motion_flag(self):
         rig = Rig()
         rig.home_results.extend([{}] + [{"moving": False, "motion_seen": False, "travel_mm": 106.188}] * 10)
         rig.calibrate(save=0)
         self.assertEqual(len(rig.home_calls), 11)
         metadata = json.loads(rig.configfile.saved[("accel_homing_model default", "x_metadata")])
         self.assertEqual(metadata["impact_metric"], "xyz_magnitude")
-        self.assertEqual(metadata["screening_travel_mm"], 20.)
+        self.assertEqual(metadata["minimum_impact_travel_mm"], 20.)
         self.assertEqual(metadata["repeatability_limit_mm"], 2.)
         self.assertEqual(metadata["min_commanded_travel_mm"], 106.188)
         self.assertEqual(len(metadata["onset_g"]), 10)
 
-    def test_multiple_bad_sets_restart_screening_with_ten_fresh_checks(self):
+    def test_multiple_bad_sets_restart_discovery_with_ten_fresh_checks(self):
         rig = Rig()
         for _ in range(2):
             rig.home_results.extend([{}] + [{"travel_mm": 150.}] * 9 + [{"travel_mm": 152.001}])
@@ -303,7 +348,7 @@ class SimpleWorkflowTests(unittest.TestCase):
             self.assertEqual(rig.configfile.saved, {})
             self.assertLessEqual(len(rig.home_calls), rig.workflow.max_attempts)
 
-    def test_same_command_resumes_raised_threshold_after_early_screen(self):
+    def test_same_command_resumes_raised_threshold_after_early_impact(self):
         rig = Rig()
         rig.home_results.append({"travel_mm": 19.999})
         rig.calibrate(save=0, START_THRESHOLD=1, STEP=.25)
@@ -371,17 +416,19 @@ class ReloadAndDiagnosticTests(unittest.TestCase):
         packet(obj, attempt, (0., 0., 1.5))
         self.assertEqual(attempt.reason, "impact")
 
-    def test_screen_plan_bounds_watchdog_to_twenty_mm_without_motion_proof(self):
+    def test_discovery_keeps_full_travel_watchdog_without_motion_proof(self):
         obj, endstop = backend_tests.RaisedBaselineFloorTest().machine(threshold=1.)
         obj.workflows.session = {"mode": "calibration", "state": "running", "axis": "x",
-                                 "algorithm": "screen20_vector_v1"}
+                                 "algorithm": "impact20_vector_v2"}
         obj.workflows.in_home, obj.workflows.home_axis = True, "x"
-        obj.workflows.home_plan = {"axis": "x", "travel_mm": 20.}
         obj._prepare_reference()
         when = obj.backend.last_sample_time + 16 / 3200.
         endstop.get_steppers = lambda: [SignedRamp(when, 5000., 50., 1)]
         attempt = obj.prepare(endstop, when)
-        expected = 20. / attempt.effective_speed + attempt.effective_speed / attempt.effective_accel + obj.watchdog_margin
+        low, high = obj.session_axes["x"].get_range()
+        expected = ((high - low) * obj.travel_margin / attempt.effective_speed
+                    + attempt.effective_speed / attempt.effective_accel + obj.watchdog_margin)
+        self.assertGreater(attempt.deadline - when, 20. / attempt.effective_speed)
         self.assertAlmostEqual(attempt.deadline - when, expected)
         self.assertIsNone(attempt.proof_deadline)
 

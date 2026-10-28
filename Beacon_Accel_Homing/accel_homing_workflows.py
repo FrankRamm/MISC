@@ -47,15 +47,10 @@ _PRINTER_G28 = _PrinterHoming.cmd_G28 if _PrinterHoming is not None else None
 _SAFE_Z_G28 = _SafeZHoming.cmd_G28 if _SafeZHoming is not None else None
 _OVERRIDE_G28 = _HomingOverride.cmd_G28 if _HomingOverride is not None else None
 
-try:
-    from .homing import HomingMove as _HomingMove
-except ImportError:
-    _HomingMove = None
-
 AXES = {"x": 0, "y": 1}
-SCREEN_TRAVEL_MM = 20.0
+CALIBRATION_MIN_TRAVEL_MM = 20.0
 CALIBRATION_REPEATABILITY_MM = 2.0
-SIMPLE_CALIBRATION = "screen20_vector_v1"
+SIMPLE_CALIBRATION = "impact20_vector_v2"
 REQUIRED_SUCCESSES = 10
 REPEATABILITY_LIMIT_MM = 1.5
 MIN_TRAVEL = 10.0
@@ -233,7 +228,6 @@ class AccelHomingWorkflows:
         self.noise_seeds = {}
         self.in_home = False
         self.home_axis = None
-        self.home_plan = None
         self.timer = self.reactor.register_timer(self._timeout)
         self.printer.register_event_handler("klippy:shutdown", self._shutdown)
         self.printer.register_event_handler("klippy:disconnect", self._disconnect)
@@ -697,8 +691,8 @@ class AccelHomingWorkflows:
             calibration_grid = self._calibration_grid(gcmd)
         axes = axes if axes is not None else [axis] if axis else ["x", "y"]
         self._preflight(axes)
-        if mode == "calibration" and self._geometry(axis)[1] <= SCREEN_TRAVEL_MM:
-            raise gcmd.error("center-to-endstop travel must exceed 20 mm for screening")
+        if mode == "calibration" and self._geometry(axis)[1] <= CALIBRATION_MIN_TRAVEL_MM:
+            raise gcmd.error("center-to-endstop travel must exceed 20 mm for impact discovery")
         self._require_unhomed_xy()
         if mode in ("charts", "accuracy") and self.chart_preflight_check is not None:
             self.chart_preflight_check()
@@ -719,7 +713,7 @@ class AccelHomingWorkflows:
             # A stationary-noise seed is not part of this calibration policy.
             self._clear_noise_seeds()
             self._info("%s calibration starts at %.6g g with %.6g g steps; XYZ magnitude; "
-                       "20 mm screening then ten endstop checks with spread <= 2 mm; "
+                       "impact after >20 mm then ten centered endstop checks with spread <= 2 mm; "
                        "no quietness or acceleration-derived motion proof; returns settle for %.3f s" % (
                            axis.upper(), self.session["candidate"], self.session["threshold_step_g"],
                            self.session["calibration_settle_time_s"]))
@@ -980,7 +974,7 @@ class AccelHomingWorkflows:
                 self._finish({"result": "aborted", "reason": str(exc)})
             raise
 
-    def _home(self, axis, threshold=None, screening=False):
+    def _home(self, axis, threshold=None):
         if axis not in AXES:
             raise self._error("workflow homing requires exactly one X or Y axis")
         session = self.session
@@ -995,7 +989,6 @@ class AccelHomingWorkflows:
         self.owner.back_off_dist = 0.0
         old_record = self.owner.last.get(axis)
         self.in_home, self.home_axis = True, axis
-        self.home_plan = ({"axis": axis, "travel_mm": SCREEN_TRAVEL_MM} if screening else None)
         capture_started = False
         try:
             try:
@@ -1008,15 +1001,10 @@ class AccelHomingWorkflows:
                 # X/Y here, retaining public handlers and normal homing events.
                 # Recheck after capture setup and command creation can yield.
                 self._check_running(session)
-                stock_g28 = self._stock_g28()
-                if screening:
-                    self._screen_homing_move(axis)
-                else:
-                    stock_g28(gcmd)
+                self._stock_g28()(gcmd)
                 self.owner.toolhead.wait_moves()
             finally:
                 self.in_home, self.home_axis = False, None
-                self.home_plan = None
                 try:
                     self.owner._end_session()
                 finally:
@@ -1038,7 +1026,7 @@ class AccelHomingWorkflows:
         record["workflow_attempt"] = session["attempts"]
         record["workflow_threshold_g"] = (threshold if threshold is not None
                                           else self.owner.threshold_g[axis])
-        record["workflow_phase"] = ("screening" if screening else "validation") \
+        record["workflow_phase"] = ("validation" if session["candidate_qualified"] else "discovery") \
             if session["mode"] == "calibration" else session["mode"]
         if session["mode"] == "accuracy":
             record = self._remember_accuracy_record(session, axis, old_record, record)
@@ -1065,50 +1053,6 @@ class AccelHomingWorkflows:
             record.get("impact_peak_g"), record.get("threshold_g"), record.get("travel_mm")))
         session["terminal_home"] = (axis, record, source_record)
         return record, capture
-
-    def _screen_homing_move(self, axis):
-        """Bounded 20 mm probe move. A normal endpoint is NOT an endstop home."""
-        session = self.session
-        self._check_running(session)
-        if _HomingMove is None:
-            raise self._error("this Klipper version has no supported HomingMove")
-        rail = self.owner.rails_by_axis[axis]
-        toolhead = self.owner.toolhead
-        kin = toolhead.get_kinematics()
-        index = AXES[axis]
-        center, expected = self._geometry(axis)
-        if expected <= SCREEN_TRAVEL_MM:
-            raise self._error("center-to-endstop travel must exceed 20 mm for screening")
-        # The operator confirms the initial center. On automatic retries the
-        # preceding relative return has already restored that same position.
-        position = toolhead.get_position()
-        position[index] = center
-        toolhead.set_position(position)
-        self._check_running(session)
-        kin.limits[index] = rail.get_range()
-        self.owner._handle_rails_begin(None, [rail])
-        self._check_running(session)
-        target = list(position)
-        target[index] += SCREEN_TRAVEL_MM * (1.0 if rail.get_homing_info().positive_dir else -1.0)
-        previous_record = self.owner.last.get(axis)
-        move = _HomingMove(self.printer, rail.get_endstops())
-        move.homing_move(target, rail.get_homing_info().speed,
-                         probe_pos=True, check_triggered=False)
-        self._check_running(session)
-        record = self.owner.last.get(axis)
-        if record is None or record is previous_record:
-            raise self._error("screening returned without a new detector record")
-        if record.get("result") == "no_trigger":
-            distance = record.get("travel_mm_exact", record.get("travel_mm"))
-            # Completed commanded endpoints are quantized to the step grid.
-            # This tolerance NEVER applies to an early impact.
-            steps = self.owner.endstops[axis].get_steppers()
-            quantum = max((step.get_step_dist() for step in steps), default=0.0)
-            if (not isinstance(distance, (int, float)) or not math.isfinite(distance)
-                    or abs(distance - SCREEN_TRAVEL_MM) > quantum + 0.000001):
-                raise self._error("screening endpoint step travel does not match 20 mm")
-            record.update(result="screen_complete", screen_completed=True,
-                          screen_target_mm=SCREEN_TRAVEL_MM, screen_step_tolerance_mm=quantum)
 
     def _release_terminal_home(self, axis, record):
         session = self.session
@@ -1260,16 +1204,11 @@ class AccelHomingWorkflows:
                 return "fatal", "missing commanded travel measurement"
             if record.get("impact_metric") != "xyz_magnitude":
                 return "fatal", "calibration requires the XYZ-magnitude detector"
-            if (record.get("workflow_phase") == "screening" and result == "screen_complete"
-                    and record.get("screen_completed") is True
-                    and record.get("screen_target_mm") == SCREEN_TRAVEL_MM
-                    and abs(travel - SCREEN_TRAVEL_MM) <= record.get("screen_step_tolerance_mm", 0.0) + 0.000001):
-                return "good", "20 mm screening completed without an early impact"
             if result != "impact":
                 return "fatal", "sensor/homing failure (%s)" % result
-            if travel < SCREEN_TRAVEL_MM:
-                return "early", "early trigger at %.3f mm (screening requires 20 mm)" % travel
-            return "good", "impact after at least 20 mm of commanded travel"
+            if travel <= CALIBRATION_MIN_TRAVEL_MM:
+                return "early", "early trigger at %.3f mm (impact must occur after 20 mm)" % travel
+            return "good", "impact after more than 20 mm of commanded travel"
         if result not in ("impact", "pressed"):
             return "fatal", "sensor/homing failure (%s)" % result
         if not isinstance(travel, (int, float)) or not math.isfinite(travel):
@@ -1310,14 +1249,11 @@ class AccelHomingWorkflows:
             if (terminal is None or terminal[0] != axis
                     or self.owner.last.get(axis) is not terminal[2]):
                 raise self._error("calibration return has no current measured move")
-            distance = terminal[1].get("halt_travel_mm_signed")
-            if (not isinstance(distance, (int, float)) or isinstance(distance, bool)
-                    or not math.isfinite(distance)):
-                raise self._error("calibration return is missing halted step travel")
-            center = self.owner.toolhead.get_position()[AXES[axis]] - distance
-            low, high = self.owner.rails_by_axis[axis].get_range()
-            if not low <= center <= high:
-                raise self._error("relative return to the original center is out of range")
+            if self._quality(axis, terminal[1])[0] != "good":
+                raise self._error("calibration return requires a current impact after 20 mm")
+            # Stock homing has assigned the selected axis's endstop coordinate.
+            # Use its configured midpoint, not the distance from the manually
+            # estimated discovery start. The other coordinates remain unchanged.
         coordinates[AXES[axis]] = center
         info = self.owner.rails_by_axis[axis].get_homing_info()
         toolhead = self.owner.toolhead
@@ -1358,21 +1294,22 @@ class AccelHomingWorkflows:
         session = self.session
         axis = session["axis"]
         while True:
-            screening = not session["candidate_qualified"]
-            record, _capture = self._home(axis, session["candidate"], screening=screening)
+            discovery = not session["candidate_qualified"]
+            record, _capture = self._home(axis, session["candidate"])
             quality, reason = self._quality(axis, record)
             if quality == "fatal":
                 raise self._error(reason + "; calibration aborted without raising the threshold")
             if quality == "early":
                 candidate = self._next_calibration_candidate(reason)
-                self._wait_center(reason + "; restart screening at %.2f g" % candidate)
+                self._wait_center(reason + "; restart impact discovery at %.2f g" % candidate)
                 return
-            if screening:
+            if discovery:
                 session["candidate_qualified"] = True
                 session["candidate_attempt"] = record["workflow_attempt"]
-                self._info("%s %.2f g passed 20 mm screening; returning to the same center "
-                           "for ten endstop checks; screening distance is excluded" % (
-                               axis.upper(), session["candidate"]))
+                self._info("%s %.2f g candidate selected by impact after %.3f mm (>20 mm); "
+                           "centering this axis for ten endstop checks; discovery hit is excluded" % (
+                               axis.upper(), session["candidate"],
+                               record.get("travel_mm_exact", record["travel_mm"])))
                 self._recenter(axis)
                 continue
             session["validation_records"].append(record)
@@ -1385,11 +1322,11 @@ class AccelHomingWorkflows:
                 continue
             if spread > CALIBRATION_REPEATABILITY_MM:
                 # All ten checks are evaluated together. A new threshold gets
-                # a new screening move and a completely empty validation set.
+                # a new discovery impact and a completely empty validation set.
                 reason = "%s ten-check spread %s mm exceeds 2 mm" % (axis.upper(), spread)
                 candidate = self._next_calibration_candidate(reason)
                 session["last_rejected_spread_mm"] = spread
-                self._info(reason + "; restart from screening at %.2f g" % candidate)
+                self._info(reason + "; restart from impact discovery at %.2f g" % candidate)
                 self._recenter(axis)
                 continue
             self._save_model()
@@ -1398,7 +1335,7 @@ class AccelHomingWorkflows:
     def _qualified_validation_records(self):
         """Recheck the entire current-candidate window before any config writes."""
         session = self.session
-        message = ("cannot save calibration without a qualified 20 mm screen and ten distinct "
+        message = ("cannot save calibration without a discovery impact after 20 mm and ten distinct "
                    "current-candidate validation homes with commanded travel spread "
                    "<= %.2f mm" % CALIBRATION_REPEATABILITY_MM)
         if not isinstance(session, dict):
@@ -1432,7 +1369,7 @@ class AccelHomingWorkflows:
                     or type(record.get("workflow_attempt")) is not int \
                     or record.get("workflow_attempt") != candidate_attempt + index \
                     or record.get("workflow_threshold_g") != threshold \
-                    or record.get("workflow_phase") != ("screening" if index == 0 else "validation") \
+                    or record.get("workflow_phase") != ("discovery" if index == 0 else "validation") \
                     or self._quality(axis, record)[0] != "good":
                 raise self._error(message)
         if self._repeatability_spread(qualified) > CALIBRATION_REPEATABILITY_MM:
@@ -1459,7 +1396,8 @@ class AccelHomingWorkflows:
                     "repeatability_spread_mm": spread,
                     "repeatability_limit_mm": CALIBRATION_REPEATABILITY_MM,
                     "calibration_algorithm": SIMPLE_CALIBRATION, "impact_metric": "xyz_magnitude",
-                    "screening_travel_mm": SCREEN_TRAVEL_MM,
+                    "minimum_impact_travel_mm": CALIBRATION_MIN_TRAVEL_MM,
+                    "discovery_impact_required": True, "recenter_policy": "selected_axis_midpoint",
                     "onset_g": [r.get("onset_g") for r in qualified],
                     "impact_peak_g": [r.get("impact_peak_g") for r in qualified],
                     "calibration_start_threshold_g": session["start_threshold_g"],
@@ -1791,8 +1729,9 @@ class AccelHomingWorkflows:
                     "calibration_settle_time_s")})
                 active["attempt_limit"] = self.max_attempts
                 active.update(algorithm=session.get("algorithm"), restarts=session.get("restarts", 0),
-                              screening_travel_mm=SCREEN_TRAVEL_MM,
-                              phase="validation" if session["candidate_qualified"] else "screening")
+                              minimum_impact_travel_mm=CALIBRATION_MIN_TRAVEL_MM,
+                              discovery_impact_required=True, recenter_policy="selected_axis_midpoint",
+                              phase="validation" if session["candidate_qualified"] else "discovery")
         return {"model": self.model_name, "manual_threshold_overrides": sorted(self.manual_axes),
                 "active": active, "last_result": self.last_result,
                 "noise_recommendation": self.noise_recommendation,
