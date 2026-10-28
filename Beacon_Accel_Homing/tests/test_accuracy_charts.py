@@ -130,7 +130,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertTrue(image.is_file())
             self.assertEqual(image.parent, Path(temp).resolve())
             self.assertEqual(charts._check_png(image.read_bytes()), (24, 16))
-            self.assertRegex(image.name, r"Accel Homing X - \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.png")
+            self.assertRegex(image.name, r"Accel Homing X - \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.png")
             self.assertNotIn("UUID", image.name)
             self.assertEqual([path.suffix for path in Path(temp).rglob("*") if path.is_file()], [".png"])
             payload = renderer.payloads[0]
@@ -169,20 +169,20 @@ class PortablePNGTests(unittest.TestCase):
         clock = {"created_utc": "2026-10-26T23:00:00.123456+00:00",
                  "created_local": "2026-10-26T20:00:00.123456-03:00",
                  "timestamp": "2026-10-26 20:00:00", "timezone": "UTC-03:00",
-                 "filename_time": "2026-10-26 20-00-00"}
+                 "filename_time": "2026-10-26 20:00:00"}
         capture = {"samples": [(0., 0., 0., 1.), (.1, .1, 0., 1.)], "baseline_g": (0., 0., 1.)}
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(charts, "_clock", return_value=clock):
             images = [charts.write_capture(temp, "same", "x", capture, {}, renderer=RecordingRenderer())["png"]
                       for _index in range(3)]
             self.assertEqual(len(set(images)), 3)
             self.assertEqual([Path(image).name for image in images], [
-                "Accel Homing X - 2026-10-26 20-00-00.png",
-                "Accel Homing X - 2026-10-26 20-00-00_01.png",
-                "Accel Homing X - 2026-10-26 20-00-00_02.png"])
+                "Accel Homing X - 2026-10-26 20:00:00.png",
+                "Accel Homing X - 2026-10-26 20:00:00_01.png",
+                "Accel Homing X - 2026-10-26 20:00:00_02.png"])
             self.assertTrue(all(Path(image).read_bytes() == png_bytes() for image in images))
             self.assertEqual(len([path for path in Path(temp).rglob("*") if path.is_file()]), 3)
 
-    def test_local_display_and_portable_filename_share_one_instant_with_utc_provenance(self):
+    def test_local_display_and_colon_filename_share_one_instant_with_utc_provenance(self):
         local = datetime.datetime(2026, 10, 27, 23, 59, 42, 987654,
                                   tzinfo=datetime.timezone(datetime.timedelta(hours=-3)))
         instant = mock.Mock()
@@ -193,7 +193,7 @@ class PortablePNGTests(unittest.TestCase):
             value = charts._clock()
             clock.now.assert_called_once_with(datetime.timezone.utc)
         self.assertEqual(value["timestamp"], "2026-10-27 23:59:42")
-        self.assertEqual(value["filename_time"], "2026-10-27 23-59-42")
+        self.assertEqual(value["filename_time"], "2026-10-27 23:59:42")
         self.assertEqual(value["timezone"], "UTC-03:00")
         self.assertEqual(value["created_local"], local.isoformat())
         self.assertEqual(value["created_utc"], "2026-10-28T02:59:42.987654+00:00")
@@ -234,7 +234,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(list(Path(temp).iterdir()), [])
 
     def test_publication_queues_only_a_durable_root_for_delayed_directory_watches(self):
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / "config/accel_homing_charts"
             destination.parent.mkdir()
@@ -272,7 +272,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertTrue(all(path.is_file() and path.suffix == ".png" for path in destination.iterdir()))
 
     def test_atomic_link_exposes_completed_bytes_and_never_clobbers_a_racing_filename(self):
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         image, existing = png_bytes(), png_bytes(width=12)
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp)
@@ -298,7 +298,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(set(destination.iterdir()), set(observed))
 
     def test_cancel_after_staging_cleans_the_file_without_a_transient_directory(self):
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         with tempfile.TemporaryDirectory() as temp:
             destination, calls = Path(temp), []
             def cancel():
@@ -316,7 +316,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(list(destination.iterdir()), [])
 
     def test_unsupported_atomic_links_fail_clearly_and_leave_no_temporary_artifacts(self):
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         with tempfile.TemporaryDirectory() as temp:
             with mock.patch.object(charts.os, "link", side_effect=OSError(errno.EPERM, "hard links unsupported")), \
                     mock.patch.object(charts.os, "rename") as rename:
@@ -326,7 +326,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(list(Path(temp).iterdir()), [])
 
     def test_cancel_after_atomic_link_keeps_completed_png_and_cleans_only_its_staging_file(self):
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         with tempfile.TemporaryDirectory() as temp:
             destination, calls = Path(temp), []
             def cancel():
@@ -344,7 +344,7 @@ class PortablePNGTests(unittest.TestCase):
     def test_final_name_create_close_write_pipeline_completes_before_late_cancellation(self):
         # Model Moonraker schedule_file_event(CREATE) and complete_file_write
         # (CLOSE_WRITE). No native inotify or printer/frontend is contacted.
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         for cancelled in (False, True):
             with self.subTest(cancelled=cancelled), tempfile.TemporaryDirectory() as temp:
                 root, pending, notifications, events, descriptors = Path(temp), {}, [], [], {}
@@ -397,7 +397,7 @@ class PortablePNGTests(unittest.TestCase):
                 self.assertEqual(set(root.iterdir()), {notifications[0][1]})
 
     def test_final_name_completion_failure_raises_and_cleans_owned_png_and_staging(self):
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         with tempfile.TemporaryDirectory() as temp:
             open_file, created = charts.os.open, []
             def denied(path, flags, *args, **kwargs):
@@ -414,7 +414,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(list(Path(temp).iterdir()), [])
 
     def test_completion_identity_mismatch_preserves_a_foreign_final_replacement(self):
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         foreign = png_bytes(width=12)
         with tempfile.TemporaryDirectory() as temp:
             link, replaced = charts.os.link, []
@@ -432,7 +432,7 @@ class PortablePNGTests(unittest.TestCase):
             self.assertEqual(replaced[0].read_bytes(), foreign)
 
     def test_collision_exhaustion_preserves_existing_pngs_and_cleans_staging(self):
-        clock = {"filename_time": "2026-10-27 01-00-00"}
+        clock = {"filename_time": "2026-10-27 01:00:00"}
         with tempfile.TemporaryDirectory() as temp:
             root, previous = Path(temp), {}
             for collision in range(100):
@@ -622,19 +622,69 @@ class AccuracyPNGTests(unittest.TestCase):
             self.assertTrue(renderer.reactor.pauses)
             self.assertLessEqual(len(calls), 5)
 
-    def test_maximum_xy_accuracy_keeps_individual_pngs_and_bounded_overviews(self):
+    def test_separate_capture_directory_preserves_receipt_checks_and_prior_outputs(self):
         renderer = RecordingRenderer()
-        with tempfile.TemporaryDirectory() as temp:
-            travels = tuple(175. + index * .001 for index in range(50))
-            axes = {"x": simulated_axis(temp, "maximum", travels=travels, renderer=renderer),
-                    "y": simulated_axis(temp, "maximum", "y", travels, attempt_start=52, renderer=renderer)}
-            paths = charts.write_accuracy(temp, "maximum", axes, "complete", simulated=True, renderer=renderer)
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as output:
+            item = simulated_axis(source, "separate", renderer=renderer)
+            previous = Path(output) / "previous.png"
+            previous.write_bytes(png_bytes())
+            with self.assertRaisesRegex(ValueError, "output directory"):
+                charts.validate_accuracy(output, "separate", {"x": item}, simulated=True)
+            paths = charts.write_accuracy(output, "separate", {"x": item}, "complete", simulated=True,
+                                          renderer=renderer, capture_directory=source)
+            self.assertEqual(set(Path(output).iterdir()), {previous, Path(paths["x_png"])})
+            self.assertEqual(previous.read_bytes(), png_bytes())
+            original = item["capture_paths"][0]
+            for field, wrong in (("run_id", "other_a002"), ("axis", "y"), ("iteration", 99),
+                                  ("simulated", False)):
+                with self.subTest(receipt=field):
+                    changed = copy.deepcopy(item)
+                    changed["capture_paths"][0] = charts.CapturePaths(
+                        dict(original), original.receipt._replace(**{field: wrong}))
+                    with self.assertRaisesRegex(ValueError, "receipt"):
+                        charts.validate_accuracy(output, "separate", {"x": changed}, simulated=True,
+                                                 capture_directory=source)
+            image = Path(original["png"])
+            image.write_bytes(image.read_bytes() + b"changed")
+            with self.assertRaisesRegex(ValueError, "bytes changed"):
+                charts.validate_accuracy(output, "separate", {"x": item}, simulated=True,
+                                         capture_directory=source)
+
+    def test_later_axis_render_failure_retains_only_already_published_summary_paths(self):
+        renderer = RecordingRenderer()
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as output:
+            axes = {"x": simulated_axis(source, "partial_axes", renderer=renderer),
+                    "y": simulated_axis(source, "partial_axes", "y", attempt_start=4, renderer=renderer)}
+            original = renderer.render
+            def fail_y(payload, check_running=None):
+                if payload["kind"] == "accuracy" and payload["axis"] == "y":
+                    raise ValueError("synthetic Y summary failure")
+                return original(payload, check_running=check_running)
+            published = {}
+            with mock.patch.object(renderer, "render", side_effect=fail_y), \
+                    self.assertRaisesRegex(ValueError, "Y summary failure"):
+                charts.write_accuracy(output, "partial_axes", axes, "complete", simulated=True,
+                                      renderer=renderer, capture_directory=source, published_paths=published)
+            self.assertEqual(set(published), {"x_png"})
+            self.assertEqual(list(Path(output).iterdir()), [Path(published["x_png"])])
+
+    def test_maximum_xy_accuracy_uses_temporary_individual_pngs_and_two_bounded_overviews(self):
+        renderer = RecordingRenderer()
+        with tempfile.TemporaryDirectory() as output:
+            with tempfile.TemporaryDirectory() as source:
+                travels = tuple(175. + index * .001 for index in range(50))
+                axes = {"x": simulated_axis(source, "maximum", travels=travels, renderer=renderer),
+                        "y": simulated_axis(source, "maximum", "y", travels, attempt_start=52, renderer=renderer)}
+                paths = charts.write_accuracy(output, "maximum", axes, "complete", simulated=True,
+                                              renderer=renderer, capture_directory=source)
+                self.assertEqual(len(list(Path(source).iterdir())), 102)
+            self.assertFalse(Path(source).exists())
             self.assertEqual(len(paths), 2)
             payloads = [item for item in renderer.payloads if item["kind"] == "accuracy"]
             self.assertTrue(all(len(item["traces"]) == 50 for item in payloads))
             self.assertTrue(all(len(trace) <= 512 for item in payloads for trace in item["traces"]))
-            files = [path for path in Path(temp).rglob("*") if path.is_file()]
-            self.assertEqual(len(files), 104)
+            files = [path for path in Path(output).rglob("*") if path.is_file()]
+            self.assertEqual(len(files), 2)
             self.assertTrue(all(path.suffix == ".png" for path in files))
 
 
