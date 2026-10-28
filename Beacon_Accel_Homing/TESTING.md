@@ -1,5 +1,24 @@
 # Offline verification
 
+## Automatic early-trigger calibration return — 2026-10-28
+
+This change was reviewed from source only. Regression sources were updated but
+**not executed or imported**; no plugin import, compilation, rendering, printer
+connection or printer command was performed. Historical test counts below do
+not verify this revision.
+
+Regression sources: `tests/test_calibration_auto_return.py`,
+`tests/test_simple_calibration.py` and `tests/test_workflows.py`.
+The intended cases cover early impacts in discovery and validation,
+both axes and homing directions, signed start-to-halt reversal including
+post-trigger travel, settling before retry, selected-axis-only return, fresh
+discovery and ten-check windows, and the existing attempt/threshold ceilings.
+Return checks require current, complete evidence and conservative per-return
+travel bounds. Faults, uncertain evidence, cancellation, shutdown and motor
+release must abort without automatic recovery. The >20 mm discovery rule and
+the <=2 mm spread across ten validation impacts are unchanged. These are
+commanded-step checks, not physical-position or hardware validation.
+
 ## Generic 50 ms sample-age default — 2026-10-28
 
 This change was reviewed from source only. Regression sources were updated but

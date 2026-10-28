@@ -1198,9 +1198,11 @@ class BeaconAccelHoming:
         travel = self._travel(positions, attempt.axis)
         record["travel_mm"] = None if travel is None else round(abs(travel), 3)
         record["travel_mm_exact"] = None if travel is None else abs(travel)
+        record["trigger_travel_mm_signed"] = travel
         record["halt_travel_mm_signed"] = self._travel(positions, attempt.axis, halt=True)
         attempt.halt_delta = self._travel(positions, attempt.axis, halt=True)
         self.last_pass = attempt
+        self.workflows.note_calibration_halt(record, positions)
         self.workflows.check_home_result(record)
         logging.info("beacon_accel_homing: %s, %.4f s after arm", describe(record),
                      record["trigger_after_arm_s"] or 0.0)

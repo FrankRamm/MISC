@@ -53,6 +53,7 @@ _OVERRIDE_G28 = _HomingOverride.cmd_G28 if _HomingOverride is not None else None
 AXES = {"x": 0, "y": 1}
 CALIBRATION_MIN_TRAVEL_MM = 20.0
 CALIBRATION_REPEATABILITY_MM = 2.0
+CALIBRATION_RETURN_OVERSHOOT_MM = 2.0
 SIMPLE_CALIBRATION = "impact20_vector_v2"
 REQUIRED_SUCCESSES = 10
 REPEATABILITY_LIMIT_MM = 1.5
@@ -579,6 +580,9 @@ class AccelHomingWorkflows:
             session["finishing"] = True
             session["finish_result"] = result.get("result")
         try:
+            if (session is not None and session["mode"] == "calibration"
+                    and result.get("result") != "calibrated"):
+                self._invalidate_calibration_axis(session)
             self._restore()
             if release:
                 try:
@@ -635,6 +639,54 @@ class AccelHomingWorkflows:
         # it does not force stock G28's all-motor fault cleanup for an early hit.
         if self.in_home and record.get("axis", "").lower() != self.home_axis:
             raise self._error("unexpected homing result axis")
+
+    def _invalidate_calibration_axis(self, session):
+        if session.get("axis_touched"):
+            # Cartesian/CoreXY limits were verified by workflow preflight.
+            # Do not certify a rejected trigger, or release the other motors.
+            self.owner.toolhead.get_kinematics().limits[AXES[session["axis"]]] = (1.0, -1.0)
+
+    def note_calibration_halt(self, record, positions):
+        """Retain one immutable early-pass snapshot before stock G28 can adjust it."""
+        axis = record.get("axis")
+        if not self.calibration_reference(axis) or self._quality(axis, record)[0] != "early":
+            return
+        session = self.session
+        session["early_return_cleanup"] = True
+        evidence = {"source": record, "generation": self.owner.operation_generation,
+                    "attempt": session["attempts"]}
+        session["early_halt"] = evidence
+        try:
+            toolhead = self.owner.toolhead
+            kin = toolhead.get_kinematics()
+            steppers = kin.get_steppers()
+            participating = {stepper.get_name(): stepper for stepper in steppers
+                             if stepper.is_active_axis(axis)}
+            if (not participating or len({sp.stepper_name for sp in positions}) != len(positions)
+                    or {sp.stepper_name for sp in positions} != set(participating)):
+                raise ValueError("incomplete or duplicate homing stepper positions")
+            steps = []
+            trigger, halt = ({stepper.get_name(): 0.0 for stepper in steppers} for _ in range(2))
+            manager = self.printer.lookup_object("stepper_enable")
+            for sp in positions:
+                stepper = participating[sp.stepper_name]
+                distance = stepper.get_step_dist()
+                if (sp.stepper is not stepper or stepper.is_active_axis("z")
+                        or not all(type(value) is int for value in (sp.start_pos, sp.trig_pos, sp.halt_pos))
+                        or not isinstance(distance, (int, float)) or isinstance(distance, bool)
+                        or not math.isfinite(distance) or distance <= 0):
+                    raise ValueError("invalid homing stepper evidence")
+                line = manager.lookup_enable(sp.stepper_name)
+                steps.append((stepper, line, sp.start_pos, sp.trig_pos, sp.halt_pos, distance))
+                trigger[sp.stepper_name] = (sp.trig_pos - sp.start_pos) * distance
+                halt[sp.stepper_name] = (sp.halt_pos - sp.start_pos) * distance
+            evidence.update(steps=tuple(steps), trigger=tuple(kin.calc_position(trigger)),
+                            halt=tuple(kin.calc_position(halt)),
+                            position=tuple(toolhead.get_position()), limits=tuple(kin.limits))
+        except Exception as exc:
+            # Missing evidence aborts the workflow after successful G28; it
+            # must never turn into a guessed reverse or a stock-homing retry.
+            evidence["error"] = str(exc)
 
     def check_settings_change(self):
         if self.session is not None:
@@ -991,6 +1043,12 @@ class AccelHomingWorkflows:
             self.owner.threshold_g[axis] = threshold
         self.owner.back_off_dist = 0.0
         old_record = self.owner.last.get(axis)
+        if session["mode"] == "calibration":
+            session.update(axis_touched=True, early_return_cleanup=False,
+                           home_generation=self.owner.operation_generation,
+                           home_position=tuple(self.owner.toolhead.get_position()),
+                           home_limits=tuple(self.owner.toolhead.get_kinematics().limits))
+            session.pop("early_halt", None)
         self.in_home, self.home_axis = True, axis
         capture_started = False
         try:
@@ -1011,7 +1069,11 @@ class AccelHomingWorkflows:
                 try:
                     self.owner._end_session()
                 finally:
-                    capture = self.owner.stop_capture() if capture_started else {"samples": [], "dropped": 0}
+                    try:
+                        capture = self.owner.stop_capture() if capture_started else {"samples": [], "dropped": 0}
+                    finally:
+                        if session["mode"] == "calibration" and self.session is not session:
+                            self._invalidate_calibration_axis(session)
         except Exception:
             if session["mode"] == "accuracy" and self.session is session:
                 self._remember_accuracy_record(session, axis, old_record)
@@ -1031,6 +1093,10 @@ class AccelHomingWorkflows:
                                           else self.owner.threshold_g[axis])
         record["workflow_phase"] = ("validation" if session["candidate_qualified"] else "discovery") \
             if session["mode"] == "calibration" else session["mode"]
+        early_calibration = (session["mode"] == "calibration"
+                             and self._quality(axis, record)[0] == "early")
+        if early_calibration:
+            session["early_return_cleanup"] = True
         if session["mode"] == "accuracy":
             record = self._remember_accuracy_record(session, axis, old_record, record)
         if session["mode"] == "calibration" and capture.get("fault"):
@@ -1048,6 +1114,12 @@ class AccelHomingWorkflows:
             self._validate_accuracy_capture(session, axis, source_record, detector_record,
                                             record, capture)
             record["capture_valid"] = True
+        elif early_calibration:
+            if not isinstance(capture.get("detector"), dict) or capture["detector"].get("impact_metric") != "xyz_magnitude":
+                raise self._error("early return requires the current XYZ-magnitude detector capture")
+            self._validate_accuracy_capture(session, axis, source_record, detector_record,
+                                            record, capture, record["workflow_threshold_g"])
+            record["early_capture_valid"] = True
         if session["mode"] != "accuracy":
             session["records"].append(record)
         self._info("%s home: result %s; onset %s g; peak %s g; threshold %s g; "
@@ -1104,12 +1176,14 @@ class AccelHomingWorkflows:
         return record
 
     def _validate_accuracy_capture(self, session, axis, source_record, detector_record,
-                                   record, capture):
+                                   record, capture, expected_threshold=None):
         detector = capture.get("detector")
         baseline = capture.get("baseline_g")
         arm, onset = record.get("arm_time_s"), record.get("onset_time_s")
         finite = lambda value: (isinstance(value, (int, float)) and not isinstance(value, bool)
                                 and math.isfinite(value))
+        if expected_threshold is None:
+            expected_threshold = session["saved_thresholds"][axis]
         if (detector_record is not source_record or not isinstance(detector, dict)
                 or capture.get("fault") or capture.get("error")
                 or detector.get("axis") != axis or detector.get("attempt_count") != 1
@@ -1122,7 +1196,7 @@ class AccelHomingWorkflows:
                 or detector["homing_speed_mm_s"] <= 0
                 or not finite(detector.get("homing_accel_mm_s2"))
                 or detector["homing_accel_mm_s2"] <= 0
-                or not math.isclose(detector["threshold_g"], session["saved_thresholds"][axis],
+                or not math.isclose(detector["threshold_g"], expected_threshold,
                                     rel_tol=1e-12, abs_tol=1e-12)
                 or (session.get("last_arm_time") is not None
                     and arm <= session["last_arm_time"])):
@@ -1297,6 +1371,119 @@ class AccelHomingWorkflows:
                        restarts=session["restarts"] + 1)
         return candidate
 
+    def _return_early_calibration(self, axis, record):
+        """Reverse only the current, complete early pass; never infer physical center."""
+        session = self.session
+        self._check_running(session)
+        terminal, evidence = session.get("terminal_home"), session.get("early_halt")
+        toolhead = self.owner.toolhead
+        kin = toolhead.get_kinematics()
+        index = AXES[axis]
+        finite = lambda value: (type(value) in (int, float) and math.isfinite(value))
+        if (terminal is None or terminal[0] != axis or terminal[1] is not record
+                or not isinstance(evidence, dict) or evidence.get("error")
+                or evidence.get("source") is not terminal[2]
+                or evidence.get("attempt") != session["attempts"]
+                or record.get("run_id") != session["run_id"]
+                or record.get("workflow_attempt") != session["attempts"]
+                or record.get("early_capture_valid") is not True
+                or record.get("pass") != 1
+                or self._quality(axis, record)[0] != "early"):
+            raise self._error("early return lacks current complete halt/capture evidence")
+        trigger, halt = evidence.get("trigger"), evidence.get("halt")
+        position, limits = evidence.get("position"), evidence.get("limits")
+        if (not isinstance(trigger, tuple) or len(trigger) != 3
+                or not isinstance(halt, tuple) or len(halt) != 3
+                or not all(finite(value) for value in trigger + halt)
+                or not isinstance(position, tuple) or len(position) < 3
+                or not all(finite(value) for value in position)
+                or not isinstance(limits, tuple) or len(limits) != 3):
+            raise self._error("early return has missing or nonfinite halt displacement")
+        signed_trigger, signed_halt = record.get("trigger_travel_mm_signed"), record.get("halt_travel_mm_signed")
+        exact = record.get("travel_mm_exact")
+        if (not all(finite(value) for value in (signed_trigger, signed_halt, exact))
+                or not math.isclose(trigger[index], signed_trigger, abs_tol=1e-9, rel_tol=1e-12)
+                or not math.isclose(halt[index], signed_halt, abs_tol=1e-9, rel_tol=1e-12)
+                or not math.isclose(abs(signed_trigger), exact, abs_tol=1e-9, rel_tol=1e-12)
+                or any(abs(values[i]) > 0.000001 for values in (trigger, halt)
+                       for i in range(3) if i != index)):
+            raise self._error("early return halt evidence does not match the selected-axis move")
+        rail = self.owner.rails_by_axis[axis]
+        info = rail.get_homing_info()
+        low, high = rail.get_range()
+        sign = 1.0 if info.positive_dir else -1.0
+        trigger_distance, halt_distance = sign * signed_trigger, sign * signed_halt
+        _center, expected = self._geometry(axis)
+        target = position[index] - signed_halt
+        if (not all(finite(value) for value in (low, high, info.position_endstop, info.speed, expected, target))
+                or low >= high or info.speed <= 0
+                or not 0 <= trigger_distance <= CALIBRATION_MIN_TRAVEL_MM
+                or not trigger_distance <= halt_distance
+                or halt_distance - trigger_distance > CALIBRATION_RETURN_OVERSHOOT_MM
+                or halt_distance > min(CALIBRATION_MIN_TRAVEL_MM + CALIBRATION_RETURN_OVERSHOOT_MM,
+                                       expected - CALIBRATION_RETURN_OVERSHOOT_MM)
+                or not low <= target <= high
+                or not math.isclose(position[index], info.position_endstop + signed_halt - signed_trigger,
+                                    abs_tol=0.000001, rel_tol=0.0)):
+            raise self._error("early return displacement is outside the conservative recovery envelope")
+        if (any(position[i] != session["home_position"][i] for i in range(len(position)) if i != index)
+                or any(limits[i] != session["home_limits"][i] for i in range(3) if i != index)
+                or limits[index] != rail.get_range()):
+            raise self._error("early return found changed other-axis coordinates or limits")
+        steps = evidence.get("steps")
+        if not isinstance(steps, tuple) or not steps:
+            raise self._error("early return has no participating motor evidence")
+        generation = session["home_generation"]
+
+        def current(expected_position, settled=True):
+            self._check_running(session)
+            if (self.owner.operation_generation != generation or evidence["generation"] != generation
+                    or self.owner.last.get(axis) is not terminal[2]
+                    or self.owner.homing_active or self.owner.attempt is not None
+                    or getattr(self.owner, "sensor_fault", None) is not None
+                    or tuple(kin.limits) != limits or self.owner._homed(axis) is not True
+                    or tuple(toolhead.get_position()) != expected_position):
+                raise self._error("early return was interrupted or its halt frame changed")
+            manager = self.printer.lookup_object("stepper_enable")
+            for stepper, line, start_steps, _trigger, halt_steps, distance in steps:
+                if (manager.lookup_enable(stepper.get_name()) is not line
+                        or not line.is_motor_enabled() or stepper.get_step_dist() != distance
+                        or (settled and stepper.get_mcu_position() != (
+                            halt_steps if expected_position == position else start_steps))):
+                    raise self._error("early return motor or halted step evidence changed")
+            if not settled:
+                return
+            queued, estimated, empty = toolhead.check_busy(self.reactor.monotonic())
+            if (not all(finite(value) for value in (queued, estimated))
+                    or not empty or queued > estimated + 0.000001):
+                raise self._error("early return requires an idle motion queue")
+
+        current(position)
+        coordinates = [None, None, None]
+        coordinates[index] = target
+        final_position = tuple(target if i == index else value for i, value in enumerate(position))
+        try:
+            self.owner._limit_accel()
+            current(position)
+            # A genuine zero-step early hit is a no-op, followed by the same
+            # settling interval and bounded threshold retry as other early hits.
+            if signed_halt:
+                toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
+                current(final_position, settled=False)
+                toolhead.wait_moves()
+                current(final_position)
+            if session["calibration_settle_time_s"]:
+                current(final_position)
+                toolhead.dwell(session["calibration_settle_time_s"])
+                self._check_running(session)
+                toolhead.wait_moves()
+                current(final_position)
+        finally:
+            self.owner._restore_accel()
+        current(final_position)
+        record["early_return_mm_signed"] = -signed_halt
+        record["early_return_physical_position_verified"] = False
+
     def _calibrate_trials(self):
         session = self.session
         axis = session["axis"]
@@ -1307,9 +1494,16 @@ class AccelHomingWorkflows:
             if quality == "fatal":
                 raise self._error(reason + "; calibration aborted without raising the threshold")
             if quality == "early":
-                candidate = self._next_calibration_candidate(reason)
-                self._wait_center(reason + "; restart impact discovery at %.2f g" % candidate)
-                return
+                session["early_return_cleanup"] = True
+                try:
+                    # Check both budgets before permitting a return move.
+                    candidate = self._next_calibration_candidate(reason)
+                    self._return_early_calibration(axis, record)
+                finally:
+                    self._invalidate_calibration_axis(session)
+                self._info(reason + "; reversed commanded start-to-halt travel to the estimated "
+                           "starting point; restart impact discovery at %.2f g" % candidate)
+                continue
             if discovery:
                 session["candidate_qualified"] = True
                 session["candidate_attempt"] = record["workflow_attempt"]
@@ -1468,7 +1662,8 @@ class AccelHomingWorkflows:
             self._calibrate_trials()
         except Exception as exc:
             if self.session is not None:
-                self._finish({"result": "aborted", "reason": str(exc)}, release=True)
+                self._finish({"result": "aborted", "reason": str(exc)},
+                             release=not self.session.get("early_return_cleanup", False))
             raise
 
     def _continue_calibration(self):
@@ -1485,7 +1680,8 @@ class AccelHomingWorkflows:
             self._calibrate_trials()
         except Exception as exc:
             if self.session is not None:
-                self._finish({"result": "aborted", "reason": str(exc)}, release=True)
+                self._finish({"result": "aborted", "reason": str(exc)},
+                             release=not self.session.get("early_return_cleanup", False))
             raise
 
     def cmd_CANCEL(self, gcmd):

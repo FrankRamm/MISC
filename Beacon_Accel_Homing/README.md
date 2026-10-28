@@ -70,12 +70,14 @@ that axis's configured midpoint. The first discovery impact is excluded.
 **Max distance minus min distance <= 2.00 mm passes**; a larger ten-check spread
 raises the threshold one step, clears the entire window, recenters that axis,
 and automatically restarts impact discovery and validation.
-An impact at or before 20 mm stops immediately, raises the threshold, and
-requires manual recentering and the next command. Data faults/no impact abort.
+An impact at or before 20 mm stops immediately. If the return checks pass,
+the axis automatically returns to its estimated starting point, settles,
+and retries discovery at the next threshold step. Data faults, no impact
+or uncertain return evidence abort.
 
-Returns target the configured axis midpoint after stock homing assigns the
-endstop coordinate. The homing acceleration cap and default 0.25 s settling
-wait remain. Step counts are not physical-position feedback.
+After a qualifying impact, returns target the configured axis midpoint.
+The homing acceleration cap and default 0.25 s settling wait remain.
+Step counts are not physical-position feedback.
 [Complete algorithm and limitations](docs/SIMPLE_CALIBRATION.md).
 
 1. Keep the printer idle and unpaused. **Center XY by hand and leave both
@@ -96,10 +98,9 @@ wait remain. Step counts are not physical-position feedback.
    ACCEL_HOMING_CALIBRATE AXIS=Y CENTERED=1 START_THRESHOLD=1 STEP=0.25
    ```
 
-If asked to recenter, repeat the preparation and the **same command** to resume.
+Early-hit retries run automatically; do not reissue the command during a run.
 The explicit start and step above override older configuration values and
-do not consume stationary-noise hints. A resumed run keeps its
-current candidate; repeating `START_THRESHOLD=1` does not reset it to 1 g.
+do not consume stationary-noise hints.
 After physically validating both axes, use the printer's normal homing controls.
 
 ## Mainsail / Fluidd console commands
