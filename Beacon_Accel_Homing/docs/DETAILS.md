@@ -415,7 +415,7 @@ path. Simple calibration and saved vector models skip it, retaining sensor data
 checks and the full-move travel/time watchdog. Explicit optional admission
 limits are still honored; they are not physical stopping guarantees.
 
-Generic defaults are 5 ms reports, a 20 ms maximum sample age and at least
+Generic defaults are 5 ms reports, a 50 ms maximum sample age and at least
 1000 Hz. The previous report interval is restored afterwards. Sample freshness,
 stream faults and startup motion detection still apply at every speed.
 There is no default 50 mm/s cap or startup-distance admission limit. Default
@@ -426,6 +426,14 @@ acceleration limits still apply; acceleration is never raised automatically.
 Native Beacon keeps configured speeds; its expanded-reference checks are
 described above.
 
+The 50 ms sample-age default applies to stationary preparation and armed homing;
+samples older than the configured limit are rejected. Explicit `max_sample_age`
+values are preserved. The generic no-data watchdog uses the lesser of
+`stream_timeout` (50 ms by default) and `max_sample_age`, so an explicit shorter
+`stream_timeout` still stops missing delivery earlier. The travel-deadline grace
+uses that same effective timeout. Native Beacon already uses a 50 ms default and
+is unchanged.
+
 `max_report_travel` and `max_startup_travel` are independent optional limits,
 disabled when absent. An existing explicit value stays active. The installer
 flags with the same names opt into those limits, and are refused for native
@@ -434,6 +442,11 @@ Beacon. A configured reporting limit requires effective speed at most
 travel before a host stop request. Explicit values accept finite ranges
 0.1..2 mm and 0.1..5 mm respectively. An incompatible explicit limit is refused
 before installation writes, without lowering speed or clearing that limit.
+With sample age omitted, raising its default from 20 to 50 ms lowers a configured
+1 mm report limit's speed ceiling from 50 to 20 mm/s. The unchanged legacy
+startup calculation also gains 30 ms and `speed * 0.030` mm of nominal request
+travel. Existing explicit distance limits can therefore reject a previously
+admitted plan; they are not raised or removed automatically.
 An update also preserves a 50 mm/s value written by an older installer; it
 does not infer or restore a historical speed from backups. Those backups
 retain the original configuration for review.
