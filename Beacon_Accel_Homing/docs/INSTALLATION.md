@@ -456,23 +456,33 @@ immediately and restarts discovery and all ten checks at the next threshold.
 CALIBRATE and ACCURACY midpoint returns use ordinary acceleration and the same
 explicit settling wait, default 0.25 s. Early reversals keep their existing
 cap and wait; homing speed and its acceleration cap are unchanged.
-The recovery count and cumulative commanded-distance budgets persist for the
-whole command, including <=20 mm recoveries; they do not include qualified
-midpoint returns. These checks do not prove physical position or correct
-endstop contact, and do not automatically diagnose binding.
+The cumulative commanded-distance budget persists for the whole command,
+including <=20 mm recoveries; it does not include qualified midpoint returns.
+Recovery count has no separate cap. The existing attempt budget (40 by default)
+still applies, and every new candidate requires 11 remaining attempts for a
+fresh discovery and ten checks before any recovery return, reservation,
+threshold increase or recentering. These checks do not prove physical position
+or correct endstop contact, and do not automatically diagnose binding.
 See the [current calibration sequence and return
 limits](SIMPLE_CALIBRATION.md).
 
-Calibration and saved models accept finite values from 0.5 g; existing models
-at 1 g and 2 g remain valid. Manual `threshold`, `x_threshold` and `y_threshold`
-settings in either current or legacy section, and temporary `SET_ACCEL_HOMING`
+Calibration and saved models accept finite values from 0.5 g with no fixed
+15 g maximum or configurable calibration g ceiling; existing models at 1 g and
+2 g remain valid. The old `calibration_max_threshold` option is accepted but
+ignored with a deprecation warning, so it need not be removed before updating.
+Manual `threshold`, `x_threshold` and `y_threshold` settings in either current or
+legacy section, and temporary `SET_ACCEL_HOMING`
 or `SET_BEACON_ACCEL_HOMING` commands, accept any finite value greater than 0 g,
 including values below 0.5 g. There is no fixed 3 g minimum or 15 g maximum.
-When the sensor range is known, the effective value must be at most 80% of it
-(for example, 12.8 g for a generic ±16 g sensor); the active stream range is
+For calibration, saved models and manual values, a known sensor range still
+limits the effective value to 80% of it (for example, 12.8 g for a generic ±16 g
+sensor). This is a conservative software headroom policy, separate from
+physical saturation and sensor-fault checks. The active stream range is
 checked again before arming. Native Beacon without known clip/range data keeps
-its existing behavior, and the derived raw trigger limit must remain finite
-and positive. Installation and updates preserve existing manual values.
+its existing behavior. The derived raw trigger limit and its squared value in
+XYZ-magnitude mode must remain finite and positive before arming; these are
+numeric representation checks. Installation and updates preserve existing
+manual values.
 Explicit existing `calibration_start_threshold` and `calibration_step` values
 are preserved. Set them to `1.0` and `0.25`, leave both absent for the new
 defaults, or use the per-command parameters above. These settings define the

@@ -146,12 +146,22 @@ objects need their actual configured `sensor_range`.
 
 Manual threshold settings and temporary SET commands accept any finite positive
 value in g. When the sensor range is known, values are bounded to 80% of that
-configured or detected full-scale range; native Beacon retains its fallback
-when clip range is unknown. There is no fixed 3 g minimum or 15 g maximum for
+configured or detected full-scale range. This is a conservative software
+headroom policy, separate from physical saturation and sensor-fault checks;
+native Beacon retains its fallback when clip range is unknown. There is no
+fixed 3 g minimum or 15 g maximum for
 manual settings. The actual session range is checked again before each pass:
 another Beacon client using a narrower scale can cause a previously accepted
-value to be rejected. Calibration and saved models retain their 0.5–15 g range,
-subject to the calibration ceiling and sensor-range limits.
+value to be rejected. Calibration and saved models require finite thresholds
+of at least 0.5 g, with the same known-range headroom policy and no fixed 15 g
+maximum. There is no configurable calibration g ceiling. The legacy
+`calibration_max_threshold` setting is accepted but ignored with a deprecation
+warning; it no longer affects noise selection, retries or model loading.
+Before arming, the derived raw trigger limit must be finite and positive, as
+must its squared value for XYZ-magnitude detection. This is numeric
+representation validation: finite inputs whose derived square overflows to
+infinity or underflows to zero are rejected. It is separate from the
+known-range headroom policy.
 
 The named model defaults to `[accel_homing_model default]`. It stores thresholds,
 ten-success counts, the validation travel range, the fixed 2.0 mm calibration
@@ -220,8 +230,8 @@ then rounds upward on the configured
 2 g X peak gives a 2.5 g initial candidate with the default 1 g start and
 0.25 g step.
 This is an **initial candidate, NOT a calibrated impact threshold**. A candidate
-above the calibration/sensor ceiling is unavailable; it is never reduced to
-fit. An unknown sensor range also leaves candidates unavailable. Complete
+above the known sensor range's 80% headroom limit is unavailable; it is never
+reduced to fit. An unknown sensor range also leaves candidates unavailable. Complete
 measurements and charts remain available in either case. An incomplete or
 faulted run has no recommendation.
 
@@ -316,13 +326,16 @@ automatically reverse the selected axis's recorded signed start-to-halt travel,
 including post-trigger travel, to its estimated starting point. After a
 successful return it advances one STEP and restarts discovery after settling;
 START_THRESHOLD/STEP cannot change mid-run. Both short and longer premature
-returns consume the same command-wide count and cumulative commanded-distance
-budgets, which survive candidate resets. Qualified-impact midpoint returns
-are outside these recovery budgets. See the [exact limits and status
-fields](SIMPLE_CALIBRATION.md#automatic-early-impact-returns).
+returns consume the same command-wide cumulative commanded-distance budget,
+which survives candidate resets. Recovery count is telemetry with no separate
+cap; qualified-impact midpoint returns are outside the distance budget. See the
+[exact limits and status fields](SIMPLE_CALIBRATION.md#automatic-early-impact-returns).
 
 The 40-attempt default budget still includes discovery and validation across
-all retries; the default threshold ceiling remains 12 g or 80% of range. Sensor
+all retries. Before another candidate, at least 11 attempts must remain for a
+fresh discovery and ten checks; this is checked before any recovery return,
+distance reservation, candidate increase or recentering. Threshold increases
+keep the selected STEP and the known-range 80% headroom policy. Sensor
 faults, a move with no impact, missing or inconsistent return evidence, and
 budget exhaustion abort without a threshold increase. An impact beyond 20 mm
 and above the upper expected-distance limit also aborts without a return,

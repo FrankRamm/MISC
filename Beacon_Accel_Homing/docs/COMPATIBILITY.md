@@ -410,8 +410,9 @@ is the smallest configured
 `max(calibration_start_threshold, 1.2 * peak, peak + 0.1 g)`. Thus a 2 g peak
 gives 2.5 g with the default 1 g start and 0.25 g step. Exact measured peaks and the
 upward-rounded candidates remain separate fields. The candidate must not
-exceed `min(calibration_max_threshold, 15 g, 0.8 * sensor_full_scale_g)`.
-An over-ceiling candidate is unavailable rather than clamped downward.
+exceed `0.8 * sensor_full_scale_g`, the retained conservative software headroom
+policy. This is separate from physical saturation and sensor-fault checks.
+A candidate above that headroom limit is unavailable rather than clamped downward.
 An unknown physical sensor range also prevents a candidate; either case still
 exports all three valid measured windows and their statistics.
 
@@ -432,8 +433,8 @@ upward on `calibration_start_threshold + n * STEP`. An explicit `STEP` supplies
 the grid spacing; otherwise `calibration_step` is used. This matches the simple
 calibration detector rather than using a mapped X or Y component hint.
 Without an explicit `START_THRESHOLD`, an unknown range or a candidate above
-`min(calibration_max_threshold, 15 g, 0.8 * sensor_full_scale_g)` aborts before
-movement; it is never clamped downward or taken from an older run.
+`0.8 * sensor_full_scale_g` aborts before movement; it is never clamped downward
+or taken from an older run.
 An explicit `START_THRESHOLD` retains its validated initial value even when
 noise suggests another value, but measurement and summary export still must
 succeed. These parameters remain fixed during the run. Noise acquisition alone
@@ -464,9 +465,13 @@ first homing pass starts after stationary preparation succeeds.
 
 The first home tests the candidate selected from the fresh noise measurement,
 or the explicit `START_THRESHOLD` value.
-Calibration and saved models accept finite thresholds from 0.5 to 15 g, with
-the configured calibration ceiling and sensor-range limit still applied.
-The default step is 0.25 g; each early-trigger retry adds that selected step.
+Calibration and saved models accept finite thresholds of at least 0.5 g,
+subject to the known sensor range's 80% headroom policy. There is no fixed
+15 g maximum or configurable calibration g ceiling. The legacy
+`calibration_max_threshold` option is accepted but ignored with a deprecation
+warning. It does not affect noise-based selection, retries or model save/load.
+The default step is 0.25 g, within the unchanged finite
+0.1–3 g range; each retry adds that selected step.
 `START_THRESHOLD=1 STEP=0.25` selects those values explicitly for a run and
 still performs the three-window measurement before movement. Supplying only
 `STEP` preserves automatic initial selection. Parameters are validated before
@@ -476,18 +481,25 @@ and `y_threshold` settings in either section, and both `SET_ACCEL_HOMING` and
 `SET_BEACON_ACCEL_HOMING`, accept any finite value greater than 0 g. They have
 no fixed 3 g minimum or 15 g maximum. When the configured/detected sensor range
 is known, the effective threshold must be at most 80% of full-scale (12.8 g for
-a generic ±16 g sensor); a wider sensor range permits values above 15 g.
+a generic ±16 g sensor). This is a conservative software headroom policy,
+separate from physical saturation and sensor-fault checks; a wider sensor
+range permits values above 15 g.
 The active stream range is checked again before arming, including a narrower
 Beacon stream already in use. Native Beacon without known clip/range data
-retains the existing behavior without an invented upper limit. A derived raw
-trigger limit must also remain finite and positive before arming. These manual
-settings do not change the separate 0.5–15 g calibration/model bounds.
+retains the existing behavior without an invented upper limit. The derived raw
+trigger limit and its squared value for XYZ-magnitude detection must also remain
+finite and positive before arming. These are numeric representation checks,
+separate from a configurable g maximum. Calibration and model thresholds retain
+their separate 0.5 g minimum.
 Explicit existing `calibration_start_threshold` and `calibration_step` settings
 are preserved unless a command overrides them for that run. Updating does not
 replace any saved model threshold. The independent default 40-attempt cap
-includes discovery and ten validation homes. A finer grid can exhaust that
-cap before reaching the configured threshold ceiling or completing validation;
-this change does not add automatic attempts.
+includes discovery and ten validation homes. Before advancing a rejected
+candidate, at least 11 attempts must remain for a new discovery and all ten
+checks. The workflow checks this before a recovery return, distance
+reservation, threshold increase or recentering. A finer grid can exhaust the
+attempt budget before reaching a working threshold; this change does not add
+automatic attempts.
 One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
 CALIBRATE and ACCURACY use the same helper for midpoint returns at ordinary
@@ -518,8 +530,9 @@ recorded signed start-to-halt travel to return only the selected axis to its
 estimated starting point if all return checks and budgets pass. After a
 successful return it advances one candidate step, clears the selected axis's
 homed state and validation window, and restarts discovery after settling. All
-premature returns share fixed command-wide count and reserved-distance limits,
-including <=20 mm returns. The reservations survive candidate resets and are
+premature returns share a fixed command-wide reserved-distance limit, including
+<=20 mm returns. Recovery count has no separate cap; the attempt budget still
+applies. Distance reservations survive candidate resets and are
 not refunded after an interrupted return. Qualified-impact midpoint returns
 are not included in these recovery budgets. Denial makes no return or threshold
 increase and invalidates only the suspect axis's homed state. There is no

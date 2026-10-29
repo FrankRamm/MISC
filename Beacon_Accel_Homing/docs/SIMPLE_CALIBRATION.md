@@ -61,6 +61,32 @@ proof or startup-motion deadline in this detector. Missing, stale, invalid,
 gapped/frozen streams and the full-move travel/time limit still stop with an
 error. Host-delivered sensor data does not provide a hard real-time stop bound.
 
+## Threshold and attempt bounds
+
+Calibration starts and saved model thresholds must be finite and at least
+0.5 g. `STEP` remains a finite value from 0.1 to 3 g. Calibration has no
+configurable g maximum or fixed 15 g maximum. The legacy
+`calibration_max_threshold` option is accepted but ignored, with a deprecation
+warning, so an existing configuration can still load.
+
+When the sensor range is known, the candidate must remain at or below
+`0.8 * sensor_full_scale_g`. This existing 80% rule is a conservative software
+headroom policy, not the physical saturation point. The active stream range is
+checked again before arming; sensor saturation, invalid data and other fault
+checks remain separate. An unknown range prevents automatic noise-based
+selection; an explicit, otherwise valid `START_THRESHOLD` can still be used.
+No candidate is clamped downward to fit a limit.
+Before arming, the derived raw trigger limit and its squared value used by the
+XYZ-magnitude detector must both be finite and positive. This validates numeric
+representation rather than adding a configurable g maximum.
+
+The existing monitored-home budget, 40 attempts by default, includes discovery,
+validation and all retries. Before advancing a rejected candidate, at least
+**11 attempts must remain**: one fresh discovery plus ten validation homes.
+This is checked before a recovery return, distance reservation, threshold
+increase or recentering. There is no separate recovery-count cap, but the
+attempt and cumulative recovery-distance budgets still bound retries.
+
 ## Impact discovery and validation
 
 1. Home the selected printer axis toward its mechanical endstop, watching
@@ -96,8 +122,8 @@ error. Host-delivered sensor data does not provide a hard real-time stop bound.
    axis, and restart **impact discovery** with an empty window. Passing still
    requires **ten** validation impacts with a spread **at most 2.00 mm**;
    exactly 2.00 mm passes. The new discovery impact also stays outside its
-   following ten measurements. All cycles share the configured attempt and
-   threshold ceilings.
+   following ten measurements. All cycles share the attempt budget and
+   sensor-range headroom policy described above.
 
 Discovery and validation use the same verified stock single-axis G28 path.
 There is no standalone 20 mm probe move or successful no-contact endpoint.
@@ -162,32 +188,32 @@ per-return limits:
   configured midpoint-to-endstop distance.
 - The reverse target lies inside the configured axis limits.
 
-The existing attempt budget and next-candidate threshold ceiling are checked
-before returning. Two additional fixed limits apply to the entire calibration
-command, including both the original <=20 mm returns and the longer premature
-returns:
-
-- At most **8 recovery reservations**, including a zero-distance recovery.
-- Total reserved **absolute start-to-halt distance**, including post-trigger
-  travel, no greater than `nominal_opposite_clearance - margin`, where
-  `margin = max(2 mm, 10% of nominal_opposite_clearance)`.
+The next candidate must pass the threshold checks and have at least 11 remaining
+attempts before any return or reservation. There is no separate limit of eight
+recoveries. A cumulative distance limit still applies to the entire command,
+including both the original <=20 mm returns and the longer premature returns:
+total reserved **absolute start-to-halt distance**, including post-trigger
+travel, must be no greater than `nominal_opposite_clearance - margin`, where
+`margin = max(2 mm, 10% of nominal_opposite_clearance)`.
 
 Let `center = (position_min + position_max) / 2`. Nominal opposite clearance is
 `center - position_min` for positive homing, or `position_max - center` for
 negative homing; it is not measured physical clearance. For a nominal opposite
 clearance of `109.25 mm`, the margin is `10.925 mm` and the total distance budget
-is `98.325 mm`. Boundaries are inclusive: exactly eight reservations or exactly
-the distance limit is allowed if every other check passes. These are fixed
-internal limits, with no new configuration settings.
+is `98.325 mm`. The distance boundary is inclusive: exactly the limit is allowed
+if every other check passes. This is a fixed internal geometric budget, with
+no new configuration setting.
 
-Only premature-impact recovery reversals consume these budgets. Midpoint
+Only premature-impact recovery reversals consume this distance budget. Midpoint
 returns after qualified impacts and other workflow motion are not charged;
-the counters do not bound total workflow travel or establish physical position.
+it does not bound total workflow travel or establish physical position.
 
-Reserve the count and distance before issuing a return. Reservations persist
-across every threshold/candidate reset and same-command continuation, and are
+Reserve the distance and record the recovery count before issuing a return.
+A zero-distance recovery still increments the count; its triggering home has
+already used an attempt. Reservations persist across every threshold/candidate
+reset and same-command continuation, and are
 not refunded if a return is interrupted or fails. Only a new calibration
-command starts fresh budgets. A denied recovery makes no return and does not
+command starts a fresh budget. A denied recovery makes no return and does not
 increase the threshold; it invalidates only the suspect axis's homed state and
 requires manual XY centering before a new command. An accepted recovery commits
 the next threshold only after its return succeeds.
@@ -240,6 +266,10 @@ identifies the fresh measurement, magnitude peak, initial-value source and PNG.
 The nested `recovery` object in active calibration status, the final result and
 saved model metadata reports reserved `count`/`distance_mm`, their limits and
 remaining values, plus `nominal_opposite_clearance_mm` and `margin_mm`.
+`count` remains telemetry; `count_limit` and `count_remaining` are `null` because
+there is no separate recovery-count cap. Distance limits and remaining distance
+remain numeric. Active calibration status and final results also expose
+`attempt_limit`, `attempts_remaining` and `candidate_attempts_required` (11).
 `accounting` is `reserved_start_to_halt_including_overshoot`, and
 `physical_clearance_verified` remains false. A final result also retains
 `candidate_g` and `restarts` when a recovery is denied. These counters describe
