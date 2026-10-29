@@ -83,9 +83,9 @@ representation rather than adding a configurable g maximum.
 The existing monitored-home budget, 40 attempts by default, includes discovery,
 validation and all retries. Before advancing a rejected candidate, at least
 **11 attempts must remain**: one fresh discovery plus ten validation homes.
-This is checked before a recovery return, distance reservation, threshold
-increase or recentering. There is no separate recovery-count cap, but the
-attempt and cumulative recovery-distance budgets still bound retries.
+This is checked before a recovery return, threshold increase or recentering.
+There is no separate recovery-count cap or accumulated recovery-distance
+budget; the monitored-home attempt budget still bounds retries.
 
 ## Impact discovery and validation
 
@@ -95,13 +95,13 @@ attempt and cumulative recovery-distance budgets still bound retries.
    **more than 20 mm** of commanded travel that also passes the travel
    plausibility check below.
 2. An impact at **20 mm or less**, or below the expected-distance band defined
-   below, stops immediately and is premature. If all return checks and the
-   command-wide recovery budgets pass, reverse the selected axis's recorded
-   signed start-to-halt travel, including travel after the trigger, to its
-   **estimated starting point**. After a successful return and settling, advance
-   one threshold step and restart discovery with the previous candidate and
-   measurements cleared. Exactly 20 mm is still an early hit; no further
-   command or manual recentering is needed for an accepted recovery.
+   below, stops immediately and is premature. Reverse the selected axis's
+   recorded signed start-to-halt displacement, including travel after the
+   trigger, toward its **estimated starting point**. After the commanded return
+   and settling complete, advance one threshold step and restart discovery with
+   the previous candidate and measurements cleared. Exactly 20 mm is still an
+   early hit; no further command or manual recentering is needed for an accepted
+   recovery.
 3. The first plausible impact **beyond 20 mm** selects the candidate. Stock
    axis homing assigns the endstop coordinate before its result is checked.
    After the travel check passes, move **only that printer axis** to its
@@ -112,7 +112,7 @@ attempt and cumulative recovery-distance budgets still bound retries.
    Record commanded step distance at each first acceleration threshold crossing
    and check its travel plausibility before another automatic move.
    A premature validation impact rejects the candidate and follows the same
-   bounded return and new discovery in step 2. A sensor fault or missing impact
+   return and new discovery in step 2. A sensor fault or missing impact
    aborts without a return or an increase in g.
 5. After **each** accepted validation impact, calculate the running **maximum
    distance minus minimum distance**, not statistical variance or just
@@ -149,7 +149,8 @@ to `0.20` (20%); this is separate from the 2 mm repeatability limit.
 The same classification applies to discovery and every validation impact:
 
 - At or below 20 mm, or strictly below the lower edge of the band: premature;
-  attempt the bounded recovery below. Exactly 20 mm never qualifies.
+  reverse the recorded start-to-halt displacement and retry as described below.
+  Exactly 20 mm never qualifies.
 - Beyond 20 mm and inside the inclusive band: plausible; use the existing
   configured-midpoint return and qualification cycle.
 - Beyond the upper edge of the band, unless it is at or below 20 mm: abort
@@ -157,9 +158,9 @@ The same classification applies to discovery and every validation impact:
 
 For example, `expected = 109.25 mm` and tolerance `0.20` give an inclusive band
 of `87.4` through `131.1 mm`. A `51.175 mm` trigger is premature even though it
-exceeds 20 mm; it can be recovered only if the separate return checks and
-remaining budgets pass. Exactly `87.4 mm` is plausible, whereas a trigger above
-`131.1 mm` aborts.
+exceeds 20 mm; the return reverses that attempt's recorded start-to-halt travel,
+including any movement after the trigger. Exactly `87.4 mm` is plausible,
+whereas a trigger above `131.1 mm` aborts.
 
 An aborted suspect impact invalidates only the selected axis's homed state;
 the other XY axis and Z are preserved. Physically center XY and prepare a new
@@ -173,70 +174,40 @@ slip or an obstruction can still produce plausible recorded travel.
 
 ## Automatic early-impact returns
 
-An early return, including one after more than 20 mm but below the lower
-expected-distance limit, requires a successful, complete stock single-axis home and
-fresh, internally consistent trigger and halted-step evidence from that exact
-attempt. Signed travel must agree with the configured homing direction.
-The halted travel must be at least the trigger travel and satisfy all of these
-per-return limits:
+For a premature impact, take the selected axis's current coordinate after stock
+G28 and subtract its recorded signed start-to-halt displacement. Command one
+move to that target. The displacement includes movement between the threshold
+crossing and the halt; it is not just the trigger distance. If 2 mm was
+commanded before the halt, command 2 mm in the opposite direction.
 
-- Trigger travel is at most 20 mm or strictly below the lower expected-distance
-  limit.
-- Travel from trigger to halt is at most 2 mm.
-- Total halted travel is at most `min(max(20 mm, lower limit) + 2 mm,
-  expected - 2 mm)`. Thus every return stays at least 2 mm short of the nominal
-  configured midpoint-to-endstop distance.
-- The reverse target lies inside the configured axis limits.
+The return uses the completed home record from the current attempt and its
+finite recorded displacement. The current coordinate and calculated target
+must also be finite. It does not compare the return with a predicted endstop
+clearance, impose a trigger-to-halt allowance or accumulate a distance budget.
+There is no additional test of whether the carriage physically arrived.
+Ordinary firmware movement limits and errors still apply to the commanded move.
 
-The next candidate must pass the threshold checks and have at least 11 remaining
-attempts before any return or reservation. There is no separate limit of eight
-recoveries. A cumulative distance limit still applies to the entire command,
-including both the original <=20 mm returns and the longer premature returns:
-total reserved **absolute start-to-halt distance**, including post-trigger
-travel, must be no greater than `nominal_opposite_clearance - margin`, where
-`margin = max(2 mm, 10% of nominal_opposite_clearance)`.
+Before returning, the next threshold must satisfy the existing sensor headroom
+policy and at least 11 attempts must remain for a new discovery and ten checks.
+After the return's queued movement and `calibration_settle_time` wait (default
+0.25 s) complete, record the return, raise the threshold by STEP, clear the
+candidate and its measurements, and restart discovery. Early reversals retain
+their homing acceleration cap and existing return speed. They command only the
+selected axis, without changing the other XY coordinate or Z.
 
-Let `center = (position_min + position_max) / 2`. Nominal opposite clearance is
-`center - position_min` for positive homing, or `position_max - center` for
-negative homing; it is not measured physical clearance. For a nominal opposite
-clearance of `109.25 mm`, the margin is `10.925 mm` and the total distance budget
-is `98.325 mm`. The distance boundary is inclusive: exactly the limit is allowed
-if every other check passes. This is a fixed internal geometric budget, with
-no new configuration setting.
+After returning, clear only the selected axis's homed state before retrying.
+The return does not reset coordinates or accept the premature impact as the
+endstop. Zero recorded displacement needs no reverse move, but still settles
+and advances the candidate. Its triggering home has already used an attempt.
 
-Only premature-impact recovery reversals consume this distance budget. Midpoint
-returns after qualified impacts and other workflow motion are not charged;
-it does not bound total workflow travel or establish physical position.
+Cancellation, shutdown, a sensor/transport fault, a stale or missing current
+home record, or a firmware movement error aborts. A failed or interrupted return
+does not increment completed-return telemetry or advance the threshold. There
+is no same-run manual-recentering fallback after an abort.
 
-Reserve the distance and record the recovery count before issuing a return.
-A zero-distance recovery still increments the count; its triggering home has
-already used an attempt. Reservations persist across every threshold/candidate
-reset and same-command continuation, and are
-not refunded if a return is interrupted or fails. Only a new calibration
-command starts a fresh budget. A denied recovery makes no return and does not
-increase the threshold; it invalidates only the suspect axis's homed state and
-requires manual XY centering before a new command. An accepted recovery commits
-the next threshold only after its return succeeds.
-
-The **2 mm trigger-to-halt allowance**, the **2 mm minimum nominal endstop
-clearance** and the **2 mm running-spread repeatability limit** are separate
-checks. Early reversals keep their existing homing acceleration cap and
-`calibration_settle_time` wait (default 0.25 s).
-
-The reverse target is the current coordinate assigned by stock G28 minus the
-recorded signed start-to-halt displacement; the return does not reset coordinates.
-After returning it clears only the selected axis's homed state before retrying.
-It does not accept the early hit as the endstop or command the other XY axis or Z.
-Zero halted travel needs no reverse move; it still settles before retrying.
-This reverses commanded step travel, not measured physical carriage travel.
-Lost steps, slip or an obstruction can
-make the estimated starting point wrong, including across repeated retries.
-
-Any homing error, sensor/transport fault, missing or stale evidence, inconsistent
-travel, motor release, cancellation, shutdown or failed return check aborts.
-There is no automatic recovery from these faults and no manual-recentering
-fallback that continues the same run. Prepare the printer again before a new
-command after an abort.
+These are commanded steps, not encoder measurements. Skipped steps, slip or a
+blocked carriage can make the estimated starting point wrong. Completion of
+the queued move does not measure physical arrival.
 
 ## Saving and ordinary homing
 
@@ -264,16 +235,20 @@ that calibration uses its own fresh XYZ-magnitude measurement.
 restart count and current ten-check spread. Its `stationary_noise` summary
 identifies the fresh measurement, magnitude peak, initial-value source and PNG.
 The nested `recovery` object in active calibration status, the final result and
-saved model metadata reports reserved `count`/`distance_mm`, their limits and
-remaining values, plus `nominal_opposite_clearance_mm` and `margin_mm`.
-`count` remains telemetry; `count_limit` and `count_remaining` are `null` because
-there is no separate recovery-count cap. Distance limits and remaining distance
-remain numeric. Active calibration status and final results also expose
-`attempt_limit`, `attempts_remaining` and `candidate_attempts_required` (11).
-`accounting` is `reserved_start_to_halt_including_overshoot`, and
-`physical_clearance_verified` remains false. A final result also retains
-`candidate_g` and `restarts` when a recovery is denied. These counters describe
-reserved commanded travel, including a return that did not complete.
+new saved model metadata contains only completed-return telemetry:
+
+- `count`: completed commanded returns, including a zero-displacement return.
+- `last_return_mm_signed`: the last completed signed commanded return, or `null`
+  before any return completes.
+- `accounting`: `completed_commanded_returns`.
+- `physical_position_verified`: `false`.
+
+There is no accumulated distance, count/distance limit or remaining budget,
+nominal clearance or margin in this object. Old saved recovery metadata remains
+readable as historical metadata; it is not used to limit a new calibration.
+Active calibration status and final results also expose `attempt_limit`,
+`attempts_remaining` and `candidate_attempts_required` (11). A final result
+retains `candidate_g` and `restarts` if the next candidate is denied.
 
 ## Limits of this method
 
@@ -286,7 +261,7 @@ not independent proof that the intended endstop was reached. Assigning an
 endstop coordinate and returning to its midpoint assumes genuine contact;
 supervise actual travel and stop on unexpected behavior. A premature trigger
 may arise from vibration, a real obstruction or binding; the workflow does not
-automatically diagnose which occurred. The return budgets bound commanded
-recovery but do not prove that the carriage physically returned. This calibration
-validation revision was reviewed from source only; its regression sources were
+automatically diagnose which occurred. The automatic return does not verify
+that the carriage physically returned. This calibration validation revision was
+reviewed from source only; its regression sources were
 not run and no printer hardware or service was accessed.

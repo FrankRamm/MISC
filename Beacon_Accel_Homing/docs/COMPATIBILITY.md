@@ -10,8 +10,8 @@ crossing 20 mm never qualifies a candidate. To qualify, an impact beyond 20 mm
 must fit the configured midpoint-to-endstop distance within the existing
 tolerance (default 20%). A >2 mm running spread immediately raises the
 candidate and restarts discovery; passing still requires ten checks. Premature
-hits, including those beyond 20 mm but below the lower distance limit, can
-reverse signed commanded travel and retry within shared recovery budgets.
+hits, including those beyond 20 mm but below the lower distance limit, reverse
+recorded signed start-to-halt travel, then raise the threshold and retry.
 An impact beyond 20 mm above the upper limit aborts without a return. Old models/manual overrides retain the
 legacy algorithms described below. Regression sources cover both paths; neither
 commands nor step counts establish actual physical position.
@@ -496,9 +496,9 @@ are preserved unless a command overrides them for that run. Updating does not
 replace any saved model threshold. The independent default 40-attempt cap
 includes discovery and ten validation homes. Before advancing a rejected
 candidate, at least 11 attempts must remain for a new discovery and all ten
-checks. The workflow checks this before a recovery return, distance
-reservation, threshold increase or recentering. A finer grid can exhaust the
-attempt budget before reaching a working threshold; this change does not add
+checks. The workflow checks this before a recovery return, threshold increase
+or recentering. A finer grid can exhaust the attempt budget before reaching a
+working threshold; this change does not add
 automatic attempts.
 One qualifying discovery is followed by ten additional accepted validation
 homes, returning only the tested axis to center between accepted trials.
@@ -527,22 +527,21 @@ position or contact with the intended stop.
 
 An impact at or before 20 mm, or strictly below the lower limit, instead uses
 recorded signed start-to-halt travel to return only the selected axis to its
-estimated starting point if all return checks and budgets pass. After a
-successful return it advances one candidate step, clears the selected axis's
-homed state and validation window, and restarts discovery after settling. All
-premature returns share a fixed command-wide reserved-distance limit, including
-<=20 mm returns. Recovery count has no separate cap; the attempt budget still
-applies. Distance reservations survive candidate resets and are
-not refunded after an interrupted return. Qualified-impact midpoint returns
-are not included in these recovery budgets. Denial makes no return or threshold
-increase and invalidates only the suspect axis's homed state. There is no
-manual fallback within that run when return checks fail. Sensor faults, missing
-or uncertain evidence and homing errors abort; stock homing errors may release all motors.
-These bounded early reversals retain their existing homing acceleration cap
-and configured settling wait.
-See [SIMPLE_CALIBRATION.md](SIMPLE_CALIBRATION.md) for per-return and cumulative
-limits. No encoder measures the carriage position, and these checks do not
-automatically diagnose binding.
+estimated starting point. This includes travel after the trigger: 2 mm of
+recorded commanded travel to the halt produces a 2 mm reverse command. After
+the queued return and settling complete, advance one candidate step, clear the
+selected axis's homed state and validation window, and restart discovery.
+There is no accumulated-distance budget, overshoot/nominal-clearance gate or
+additional verification of physical arrival. The attempt budget and threshold
+policy still apply before a new candidate. Current-record/finite-number and
+sensor/fault/cancellation checks remain; ordinary firmware movement errors
+propagate. A failed/interrupted return does not advance the threshold or count
+as a completed return. There is no manual fallback within that run after an
+abort. Stock homing errors may release all motors. Early reversals retain
+their existing homing acceleration cap and configured settling wait.
+See [SIMPLE_CALIBRATION.md](SIMPLE_CALIBRATION.md) for the return sequence and
+current telemetry. No encoder measures carriage position, and the return does
+not automatically diagnose binding.
 
 TEST/CHARTS use the same manual preparation, with both XY axes unhomed, and
 start directly with `ACCEL_HOMING_TEST CENTERED=1` or

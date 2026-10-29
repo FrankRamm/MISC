@@ -184,7 +184,7 @@ unhomed and physically center XY by hand again.
 To defer saving, start with
 `ACCEL_HOMING_CALIBRATE AXIS=X CENTERED=1 SAVE_CONFIG=0`.
 Early-impact retries run automatically within the same calibration command.
-See the [return checks and fault limits](SIMPLE_CALIBRATION.md#automatic-early-impact-returns).
+See the [commanded return and retry sequence](SIMPLE_CALIBRATION.md#automatic-early-impact-returns).
 
 
 ## Stationary vibration measurement and final retraction
@@ -321,24 +321,23 @@ clears the window, recenters that axis and restarts discovery. Passing still
 requires ten fresh checks with spread <=2 mm.
 
 An impact at or before 20 mm, or strictly below the lower expected-distance
-limit, is premature. If the return checks and shared recovery budgets pass,
-automatically reverse the selected axis's recorded signed start-to-halt travel,
-including post-trigger travel, to its estimated starting point. After a
-successful return it advances one STEP and restarts discovery after settling;
-START_THRESHOLD/STEP cannot change mid-run. Both short and longer premature
-returns consume the same command-wide cumulative commanded-distance budget,
-which survives candidate resets. Recovery count is telemetry with no separate
-cap; qualified-impact midpoint returns are outside the distance budget. See the
-[exact limits and status fields](SIMPLE_CALIBRATION.md#automatic-early-impact-returns).
+limit, is premature. Reverse the selected axis's recorded signed start-to-halt
+displacement, including post-trigger travel. After the queued return and
+settling complete, advance one STEP and restart discovery;
+START_THRESHOLD/STEP cannot change mid-run. A 2 mm commanded displacement to the
+halt produces a 2 mm reverse command. There is no accumulated-distance budget,
+overshoot/nominal-clearance gate or additional physical-arrival check. Basic
+current-record and finite-number checks remain, and ordinary firmware movement
+errors propagate. See the [return sequence and completed-return telemetry](SIMPLE_CALIBRATION.md#automatic-early-impact-returns).
 
 The 40-attempt default budget still includes discovery and validation across
 all retries. Before another candidate, at least 11 attempts must remain for a
 fresh discovery and ten checks; this is checked before any recovery return,
-distance reservation, candidate increase or recentering. Threshold increases
-keep the selected STEP and the known-range 80% headroom policy. Sensor
-faults, a move with no impact, missing or inconsistent return evidence, and
-budget exhaustion abort without a threshold increase. An impact beyond 20 mm
-and above the upper expected-distance limit also aborts without a return,
+candidate increase or recentering. Threshold increases keep the selected STEP
+and the known-range 80% headroom policy. Sensor
+faults, a move with no impact, a missing current return record, a failed return
+and attempt-budget exhaustion abort without a threshold increase. An impact
+beyond 20 mm and above the upper expected-distance limit also aborts without a return,
 threshold increase or model write. Only the suspect axis's homed state is
 invalidated; the operator must physically center XY and prepare a new command.
 These checks guard commanded-travel plausibility, not physical contact.

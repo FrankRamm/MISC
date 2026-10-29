@@ -435,9 +435,10 @@ default origin/step are 1.0/0.25 g. A failed measurement or export aborts before
 movement. A premature impact, at or before 20 mm or below the configured
 expected-distance band, can automatically reverse the tested axis's signed
 start-to-halt travel to its estimated starting point. It settles and retries
-discovery at the next threshold step if all return checks and shared recovery
-budgets pass. No additional command is needed. Faults, no impact, uncertain
-return evidence or exhausted budgets abort.
+discovery at the next threshold step. For 2 mm of recorded commanded travel to
+the halt, it commands 2 mm back. No additional command is needed. Faults, no
+impact, a missing current home record, a failed return or an exhausted attempt
+budget abort.
 Each retry raises the current candidate by the selected step. An explicit
 `STEP` changes grid spacing without disabling noise selection.
 `START_THRESHOLD=1 STEP=0.25` forces that initial value and step while still
@@ -446,8 +447,8 @@ Use `AXIS=Y` to calibrate only Y instead.
 
 To qualify, discovery and each validation impact beyond 20 mm must fit the
 configured midpoint-to-endstop distance within `calibration_travel_tolerance`
-(default 20%). A trigger below the lower band can use the bounded recovery
-above, including after more than 20 mm. An impact beyond 20 mm above the upper
+(default 20%). A trigger below the lower band uses the same recorded-displacement
+return above, including after more than 20 mm. An impact beyond 20 mm above the upper
 band aborts without a return or threshold increase; physically center XY before
 a new command. A plausible discovery is followed by ten centered
 checks. Their commanded-travel range (`max - min`) must be **at most 2.00 mm**;
@@ -456,15 +457,15 @@ immediately and restarts discovery and all ten checks at the next threshold.
 CALIBRATE and ACCURACY midpoint returns use ordinary acceleration and the same
 explicit settling wait, default 0.25 s. Early reversals keep their existing
 cap and wait; homing speed and its acceleration cap are unchanged.
-The cumulative commanded-distance budget persists for the whole command,
-including <=20 mm recoveries; it does not include qualified midpoint returns.
-Recovery count has no separate cap. The existing attempt budget (40 by default)
-still applies, and every new candidate requires 11 remaining attempts for a
-fresh discovery and ten checks before any recovery return, reservation,
-threshold increase or recentering. These checks do not prove physical position
-or correct endstop contact, and do not automatically diagnose binding.
-See the [current calibration sequence and return
-limits](SIMPLE_CALIBRATION.md).
+There is no accumulated recovery-distance budget, overshoot/nominal-clearance
+gate or additional physical-arrival check. The existing attempt budget (40 by
+default) still applies, and every new candidate requires 11 remaining attempts
+for a fresh discovery and ten checks before any recovery return, threshold
+increase or recentering. Recovery telemetry records only the completed-return
+count and last signed commanded return, with physical position unverified.
+Ordinary firmware movement limits and errors still apply. A failed/interrupted
+return does not advance the threshold or completed-return count.
+See the [current calibration sequence and telemetry](SIMPLE_CALIBRATION.md).
 
 Calibration and saved models accept finite values from 0.5 g with no fixed
 15 g maximum or configurable calibration g ceiling; existing models at 1 g and
