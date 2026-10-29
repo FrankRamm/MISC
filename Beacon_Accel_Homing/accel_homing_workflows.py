@@ -54,7 +54,6 @@ AXES = {"x": 0, "y": 1}
 CALIBRATION_MIN_TRAVEL_MM = 20.0
 CALIBRATION_REPEATABILITY_MM = 2.0
 CALIBRATION_RETURN_OVERSHOOT_MM = 2.0
-CALIBRATION_RECOVERY_MAX_COUNT = 8
 CALIBRATION_RECOVERY_CLEARANCE_MARGIN = 0.10
 SIMPLE_CALIBRATION = "impact20_vector_v2"
 REQUIRED_SUCCESSES = 10
@@ -193,11 +192,14 @@ class AccelHomingWorkflows:
                 if axis not in self.manual_axes:
                     owner.threshold_g[axis] = threshold
         self.start_threshold = config.getfloat("calibration_start_threshold", 1.0,
-                                               minval=0.5, maxval=15.0)
+                                               minval=0.5)
         self.threshold_step = config.getfloat("calibration_step", 0.25,
                                               minval=0.1, maxval=3.0)
-        self.max_threshold = config.getfloat("calibration_max_threshold", 12.0,
-                                             minval=self.start_threshold, maxval=15.0)
+        # Consume the retired option so an existing printer.cfg remains valid.
+        # Its value never limits calibration or affects the noise context.
+        if config.get("calibration_max_threshold", None) is not None:
+            logging.warning("accel_homing: calibration_max_threshold is deprecated and ignored; "
+                            "calibration retains the sensor-range headroom policy")
         self.max_attempts = config.getint("calibration_max_attempts", 40,
                                           minval=12, maxval=100)
         self.confirm_timeout = config.getfloat("calibration_confirm_timeout", 300.0,
@@ -209,7 +211,7 @@ class AccelHomingWorkflows:
         self.calibration_settle_time = config.getfloat("calibration_settle_time", 0.25,
                                                         minval=0.0, maxval=2.0)
         if not all(math.isfinite(value) for value in (
-                self.start_threshold, self.threshold_step, self.max_threshold,
+                self.start_threshold, self.threshold_step,
                 self.confirm_timeout, self.travel_tolerance, self.reposition_speed,
                 self.calibration_settle_time)):
             raise config.error("Accelerometer homing workflow settings must be finite")
@@ -520,18 +522,31 @@ class AccelHomingWorkflows:
         nominal = Decimal(str(clearance))
         margin = max(Decimal(str(CALIBRATION_RETURN_OVERSHOOT_MM)),
                      nominal * Decimal(str(CALIBRATION_RECOVERY_CLEARANCE_MARGIN)))
-        return {"count": 0, "count_limit": CALIBRATION_RECOVERY_MAX_COUNT,
+        return {"count": 0, "count_limit": None,
                 "distance_mm": 0.0, "distance_limit_mm": float(max(Decimal("0"), nominal - margin)),
                 "nominal_opposite_clearance_mm": clearance, "margin_mm": float(margin)}
 
     @staticmethod
     def _calibration_recovery_status(session):
         budget = session["recovery"]
-        return dict(budget, count_remaining=budget["count_limit"] - budget["count"],
+        return dict(budget, count_remaining=None,
                     distance_remaining_mm=float(max(Decimal("0"),
                         Decimal(str(budget["distance_limit_mm"])) - Decimal(str(budget["distance_mm"])))),
                     accounting="reserved_start_to_halt_including_overshoot",
                     physical_clearance_verified=False)
+
+    def _calibration_attempt_status(self, session):
+        return {"attempt_limit": self.max_attempts,
+                "attempts_remaining": max(0, self.max_attempts - session["attempts"]),
+                "candidate_attempts_required": REQUIRED_SUCCESSES + 1}
+
+    def _require_calibration_candidate_attempts(self, session):
+        budget = self._calibration_attempt_status(session)
+        if budget["attempts_remaining"] < budget["candidate_attempts_required"]:
+            raise self._error(
+                "calibration attempt budget cannot complete another candidate: %d attempts remain, "
+                "%d required for fresh impact discovery and ten checks. No automatic return or "
+                "threshold increase" % (budget["attempts_remaining"], budget["candidate_attempts_required"]))
 
     def _model_context(self, axis):
         rail = self.owner.rails_by_axis[axis]
@@ -605,6 +620,7 @@ class AccelHomingWorkflows:
                     "start_threshold_g", "threshold_step_g", "quiet_range_enforced",
                     "calibration_settle_time_s")})
                 result.update(candidate_g=session["candidate"], restarts=session["restarts"],
+                              attempts=session["attempts"], **self._calibration_attempt_status(session),
                               recovery=self._calibration_recovery_status(session))
                 if session.get("stationary_noise") is not None:
                     result["stationary_noise"] = dict(session["stationary_noise"])
@@ -781,7 +797,7 @@ class AccelHomingWorkflows:
                                "threshold_step_g": self.threshold_step}
         grid = {}
         for parameter, key, minimum, maximum in (
-                ("START_THRESHOLD", "start_threshold_g", 0.5, 15.0),
+                ("START_THRESHOLD", "start_threshold_g", 0.5, None),
                 ("STEP", "threshold_step_g", 0.1, 3.0)):
             value = gcmd.get_float(parameter, defaults[key], minval=minimum, maxval=maximum)
             if not math.isfinite(value):
@@ -789,8 +805,7 @@ class AccelHomingWorkflows:
             if session is not None and value != session[key]:
                 raise gcmd.error("%s cannot change while resuming calibration" % parameter)
             grid[key] = value
-        if grid["start_threshold_g"] > self._threshold_limit():
-            raise gcmd.error("START_THRESHOLD exceeds the safe calibration threshold ceiling")
+        self._validate_calibration_threshold(grid["start_threshold_g"], "START_THRESHOLD", gcmd.error)
         grid["explicit_calibration_grid"] = any(gcmd.get(key, None) is not None
                                                 for key in ("START_THRESHOLD", "STEP"))
         grid["explicit_start_threshold"] = gcmd.get("START_THRESHOLD", None) is not None
@@ -829,11 +844,11 @@ class AccelHomingWorkflows:
         self._info("%s calibration starts at %.6g g with %.6g g steps; XYZ magnitude; "
                    "impact after >20 mm then ten centered endstop checks with spread <= 2 mm; "
                    "no quietness or acceleration-derived motion proof; returns settle for %.3f s; "
-                   "premature-return budget %d returns / %.6f mm total halted travel "
-                   "from nominal geometry" % (
+                   "premature-return budget %.6f mm total halted travel from nominal geometry; "
+                   "%d total homing attempts, with %d required before another candidate" % (
                        session["axis"].upper(), session["candidate"], session["threshold_step_g"],
-                       session["calibration_settle_time_s"], session["recovery"]["count_limit"],
-                       session["recovery"]["distance_limit_mm"]))
+                        session["calibration_settle_time_s"], session["recovery"]["distance_limit_mm"],
+                        self.max_attempts, REQUIRED_SUCCESSES + 1))
 
     def _wait_center(self, reason):
         self._restore()
@@ -855,7 +870,22 @@ class AccelHomingWorkflows:
         scale = getattr(self.owner, "full_scale_g", None)
         if scale is None and getattr(self.owner, "helper", None) is not None:
             scale = self.owner._full_scale_g(self.owner.scale)
-        return min(self.max_threshold, 0.8 * scale) if scale else self.max_threshold
+        if scale is None:
+            return None
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise self._error("known accelerometer range must be finite and positive")
+        # Match the core threshold validator's existing conservative headroom
+        # policy. This is separate from actual clipped/saturated-sample checks.
+        return 0.8 * scale
+
+    def _validate_calibration_threshold(self, value, name, error=None):
+        error = error or self._error
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0.5:
+            raise error("%s must be finite and at least 0.5 g" % name)
+        limit = self._threshold_limit()
+        if limit is not None and value > limit:
+            raise error("%s exceeds the calibration sensor-range headroom ceiling %.6g g "
+                        "(80%% of the known accelerometer range)" % (name, limit))
 
     def _clear_noise_seeds(self):
         self.noise_recommendation = self.noise_seed_context = None
@@ -866,7 +896,6 @@ class AccelHomingWorkflows:
                 "calibration_start_threshold": self.start_threshold,
                 "calibration_step": self.threshold_step,
                 "calibration_settle_time_s": self.calibration_settle_time,
-                "calibration_max_threshold": self.max_threshold,
                 "axes": {axis: self._model_context(axis)
                          for axis in AXES if axis in self.owner.rails_by_axis}}
 
@@ -1002,10 +1031,10 @@ class AccelHomingWorkflows:
         peaks = {axis: max(item["record"]["noise_peak_g"][axis]
                            for item in session["iterations"]) for axis in "xyz"}
         full_scale = session["context"]["sensor"]["full_scale_g"]
-        limit = min(self.max_threshold, 15.0, 0.8 * full_scale) if full_scale else None
+        limit = 0.8 * full_scale if full_scale else None
         starts = {axis: self._noise_candidate(peaks[axis]) for axis in AXES}
         unavailable = [axis for axis, value in starts.items()
-                       if limit is None or value > limit or value <= peaks[axis]]
+                       if limit is None or not math.isfinite(value) or value > limit or value <= peaks[axis]]
         for axis in unavailable:
             starts[axis] = None
         return {"source": "stationary_noise", "method": "initial_candidate_heuristic",
@@ -1128,7 +1157,7 @@ class AccelHomingWorkflows:
         steps = math.ceil((required_decimal - start_decimal) / step_decimal)
         candidate = float(start_decimal + steps * step_decimal)
         full_scale = session["context"]["sensor"]["full_scale_g"]
-        limit = min(self._threshold_limit(), 15.0, 0.8 * full_scale) if full_scale else None
+        limit = 0.8 * full_scale if full_scale else None
         explicit = session["explicit_start_threshold"]
         session["stationary_noise"] = {
             "run_id": session["run_id"], "iterations": NOISE_ITERATIONS,
@@ -1140,9 +1169,10 @@ class AccelHomingWorkflows:
             if limit is None:
                 raise self._error("stationary XYZ-magnitude noise cannot select a calibration start "
                                   "without a known sensor range; specify START_THRESHOLD explicitly")
-            if candidate > limit or candidate <= peak:
-                raise self._error("stationary XYZ-magnitude noise requires %.6g g, above the safe "
-                                  "calibration threshold ceiling %.6g g; calibration aborted" % (
+            if not math.isfinite(candidate) or candidate > limit or candidate <= peak:
+                raise self._error("stationary XYZ-magnitude noise requires %.6g g, outside the "
+                                  "calibration sensor-range headroom ceiling %.6g g "
+                                  "(80%% of the known range); calibration aborted" % (
                                       candidate, limit))
             session["noise_seed"] = {
                 "run_id": session["run_id"], "source": "stationary_noise",
@@ -1199,10 +1229,10 @@ class AccelHomingWorkflows:
         if session["attempts"] >= session.get("attempt_limit", self.max_attempts):
             raise self._error("maximum homing attempts reached")
         self._check_running(session)
+        if threshold is not None:
+            self._validate_calibration_threshold(threshold, "candidate")
         session["attempts"] += 1
         if threshold is not None:
-            if threshold > self._threshold_limit():
-                raise self._error("candidate exceeds the safe threshold ceiling")
             self.owner.threshold_g[axis] = threshold
         self.owner.back_off_dist = 0.0
         old_record = self.owner.last.get(axis)
@@ -1545,8 +1575,10 @@ class AccelHomingWorkflows:
         session = self.session
         self._check_running(session)
         candidate = float(Decimal(str(session["candidate"])) + Decimal(str(session["threshold_step_g"])))
-        if candidate > self._threshold_limit() or session["attempts"] >= self.max_attempts:
-            raise self._error(reason + "; calibration threshold/attempt ceiling reached")
+        if not math.isfinite(candidate) or candidate <= session["candidate"]:
+            raise self._error(reason + "; next calibration candidate must be finite and increase the threshold")
+        self._validate_calibration_threshold(candidate, "next calibration candidate")
+        self._require_calibration_candidate_attempts(session)
         if apply:
             session.update(candidate=candidate, successes=0, candidate_qualified=False,
                            candidate_attempt=None, validation_records=[], repeatability_spread_mm=None,
@@ -1554,23 +1586,24 @@ class AccelHomingWorkflows:
         return candidate
 
     def _reserve_calibration_recovery(self, session, record, evidence, distance):
-        # Reserve both independent budgets without yielding. Never refund after
+        # Reserve cumulative travel without yielding. Never refund after
         # a failed move: software cannot establish whether it physically moved.
         if evidence.get("recovery_reserved"):
             raise self._error("this calibration halt already reserved an automatic return")
+        self._require_calibration_candidate_attempts(session)
         budget = session["recovery"]
         count = budget["count"] + 1
         total = Decimal(str(budget["distance_mm"])) + Decimal(str(distance))
-        if count > budget["count_limit"] or total > Decimal(str(budget["distance_limit_mm"])):
+        if total > Decimal(str(budget["distance_limit_mm"])):
             status = self._calibration_recovery_status(session)
             raise self._error(
-                "automatic recovery budget exhausted: requested %d/%d returns and %.6f/%.6f mm "
+                "automatic recovery budget exhausted: requested return %d and %.6f/%.6f mm "
                 "cumulative halted travel; currently reserved %d returns / %.6f mm, remaining "
-                "%d returns / %.6f mm. No automatic return or threshold increase; selected-axis "
+                "%.6f mm. No automatic return or threshold increase; selected-axis "
                 "home is invalid. Manually recenter XY and start a new ACCEL_HOMING_CALIBRATE "
                 "command with CENTERED=1" % (
-                    count, budget["count_limit"], float(total), budget["distance_limit_mm"],
-                    budget["count"], budget["distance_mm"], status["count_remaining"],
+                    count, float(total), budget["distance_limit_mm"],
+                    budget["count"], budget["distance_mm"],
                     status["distance_remaining_mm"]))
         budget.update(count=count, distance_mm=float(total))
         evidence["recovery_reserved"] = record["early_return_budget_reserved"] = True
@@ -1708,7 +1741,7 @@ class AccelHomingWorkflows:
                 session["early_return_cleanup"] = True
                 try:
                     # Threshold/attempt checks must not change the candidate
-                    # if provenance or either recovery budget rejects the move.
+                    # if provenance or the cumulative distance budget rejects the move.
                     self._next_calibration_candidate(reason, apply=False)
                     self._return_early_calibration(axis, record)
                     candidate = self._next_calibration_candidate(reason)
@@ -1716,9 +1749,10 @@ class AccelHomingWorkflows:
                     self._invalidate_calibration_axis(session)
                 self._info(reason + "; reversed commanded start-to-halt travel to the estimated "
                            "starting point; restart impact discovery at %.2f g; reserved "
-                           "%d/%d returns and %.6f/%.6f mm" % (
-                               candidate, session["recovery"]["count"], session["recovery"]["count_limit"],
-                               session["recovery"]["distance_mm"], session["recovery"]["distance_limit_mm"]))
+                           "%d returns and %.6f/%.6f mm; %d attempts remain" % (
+                                candidate, session["recovery"]["count"],
+                                session["recovery"]["distance_mm"], session["recovery"]["distance_limit_mm"],
+                                self._calibration_attempt_status(session)["attempts_remaining"]))
                 continue
             if discovery:
                 session["candidate_qualified"] = True
@@ -1759,6 +1793,7 @@ class AccelHomingWorkflows:
         if not isinstance(session, dict):
             raise self._error(message)
         axis, threshold = session.get("axis"), session.get("candidate")
+        threshold_limit = self._threshold_limit()
         candidate_attempt = session.get("candidate_attempt")
         records, qualified = session.get("records"), session.get("validation_records")
         if session.get("mode") != "calibration" or session.get("state") != "running" \
@@ -1766,7 +1801,8 @@ class AccelHomingWorkflows:
                 or session.get("candidate_qualified") is not True \
                 or session.get("successes") != REQUIRED_SUCCESSES \
                 or not isinstance(threshold, (int, float)) or isinstance(threshold, bool) \
-                or not math.isfinite(threshold) or not 0.5 <= threshold <= self._threshold_limit() \
+                or not math.isfinite(threshold) or threshold < 0.5 \
+                or (threshold_limit is not None and threshold > threshold_limit) \
                 or type(candidate_attempt) is not int or candidate_attempt < 1 \
                 or type(session.get("attempts")) is not int \
                 or session.get("attempts") != candidate_attempt + REQUIRED_SUCCESSES \
@@ -2206,7 +2242,7 @@ class AccelHomingWorkflows:
                 active.update({key: session[key] for key in (
                     "start_threshold_g", "threshold_step_g", "explicit_calibration_grid", "quiet_range_enforced",
                     "calibration_settle_time_s")})
-                active["attempt_limit"] = self.max_attempts
+                active.update(self._calibration_attempt_status(session))
                 active["recovery"] = self._calibration_recovery_status(session)
                 active.update(algorithm=session.get("algorithm"), restarts=session.get("restarts", 0),
                               minimum_impact_travel_mm=CALIBRATION_MIN_TRAVEL_MM,

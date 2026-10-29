@@ -77,8 +77,9 @@ A premature impact can automatically reverse the selected axis's recorded
 start-to-halt travel to its **estimated starting point**, settle and retry
 discovery at the next threshold step. Recovery also covers impacts below the
 expected-distance band after longer commanded travel.
-Every such recovery shares a count limit and a total return-distance limit for
-the whole command. Data faults, no impact, excessive travel, uncertain return
+Retries share the command's attempt budget; premature returns also share a
+total return-distance budget. Each new candidate needs a fresh discovery and
+ten checks. Data faults, no impact, excessive travel, uncertain return
 evidence or exhausted limits abort; manually center XY before a new command.
 
 CALIBRATE and ACCURACY midpoint returns use ordinary acceleration and the same

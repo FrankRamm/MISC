@@ -1277,6 +1277,13 @@ class BeaconAccelHoming:
             raise self.printer.command_error("accel_homing: %s_threshold cannot produce a finite"
                                              " positive trigger limit at the active accelerometer scale"
                                              % axis)
+        vector_mode = self._uses_vector_detector(axis)
+        if vector_mode:
+            limit_squared = limit_raw * limit_raw
+            if not math.isfinite(limit_squared) or limit_squared <= 0.0:
+                raise self.printer.command_error(
+                    "accel_homing: %s_threshold cannot produce a finite positive squared XYZ"
+                    " trigger limit at the active accelerometer scale" % axis)
         index, map_sign = self._raw_axis(axis)
         direction = self.impact_sign[axis]
         if self.sensor_fault is not None:
@@ -1313,7 +1320,7 @@ class BeaconAccelHoming:
                           beacon_mcu.print_time_to_clock(print_time) & 0xFFFFFFFF,
                           deadline, beacon_mcu.print_time_to_clock(deadline) & 0xFFFFFFFF,
                           index, map_sign, direction, limit_raw, count_g)
-        attempt.vector_mode = self._uses_vector_detector(axis)
+        attempt.vector_mode = vector_mode
         attempt.steppers = endstop.get_steppers()
         attempt.bases = bases
         attempt.proof_noise = proof_noise
