@@ -2,6 +2,7 @@
 import struct
 import types
 import unittest
+from unittest import mock
 
 from harness import (CommandError, ConfigError, FakeConfig, FakePrinter, FakeToolhead,
                      MG_PER_COUNT_16G, make_beacon, plugin)
@@ -175,6 +176,22 @@ class ManualThresholdRangeTests(unittest.TestCase):
                 obj.session_axes["x"] = FakeRail(endstop)
                 obj.homing_active = True
                 with self.assertRaisesRegex(CommandError, "finite positive trigger limit"):
+                    obj.prepare(endstop, 10.0)
+                self.assertEqual(endstop._dispatch.started, [])
+                self.assertIsNone(obj.attempt)
+
+    def test_vector_prepare_rejects_unrepresentable_square_before_dispatch(self):
+        for threshold, scale in ((1e160, MG_PER_COUNT_16G), (.5, 1e308)):
+            with self.subTest(threshold=threshold, scale=scale):
+                obj = self.create("beacon", options={"threshold": threshold}, known_range=False)
+                obj.helper._stream_en = 1
+                obj.helper._scale = {"name": "external", "id": 1, "scale": scale}
+                obj._start_stream()
+                endstop = with_endstops(obj)["x"]
+                obj.session_axes["x"] = FakeRail(endstop)
+                obj.homing_active = True
+                with mock.patch.object(obj, "_uses_vector_detector", return_value=True), \
+                        self.assertRaisesRegex(CommandError, "finite positive squared XYZ trigger limit"):
                     obj.prepare(endstop, 10.0)
                 self.assertEqual(endstop._dispatch.started, [])
                 self.assertIsNone(obj.attempt)

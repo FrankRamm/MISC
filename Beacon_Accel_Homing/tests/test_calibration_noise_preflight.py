@@ -89,18 +89,17 @@ class CalibrationNoisePreflightTests(unittest.TestCase):
                 self.assertEqual(rig.workflow.last_result["threshold_step_g"], step)
                 self.assertEqual(rig.workflow.start_threshold, configured)
 
-    def test_unknown_range_and_over_ceiling_auto_seed_abort_without_clamp(self):
-        for kind, explicit in itertools.product(("unknown-range", "over-ceiling"), (False, True)):
+    def test_unknown_range_and_over_headroom_auto_seed_abort_without_clamp(self):
+        for kind, explicit in itertools.product(("unknown-range", "over-headroom"), (False, True)):
             with self.subTest(kind=kind, explicit=explicit), tempfile.TemporaryDirectory() as temp:
-                rig = NoiseRig({"charts_directory": temp, "calibration_max_threshold": 1.},
+                rig = NoiseRig({"charts_directory": temp},
                                amplitudes=(2., 2., 0.))
-                if kind == "unknown-range":
-                    rig.owner.full_scale_g = None
+                rig.owner.full_scale_g = None if kind == "unknown-range" else 2.5
                 if explicit:
                     rig.calibrate(save=0, START_THRESHOLD=.5)
                     self.assertEqual(rig.home_calls[0]["threshold"], .5)
                 else:
-                    with self.assertRaisesRegex(CommandError, "known sensor range|safe.*ceiling"):
+                    with self.assertRaisesRegex(CommandError, "known sensor range|sensor-range headroom"):
                         rig.calibrate(save=0)
                     self.assert_no_motion_or_config(rig)
                     self.assertEqual(rig.workflow.last_result["purpose"], "calibration_preflight")

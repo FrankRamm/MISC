@@ -139,21 +139,19 @@ class MidtravelRecoveryTests(unittest.TestCase):
                     self.assertEqual(rig.workflow.last_result["recovery"]["distance_remaining_mm"], 0.)
                 self.assertEqual(rig.workflow.last_result["recovery"]["distance_limit_mm"], 90.)
 
-    def test_eighth_zero_halt_reserves_count_and_ninth_aborts_without_increase(self):
-        rig = Rig({"calibration_max_attempts": 100})
-        rig.home_results.extend([{"travel_mm": 0.}] * 9)
-        with self.assertRaisesRegex(CommandError, "recovery budget exhausted.*9/8 returns"):
-            rig.calibrate(save=0)
-        self.assertEqual([call["threshold"] for call in rig.home_calls], [1. + .25 * i for i in range(9)])
-        self.assertEqual(rig.toolhead.moves, [])
-        self.assertEqual(rig.workflow.last_result["candidate_g"], 3.)
-        self.assertEqual(rig.workflow.last_result["restarts"], 8)
+    def test_twelve_zero_halts_have_no_independent_return_count_limit(self):
+        rig = Rig()
+        rig.home_results.extend([{"travel_mm": 0.}] * 12 + [{}] * 11)
+        rig.calibrate(save=0)
+        self.assertEqual([call["threshold"] for call in rig.home_calls],
+                         [1. + .25 * i for i in range(12)] + [4.] * 11)
+        self.assertEqual(rig.workflow.last_result["threshold_g"], 4.)
+        self.assertEqual(rig.workflow.last_result["restarts"], 12)
         budget = rig.workflow.last_result["recovery"]
-        self.assertEqual(budget["count"], 8)
-        self.assertEqual(budget["count_limit"], 8)
-        self.assertEqual(budget["count_remaining"], 0)
+        self.assertEqual(budget["count"], 12)
+        self.assertIsNone(budget["count_limit"])
+        self.assertIsNone(budget["count_remaining"])
         self.assertEqual(budget["distance_mm"], 0.)
-        self.assertEqual(rig.configfile.saved, {})
         self.assertEqual(rig.disabled, [])
 
     def test_legacy_and_midtravel_reservations_survive_spread_candidate_reset(self):
@@ -189,7 +187,8 @@ class MidtravelRecoveryTests(unittest.TestCase):
                 self.assertEqual(budget["nominal_opposite_clearance_mm"], clearance)
                 self.assertEqual(budget["margin_mm"], margin)
                 self.assertEqual(budget["distance_limit_mm"], limit)
-                self.assertEqual(budget["count_remaining"], 8)
+                self.assertIsNone(budget["count_limit"])
+                self.assertIsNone(budget["count_remaining"])
                 self.assertFalse(budget["physical_clearance_verified"])
                 self.assertEqual(rig.toolhead.moves, [])
 
@@ -219,10 +218,12 @@ class MidtravelRecoveryTests(unittest.TestCase):
         self.assertEqual(session["run_id"], run_id)
         self.assertEqual(rig.configfile.saved, {})
 
-    def test_threshold_attempt_and_overshoot_rejections_leave_candidate_and_budgets_unchanged(self):
-        for fault in ("threshold", "attempts", "overshoot"):
+    def test_sensor_headroom_attempt_and_overshoot_rejections_leave_candidate_and_budgets_unchanged(self):
+        for fault in ("sensor-headroom", "attempts", "overshoot"):
             with self.subTest(fault=fault):
-                rig = Rig({"calibration_max_threshold": 2.25} if fault == "threshold" else {})
+                rig = Rig()
+                if fault == "sensor-headroom":
+                    rig.owner.full_scale_g = 2.8125
                 if fault == "attempts":
                     rig.workflow.max_attempts = 1
                 rig.home_results.append({"travel_mm": 51.175,

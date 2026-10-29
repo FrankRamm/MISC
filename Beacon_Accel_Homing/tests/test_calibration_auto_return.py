@@ -113,9 +113,11 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                 self.assertEqual(rig.disabled, [])
 
     def test_recovery_envelope_and_budgets_are_checked_before_any_reverse(self):
-        for kind in ("overshoot", "short-axis", "out-of-range", "threshold", "attempts"):
+        for kind in ("overshoot", "short-axis", "out-of-range", "sensor-headroom", "attempts"):
             with self.subTest(kind=kind):
-                rig = Rig({"calibration_max_threshold": 1.} if kind == "threshold" else {})
+                rig = Rig()
+                if kind == "sensor-headroom":
+                    rig.owner.full_scale_g = 1.25
                 if kind == "attempts":
                     rig.workflow.max_attempts = 1
                 if kind == "short-axis":

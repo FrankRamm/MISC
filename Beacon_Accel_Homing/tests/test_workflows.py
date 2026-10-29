@@ -1326,16 +1326,15 @@ class CalibrationTests(unittest.TestCase):
             self.assertEqual(rig.owner.threshold_g["x"], 8.0)
             self.assertEqual(rig.toolhead.kin.get_status(0)["homed_axes"], "z")
 
-    def test_threshold_ceiling_and_attempt_ceiling_abort(self):
-        for ceiling in ("threshold", "sensor_scale", "attempts"):
-            rig = Rig({"calibration_start_threshold": 0.5, "calibration_max_threshold": 0.5}
-                      if ceiling == "threshold" else {})
+    def test_sensor_headroom_and_attempt_budget_abort(self):
+        for ceiling in ("sensor_scale", "attempts"):
+            rig = Rig()
             if ceiling == "sensor_scale":
                 rig.owner.full_scale_g = 0.625
             if ceiling == "attempts":
                 rig.workflow.max_attempts = 1
             rig.home_results.append({"travel_mm": 2.0})
-            with self.assertRaisesRegex(CommandError, "ceiling|maximum"):
+            with self.assertRaisesRegex(CommandError, "headroom|maximum|attempt budget"):
                 rig.calibrate()
             self.assertIsNone(rig.workflow.session)
             self.assertEqual(rig.toolhead.moves, [])
@@ -1374,7 +1373,7 @@ class CalibrationTests(unittest.TestCase):
                 rig.calibrate(save=0)
                 self.assertEqual([call["threshold"] for call in rig.home_calls],
                                  [threshold] * 11)
-        for threshold in (0.499, 0.0, -1.0, 15.1,
+        for threshold in (0.499, 0.0, -1.0,
                           float("nan"), float("inf"), float("-inf")):
             with self.subTest(threshold=threshold), self.assertRaises(ConfigError):
                 Rig({"calibration_start_threshold": threshold})
@@ -1686,7 +1685,7 @@ class CalibrationGridTests(unittest.TestCase):
                 self.assertFalse(metadata["calibration_quiet_range_enforced"])
 
     def test_invalid_grid_is_rejected_before_preflight_or_workflow_effects(self):
-        bad = [{"START_THRESHOLD": value} for value in (.499, 0, -1, 12.1, 16, "nan", "inf", "bad")]
+        bad = [{"START_THRESHOLD": value} for value in (.499, 0, -1, 12.800001, 16, "nan", "inf", "bad")]
         bad += [{"STEP": value} for value in (.099, 0, -1, 3.01, "nan", "inf", "bad")]
         for parameters in bad:
             with self.subTest(parameters=parameters):
@@ -2063,7 +2062,7 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(rig.effects(), before)
 
     def test_nonfinite_workflow_configuration_is_rejected(self):
-        for name in ("calibration_start_threshold", "calibration_step", "calibration_max_threshold",
+        for name in ("calibration_start_threshold", "calibration_step",
                      "calibration_confirm_timeout", "calibration_travel_tolerance",
                      "workflow_reposition_speed"):
             with self.assertRaises(ConfigError):
@@ -2293,7 +2292,7 @@ class ModelTests(unittest.TestCase):
 
     def test_saved_models_keep_accepting_previous_thresholds(self):
         for axis in "xy":
-            for threshold in (1.0, 1.5, 2.0, 2.5, 4.0, 15.0):
+            for threshold in (1.0, 1.5, 2.0, 2.5, 4.0, 15.0, 15.1, 20.0, 1e308):
                 with self.subTest(axis=axis, threshold=threshold):
                     model = AccelHomingModel(Config(None, {
                         axis + "_threshold": threshold, axis + "_successes": 10},
@@ -2307,7 +2306,7 @@ class ModelTests(unittest.TestCase):
                        {axis + "_metadata": '{"invalid": NaN}'},
                        {axis + "_metadata": '{"nested": [1e999]}'}]
             invalid.extend({axis + "_threshold": threshold, axis + "_successes": 10}
-                           for threshold in (0.499, 0.0, -1.0, 15.1,
+                           for threshold in (0.499, 0.0, -1.0,
                                              float("nan"), float("inf"), float("-inf")))
             for options in invalid:
                 with self.subTest(axis=axis, options=options), self.assertRaises(ConfigError):

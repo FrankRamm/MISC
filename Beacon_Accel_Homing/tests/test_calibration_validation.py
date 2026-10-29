@@ -38,14 +38,14 @@ class ImmediateValidationTests(unittest.TestCase):
                 self.assertEqual(rig.workflow.last_result["restarts"], 1)
                 self.assertTrue(any("after %d checks" % failed_check in line for line in rig.output))
 
-    def test_immediate_rejection_respects_both_budgets_before_return(self):
-        for ceiling in ("threshold", "attempts"):
+    def test_immediate_rejection_respects_sensor_headroom_and_attempts_before_return(self):
+        for ceiling in ("sensor-headroom", "attempts"):
             with self.subTest(ceiling=ceiling):
-                rig = Rig({"calibration_max_threshold": 1.} if ceiling == "threshold" else {})
-                if ceiling == "attempts":
-                    rig.workflow.max_attempts = 3
+                rig = Rig({"calibration_max_attempts": 12} if ceiling == "attempts" else {})
+                if ceiling == "sensor-headroom":
+                    rig.owner.full_scale_g = 1.25
                 rig.home_results.extend([{}, {"travel_mm": 150.}, {"travel_mm": 152.0001}])
-                with self.assertRaisesRegex(CommandError, "ceiling"):
+                with self.assertRaisesRegex(CommandError, "headroom|attempt budget"):
                     rig.calibrate(save=0)
                 self.assertEqual(len(rig.home_calls), 3)
                 self.assertEqual(len(rig.toolhead.moves), 2)

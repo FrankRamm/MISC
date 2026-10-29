@@ -534,17 +534,17 @@ class NoiseWorkflowTests(unittest.TestCase):
             self.assertEqual(rig.home_calls[0]["threshold"], 2.5)
             self.assertEqual(rig.workflow.noise_seeds, {})
         with tempfile.TemporaryDirectory() as temp:
-            rig = NoiseRig({"charts_directory": temp, "calibration_max_threshold": 2.0})
+            rig = NoiseRig({"charts_directory": temp})
+            rig.owner.full_scale_g = 2.5
             rig.workflow.cmd_NOISE(GCmd())
             self.assertEqual(rig.workflow.last_result["result"], "complete")
             self.assertIsNone(rig.workflow.last_result["recommendation"]["start_threshold_g"]["x"])
             self.assertEqual(rig.workflow.noise_seeds, {"y": 1.0})
         for unknown_range in (False, True):
             with self.subTest(unknown_range=unknown_range), tempfile.TemporaryDirectory() as temp:
-                rig = NoiseRig({"charts_directory": temp, "calibration_max_threshold": 2.0},
+                rig = NoiseRig({"charts_directory": temp},
                                amplitudes=(2.0, 2.0, 0.02))
-                if unknown_range:
-                    rig.owner.full_scale_g = None
+                rig.owner.full_scale_g = None if unknown_range else 2.5
                 rig.workflow.cmd_NOISE(GCmd())
                 self.assertEqual(rig.workflow.last_result["result"], "complete")
                 self.assertEqual(rig.workflow.last_result["recommendation"]["start_threshold_g"],
