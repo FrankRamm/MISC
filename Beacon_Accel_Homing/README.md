@@ -1,3 +1,10 @@
+> **Accelerometer Homing has moved.** The standalone repository is
+> [FrankRamm/accel_homing](https://github.com/FrankRamm/accel_homing).
+> For a new installation, use its README. For an existing MISC installation,
+> follow the [migration guide](https://github.com/FrankRamm/accel_homing/blob/main/docs/INSTALLATION.md#migrate-from-the-misc-plugin)
+> before switching sources. The instructions below are retained for this
+> historical MISC version.
+
 # Accelerometer Homing
 
 Use a configured accelerometer as an X/Y impact endstop in Klipper or Kalico.
