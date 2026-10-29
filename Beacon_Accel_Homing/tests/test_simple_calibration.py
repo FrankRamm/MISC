@@ -207,7 +207,7 @@ class ImpactDiscoveryTests(unittest.TestCase):
 
     def test_twenty_mm_rule_and_geometry_both_use_unrounded_commanded_travel(self):
         for travel, quality in ((0., "early"), (19.9999, "early"), (20., "early"),
-                                (20.0001, "implausible"), (106.188, "implausible"),
+                                (20.0001, "early"), (106.188, "early"),
                                 (120., "good"), (180., "good"), (180.0001, "implausible")):
             for phase in ("discovery", "validation"):
                 rig = Rig()

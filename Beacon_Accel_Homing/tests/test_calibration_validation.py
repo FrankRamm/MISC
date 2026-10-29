@@ -65,7 +65,7 @@ class CalibrationTravelPlausibilityTests(unittest.TestCase):
                 expected = workflow._geometry(axis)[1]
                 low, high = expected * (1. - tolerance), expected * (1. + tolerance)
                 for travel, quality in ((low, "good"), (high, "good"),
-                                        (low - .0001, "implausible"), (high + .0001, "implausible")):
+                                        (low - .0001, "early"), (high + .0001, "implausible")):
                     record = {"result": "impact", "impact_metric": "xyz_magnitude",
                               "travel_mm": expected, "travel_mm_exact": travel, "workflow_phase": phase}
                     self.assertEqual(workflow._quality(axis, record)[0], quality)
@@ -82,10 +82,10 @@ class CalibrationTravelPlausibilityTests(unittest.TestCase):
             self.assertEqual(workflow._quality("x", record)[0], quality)
 
     def test_implausible_hits_abort_without_motion_retry_or_releasing_other_axes(self):
-        for axis, positive, cartesian, validation, fraction in itertools.product(
-                "xy", (False, True), (False, True), (False, True), (.5, 1.3)):
+        for axis, positive, cartesian, validation in itertools.product(
+                "xy", (False, True), (False, True), (False, True)):
             with self.subTest(axis=axis, positive=positive, cartesian=cartesian,
-                              validation=validation, fraction=fraction):
+                              validation=validation):
                 rig = machine(axis, positive, cartesian)
                 other = 1 - "xy".index(axis)
                 other_limits, z_limits = (5., 195.), (20., 480.)
@@ -99,7 +99,7 @@ class CalibrationTravelPlausibilityTests(unittest.TestCase):
                 rig.on_home = preserve_other_home
                 prefix = [{}, {}] if validation else []
                 expected = rig.workflow._geometry(axis)[1]
-                rig.home_results.extend(prefix + [{"travel_mm": expected * fraction}])
+                rig.home_results.extend(prefix + [{"travel_mm": expected * 1.3}])
                 with mock.patch.object(rig.workflow, "_return_early_calibration") as reverse, \
                         self.assertRaisesRegex(CommandError, "Manually recenter XY.*new ACCEL_HOMING_CALIBRATE"):
                     rig.calibrate(axis.upper(), save=0)
@@ -124,7 +124,7 @@ class CalibrationTravelPlausibilityTests(unittest.TestCase):
                 other_limits, z_limits = (5., 195.), (20., 480.)
                 rig.toolhead.kin.limits[2] = z_limits
                 rig.on_home = lambda axis: rig.toolhead.kin.limits.__setitem__(1, other_limits)
-                rig.home_results.append({"travel_mm": 60.})
+                rig.home_results.append({"travel_mm": 196.})
                 stop_capture, end_session, wait = (rig.owner.stop_capture, rig.owner._end_session,
                                                    rig.toolhead.wait_moves)
                 injected = [False]

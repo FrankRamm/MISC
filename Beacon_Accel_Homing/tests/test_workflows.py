@@ -616,7 +616,8 @@ class Rig:
         record.update(result)
         value = record.get("travel_mm_exact", record.get("travel_mm"))
         if (self.workflow.session.get("mode") == "calibration"
-                and type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 20):
+                and type(value) in (int, float) and math.isfinite(value) and value >= 0
+                and (value <= 20 or value < expected * (1. - self.workflow.travel_tolerance))):
             record.setdefault("travel_mm_exact", value)
         sign = 1.0 if self.owner.rails_by_axis[axis].info.positive_dir else -1.0
         record.setdefault("trigger_travel_mm_signed", (None if type(value) not in (int, float) else

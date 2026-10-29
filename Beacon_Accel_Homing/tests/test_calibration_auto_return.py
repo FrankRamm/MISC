@@ -144,10 +144,10 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
             "missing": lambda r, a, rec: r.workflow.session.pop("early_halt"),
             "changed-delta": lambda r, a, rec: rec.update(halt_travel_mm_signed=-9.),
         }
-        for label, change in changes.items():
-            with self.subTest(label=label):
+        for travel, (label, change) in itertools.product((8., 51.175), changes.items()):
+            with self.subTest(travel=travel, label=label):
                 rig = Rig()
-                rig.home_results.append({"travel_mm": 8.})
+                rig.home_results.append({"travel_mm": travel})
                 with intercept_return(rig, change), self.assertRaises(CommandError):
                     rig.calibrate(save=0)
                 self.assertEqual(rig.toolhead.moves, [])
@@ -156,12 +156,16 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                 self.assertEqual(rig.disabled, [])
                 self.assertTrue(rig.lines["stepper_y"].enabled)
                 self.assertTrue(rig.lines["stepper_z"].enabled)
+                self.assertEqual(rig.workflow.last_result["candidate_g"], 1.)
+                self.assertEqual(rig.workflow.last_result["restarts"], 0)
+                self.assertEqual(rig.workflow.last_result["recovery"]["count"], 0)
 
     def test_incomplete_corexy_stepper_evidence_and_mismatched_capture_abort(self):
-        for kind in ("missing-stepper", "capture-identity", "capture-fault", "capture-error", "capture-metric"):
-            with self.subTest(kind=kind):
+        for travel, kind in itertools.product((8., 51.175), (
+                "missing-stepper", "capture-identity", "capture-fault", "capture-error", "capture-metric")):
+            with self.subTest(travel=travel, kind=kind):
                 rig = Rig()
-                rig.home_results.append({"travel_mm": 8.})
+                rig.home_results.append({"travel_mm": travel})
                 note, capture = rig.workflow.note_calibration_halt, rig.owner.stop_capture
 
                 def noted(record, positions):
@@ -183,13 +187,16 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                 self.assertEqual(rig.toolhead.moves, [])
                 self.assertEqual(rig.disabled, [])
                 self.assertEqual(rig.toolhead.kin.get_status(0)["homed_axes"], "z")
+                self.assertEqual(rig.workflow.last_result["candidate_g"], 1.)
+                self.assertEqual(rig.workflow.last_result["restarts"], 0)
+                self.assertEqual(rig.workflow.last_result["recovery"]["count"], 0)
 
     def test_interruptions_at_each_yield_prevent_any_later_motion(self):
-        for stage, fault in itertools.product(("cap", "move", "wait", "dwell", "restore"),
-                                              ("cancel", "shutdown", "disconnect", "motor-off")):
-            with self.subTest(stage=stage, fault=fault):
+        for travel, stage, fault in itertools.product((8., 51.175), ("cap", "move", "wait", "dwell", "restore"),
+                                                      ("cancel", "shutdown", "disconnect", "motor-off")):
+            with self.subTest(travel=travel, stage=stage, fault=fault):
                 rig = Rig()
-                rig.home_results.append({"travel_mm": 8.})
+                rig.home_results.append({"travel_mm": travel})
                 obj, method = {"cap": (rig.owner, "_limit_accel"), "move": (rig.toolhead, "manual_move"),
                                "wait": (rig.toolhead, "wait_moves"), "dwell": (rig.toolhead, "dwell"),
                                "restore": (rig.owner, "_restore_accel")}[stage]
@@ -220,6 +227,10 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                 self.assertEqual(rig.configfile.saved, {})
                 self.assertEqual(rig.toolhead.kin.get_status(0)["homed_axes"], "z")
                 self.assertEqual(rig.disabled, [])
+                self.assertEqual(rig.workflow.last_result["candidate_g"], 1.)
+                self.assertEqual(rig.workflow.last_result["restarts"], 0)
+                self.assertEqual(rig.workflow.last_result["recovery"]["count"], 1)
+                self.assertEqual(rig.workflow.last_result["recovery"]["distance_mm"], travel)
 
     def test_failed_return_and_stock_homing_exception_never_retry(self):
         for kind in ("move-error", "halt-count-not-restored", "stock-error"):
