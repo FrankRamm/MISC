@@ -13,7 +13,7 @@ from test_workflows import GCmd, Rig, workflow_module
 
 
 class CalibrationRecoveryLimitTests(unittest.TestCase):
-    def test_twelve_measured_returns_reach_four_g_within_default_attempt_and_distance_budgets(self):
+    def test_twelve_measured_returns_reach_four_g_within_default_attempt_budget(self):
         for axis, positive, cartesian in itertools.product("xy", (False, True), (False, True)):
             with self.subTest(axis=axis, positive=positive, cartesian=cartesian):
                 rig = machine(axis, positive, cartesian)
@@ -29,11 +29,9 @@ class CalibrationRecoveryLimitTests(unittest.TestCase):
                 self.assertEqual(result["attempt_limit"], 40)
                 self.assertEqual(result["attempts_remaining"], 17)
                 self.assertEqual(result["candidate_attempts_required"], 11)
-                self.assertEqual(result["recovery"]["count"], 12)
-                self.assertIsNone(result["recovery"]["count_limit"])
-                self.assertIsNone(result["recovery"]["count_remaining"])
-                self.assertEqual(result["recovery"]["distance_mm"], 48.)
-                self.assertGreaterEqual(result["recovery"]["distance_remaining_mm"], 0.)
+                self.assertEqual(result["recovery"], {
+                    "count": 12, "last_return_mm_signed": -4. if positive else 4.,
+                    "accounting": "completed_commanded_returns", "physical_position_verified": False})
                 self.assertFalse(rig.home_calls[12]["candidate_qualified"])
                 self.assertEqual(rig.home_calls[12]["successes"], 0)
                 json.dumps(result, allow_nan=False)
@@ -45,21 +43,18 @@ class CalibrationRecoveryLimitTests(unittest.TestCase):
         workflow = rig.workflow
         workflow._begin(GCmd(SAVE_CONFIG=0), "calibration", "y")
         session = workflow.session
-        # Reproduce the reported cumulative state. The individual previous
-        # halted distances are unknown and are deliberately not reconstructed.
+        # Reproduce the reported previous-return count without accumulating
+        # or reconstructing the individual previous halted distances.
         session.update(state="running", candidate=3., attempts=8, restarts=8)
-        session["recovery"].update(count=8, distance_mm=39.487500000000004)
-        before = workflow.get_status(0)["active"]
-        self.assertEqual(before["recovery"]["distance_limit_mm"], 98.325)
-        self.assertAlmostEqual(before["recovery"]["distance_remaining_mm"], 58.8375)
-        # Trigger travel and start-to-halt accounting are separate measurements.
+        session["recovery"]["count"] = 8
+        # Trigger travel and the signed start-to-halt displacement are distinct.
         rig.home_results.append({"travel_mm": 13.062, "halt_travel_mm_signed": -13.83125})
         record, _capture = workflow._home("y", 3.)
         self.assertEqual(workflow._next_calibration_candidate("early impact", apply=False), 3.25)
         workflow._return_early_calibration("y", record)
         self.assertEqual(session["candidate"], 3.)
         self.assertEqual(session["recovery"]["count"], 9)
-        self.assertAlmostEqual(session["recovery"]["distance_mm"], 53.31875)
+        self.assertEqual(session["recovery"]["last_return_mm_signed"], 13.83125)
         self.assertEqual(len(rig.toolhead.moves), 1)
         workflow._invalidate_calibration_axis(session)
         self.assertEqual(workflow._next_calibration_candidate("early impact"), 3.25)
@@ -88,7 +83,7 @@ class CalibrationRecoveryLimitTests(unittest.TestCase):
                 self.assertEqual(result["candidate_g"], 1.25)
                 self.assertEqual(result["restarts"], 1)
                 self.assertEqual(result["recovery"]["count"], 1)
-                self.assertEqual(result["recovery"]["distance_mm"], 4.)
+                self.assertEqual(result["recovery"]["last_return_mm_signed"], 4.)
                 self.assertEqual(result["candidate_attempts_required"], 11)
 
     def test_default_budget_can_finish_after_twenty_nine_zero_returns_and_blocks_thirtieth_return(self):
@@ -108,7 +103,7 @@ class CalibrationRecoveryLimitTests(unittest.TestCase):
                     self.assertEqual(rig.workflow.last_result["candidate_g"], 8.25)
                     self.assertEqual(rig.configfile.saved, {})
                 self.assertEqual(rig.workflow.last_result["recovery"]["count"], 29)
-                self.assertEqual(rig.workflow.last_result["recovery"]["distance_mm"], 0.)
+                self.assertEqual(rig.workflow.last_result["recovery"]["last_return_mm_signed"], 0.)
 
 
 class CalibrationThresholdLimitTests(unittest.TestCase):

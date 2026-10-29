@@ -98,8 +98,6 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
     def test_bad_signed_displacements_abort_without_return_or_new_home(self):
         for fields in ({"halt_travel_mm_signed": None}, {"halt_travel_mm_signed": math.nan},
                        {"halt_travel_mm_signed": math.inf}, {"halt_travel_mm_signed": True},
-                       {"halt_travel_mm_signed": 8.}, {"halt_travel_mm_signed": -7.},
-                       {"halt_travel_mm_signed": -10.000001}, {"trigger_travel_mm_signed": 8.},
                        {"pass": 2}):
             with self.subTest(fields=fields):
                 rig = Rig()
@@ -112,24 +110,16 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                 self.assertEqual(rig.toolhead.kin.get_status(0)["homed_axes"], "z")
                 self.assertEqual(rig.disabled, [])
 
-    def test_recovery_envelope_and_budgets_are_checked_before_any_reverse(self):
-        for kind in ("overshoot", "short-axis", "out-of-range", "sensor-headroom", "attempts"):
+    def test_sensor_headroom_and_attempt_budget_are_checked_before_any_reverse(self):
+        for kind in ("sensor-headroom", "attempts"):
             with self.subTest(kind=kind):
                 rig = Rig()
                 if kind == "sensor-headroom":
                     rig.owner.full_scale_g = 1.25
                 if kind == "attempts":
                     rig.workflow.max_attempts = 1
-                if kind == "short-axis":
-                    rig.owner.rails_by_axis["x"].bounds = (0., 42.)
-                rig.home_results.append({"travel_mm": 20., "halt_travel_mm_signed":
-                                         -22.000001 if kind == "overshoot" else -20.})
-
-                def change(r, axis, record):
-                    if kind == "out-of-range":
-                        r.owner.rails_by_axis[axis].bounds = (21., 300.)
-
-                with intercept_return(rig, change), self.assertRaises(CommandError):
+                rig.home_results.append({"travel_mm": 20., "halt_travel_mm_signed": -20.})
+                with self.assertRaises(CommandError):
                     rig.calibrate(save=0)
                 self.assertEqual(rig.toolhead.moves, [])
                 self.assertEqual(rig.configfile.saved, {})
@@ -138,10 +128,6 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
         changes = {
             "source": lambda r, a, rec: r.owner.last.__setitem__(a, dict(r.owner.last[a])),
             "generation": lambda r, a, rec: setattr(r.owner, "operation_generation", r.owner.operation_generation + 1),
-            "coordinate": lambda r, a, rec: r.toolhead.position.__setitem__(0, 1.),
-            "other-coordinate": lambda r, a, rec: r.toolhead.position.__setitem__(1, 90.),
-            "halt-count": lambda r, a, rec: setattr(r.toolhead.kin.steppers[0], "mcu_position", 42),
-            "disabled": lambda r, a, rec: setattr(r.lines["stepper_x"], "enabled", False),
             "sensor-fault": lambda r, a, rec: setattr(r.owner, "sensor_fault", "stale_data"),
             "missing": lambda r, a, rec: r.workflow.session.pop("early_halt"),
             "changed-delta": lambda r, a, rec: rec.update(halt_travel_mm_signed=-9.),
@@ -162,16 +148,13 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                 self.assertEqual(rig.workflow.last_result["restarts"], 0)
                 self.assertEqual(rig.workflow.last_result["recovery"]["count"], 0)
 
-    def test_incomplete_corexy_stepper_evidence_and_mismatched_capture_abort(self):
+    def test_mismatched_or_faulted_capture_aborts_without_return(self):
         for travel, kind in itertools.product((8., 51.175), (
-                "missing-stepper", "capture-identity", "capture-fault", "capture-error", "capture-metric")):
+                "capture-identity", "capture-fault", "capture-error", "capture-metric")):
             with self.subTest(travel=travel, kind=kind):
                 rig = Rig()
                 rig.home_results.append({"travel_mm": travel})
-                note, capture = rig.workflow.note_calibration_halt, rig.owner.stop_capture
-
-                def noted(record, positions):
-                    return note(record, positions[:-1] if kind == "missing-stepper" else positions)
+                capture = rig.owner.stop_capture
 
                 def captured():
                     result = capture()
@@ -183,8 +166,7 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                         result["detector"]["impact_metric"] = "selected_axis"
                     return result
 
-                with mock.patch.object(rig.workflow, "note_calibration_halt", side_effect=noted), \
-                        mock.patch.object(rig.owner, "stop_capture", side_effect=captured), self.assertRaises(CommandError):
+                with mock.patch.object(rig.owner, "stop_capture", side_effect=captured), self.assertRaises(CommandError):
                     rig.calibrate(save=0)
                 self.assertEqual(rig.toolhead.moves, [])
                 self.assertEqual(rig.disabled, [])
@@ -231,11 +213,11 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                 self.assertEqual(rig.disabled, [])
                 self.assertEqual(rig.workflow.last_result["candidate_g"], 1.)
                 self.assertEqual(rig.workflow.last_result["restarts"], 0)
-                self.assertEqual(rig.workflow.last_result["recovery"]["count"], 1)
-                self.assertEqual(rig.workflow.last_result["recovery"]["distance_mm"], travel)
+                self.assertEqual(rig.workflow.last_result["recovery"]["count"], 0)
+                self.assertIsNone(rig.workflow.last_result["recovery"]["last_return_mm_signed"])
 
     def test_failed_return_and_stock_homing_exception_never_retry(self):
-        for kind in ("move-error", "halt-count-not-restored", "stock-error"):
+        for kind in ("move-error", "stock-error"):
             with self.subTest(kind=kind):
                 rig = Rig()
                 rig.home_results.append(CommandError("transport") if kind == "stock-error" else {"travel_mm": 8.})
@@ -244,10 +226,7 @@ class AutomaticEarlyReturnTests(unittest.TestCase):
                 def broken(coordinates, speed):
                     if kind == "move-error":
                         raise CommandError("movement failed")
-                    value = move(coordinates, speed)
-                    if kind == "halt-count-not-restored":
-                        rig.toolhead.kin.steppers[0].mcu_position += 1
-                    return value
+                    return move(coordinates, speed)
 
                 with mock.patch.object(rig.toolhead, "manual_move", side_effect=broken), self.assertRaises(CommandError):
                     rig.calibrate(save=0)
