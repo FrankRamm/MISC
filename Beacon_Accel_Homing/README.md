@@ -135,6 +135,15 @@ ACCURACY removes its temporary per-home PNGs after saving the final summaries,
 and on abort/cancel. Chart filenames use local time, for example
 `Accel Homing Accuracy X - 2026-10-27 23:59:42.png`.
 
+An early ACCURACY trigger with complete current halt/capture evidence reverses
+its recorded commanded travel to the confirmed starting point. After saving the
+partial accuracy PNG and removing temporary captures, the command automatically
+calibrates the failing axis, starting at the threshold used by ACCURACY plus
+**0.25 g**. Normal noise checks, candidate steps and ten validation homes still
+apply. Successful calibration calls `SAVE_CONFIG`; after restart, manually
+prepare XY again and rerun the ACCURACY command printed in the console. A lost
+center reference, sensor fault, cancellation or invalid threshold stops recovery.
+
 ## Uninstall
 
 Run in the same host shell while idle:

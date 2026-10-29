@@ -733,11 +733,12 @@ with 2–50 measured homes per axis and a default of ten. Each axis first needs
 a separate geometry-qualified discovery home from the manually confirmed
 center. That home is excluded from the measured statistics. Qualified homes
 authorize the following return to center; the final X return occurs before Y
-discovery. Suspect geometry, missing motion, stale or invalid captures and
-sensor faults stop the run without retries, threshold changes or another
-automatic return. The maximum XY case makes 102 synthetic homes independently
-of the calibration attempt limit. The workflow never stages a model, calls
-SAVE_CONFIG, changes configured homing speed or requests a Z move.
+discovery. Missing motion, stale or invalid captures and sensor faults stop the
+run. Early triggers with complete current halt/capture and center-reference
+evidence can hand off to one standard calibration, as described below. The
+maximum successful XY accuracy case makes 102 synthetic homes independently of
+the calibration attempt limit. Measurements keep fixed thresholds and configured
+homing speeds; no workflow requests a Z move.
 
 Known-distance fixtures verify independent X/Y count, minimum, maximum, mean,
 max-minus-min range, population standard deviation and population variance
@@ -765,6 +766,31 @@ are released after bounded trace/metric preparation; private immutable receipts
 are excluded from status JSON. No image pixels or sidecars are used to invent
 sensor samples. Synthetic visual checks do not validate physical centering,
 nozzle clearance, impact behavior or mechanical accuracy.
+
+`test_accuracy_recovery.py` adds 26 synthetic regression methods for automatic
+recalibration after an early accuracy trigger. Parameterized cases cover X/Y,
+both homing directions, Cartesian/CoreXY, discovery and later measured failures,
+and X/Y failures within an XY run. They verify a signed halt return including
+overshoot, zero-step pressed/impact handling, an unchanged other axis/Z/extruder,
+no coordinate rebasing or motor release, exact effective threshold +0.25 g and
+the normal configured candidate step. The standard calibration still measures
+fresh noise and requires discovery plus ten qualified validation homes, including
+candidate resets for excessive spread.
+
+Failure cases cover stale/missing/wrong-sign step evidence, changed motor counts
+or coordinates, unavailable initial references, native/capture sensor faults,
+threshold bounds, cancellation during return/summary/cleanup/handoff, real
+printing/pause/SD state, and fresh-noise failures. The owned recovery transaction
+admits its own `idle_timeout: Printing` state after motion while retaining actual
+printing, queue, sensor and cancellation checks. Summaries and temporary cleanup
+must finish before calibration. Reload fixtures verify model and manual shared,
+axis and legacy-section threshold precedence; save errors report `save_failed`.
+
+On 2026-10-29, the new 26 methods passed with WSL Ubuntu / CPython 3.12. A bounded
+147-method accuracy/calibration run retained two pre-existing failures: the stock
+G28 motor-off fixture's Z expectation and a plotting test without installed
+matplotlib. The remaining 145 methods passed. These tests use synthetic motion
+and sensor objects only; no printer was accessed or physically tested.
 
 Direct-command fixtures check that no separate centering-confirmation command
 is registered and no `action:prompt_*` messages are emitted during successful

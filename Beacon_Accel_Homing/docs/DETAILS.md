@@ -599,13 +599,38 @@ configured final back-off; no return to center follows a single-axis capture.
 It first qualifies a home, excludes it from statistics, returns that trusted
 axis to center and records the requested number of additional homes. Each
 accepted home is followed by a return of that axis to center only when another
-home or axis is needed. Thresholds, homing speed and current remain unchanged.
+home or axis is needed. The accuracy measurements use fixed thresholds, homing
+speed and current.
 Midpoint returns use the same ordinary acceleration and explicit settling wait
 as calibration, representing the usual return conditions between homes.
-The command neither stages a model nor saves configuration or restarts Klipper.
-A suspect home aborts without another automatic move. Use the accessible
-emergency stop if active movement must be interrupted; `ACCEL_HOMING_CANCEL`
-is not an immediate emergency stop for a running console command.
+
+An early trigger can start one automatic standard calibration of the failing
+axis. Recovery requires the current complete detector capture, the signed
+trigger/halt step positions, an intact confirmed center reference and unchanged
+operation state. It reverses the recorded halt displacement, waits for completion
+and settling, then invalidates XY's rejected coordinate assignment without
+disabling the motors or assigning a new center coordinate. This assumes no
+skipped steps or slip; it does not measure physical position. Zero-step early
+hits require matching zero trigger/halt evidence and need no return move.
+
+The partial accuracy PNG and temporary-capture cleanup finish before calibration
+begins. Its explicit initial threshold is the effective threshold used by the
+failed accuracy attempt **plus 0.25 g**. The configured `calibration_step`, fresh
+three-window noise measurement, sensor limits, discovery impact and full ten-home
+repeatability qualification remain active. Recovery does not resume or rerun
+accuracy automatically. It saves only after calibration passes, using the normal
+`SAVE_CONFIG` command and restart. If a manual shared or axis threshold takes
+priority, the selected axis override is staged with the new value as well; the
+other axis and shared setting remain unchanged. Native save/include conflicts
+are reported as `save_failed`, with no claim that persistence or restart succeeded.
+After a successful save and restart, release XY, manually center it with nozzle
+clearance, and run the exact ACCURACY command printed in the console.
+
+Missing/stale halt evidence, a lost center reference, sensor faults, cancellation,
+failed PNG/temporary cleanup or thresholds outside calibration limits prevent
+automatic calibration. Use the accessible emergency stop if active movement must
+be interrupted; `ACCEL_HOMING_CANCEL` is not an immediate emergency stop for a
+running console command.
 
 The accuracy report includes each home's commanded travel, measured onset and
 peak in g, actual configured trigger threshold, and min/max/mean/range, population

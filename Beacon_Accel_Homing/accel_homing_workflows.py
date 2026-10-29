@@ -599,6 +599,9 @@ class AccelHomingWorkflows:
             session["finish_interrupted"] = result.get("reason", "workflow interrupted during PNG export")
             return
         if session is not None:
+            if session.get("accuracy_recovery") is not None:
+                result = dict(result, accuracy_recovery=dict(session["accuracy_recovery"]),
+                              source_accuracy=session["source_accuracy"])
             if session["mode"] == "calibration":
                 result = dict(result, **{key: session[key] for key in (
                     "start_threshold_g", "threshold_step_g", "quiet_range_enforced",
@@ -632,6 +635,10 @@ class AccelHomingWorkflows:
                               operation_reason=result.get("reason"),
                               reason="%sBeta cleanup failed: %s" % (
                                   (str(result["reason"]) + "; ") if result.get("reason") else "", exc))
+            elif session is not None and session.get("accuracy_recovery") is not None:
+                result = dict(result, result="aborted", save_config=False,
+                              operation_reason=result.get("reason"),
+                              reason="recovery calibration cleanup failed: %s" % exc)
             elif session is not None and session["mode"] in ("accuracy", "noise"):
                 result = {"result": "aborted", "reason": "workflow cleanup failed: %s" % exc}
             raise
@@ -649,7 +656,8 @@ class AccelHomingWorkflows:
                     session["beta_pending_result"] = result
             finally:
                 self.last_result = result
-                if session is None or not session.get("beta"):
+                if session is None or not (session.get("beta")
+                                           or session.get("accuracy_recovery_pending")):
                     self.session = None
                 self.reactor.update_timer(self.timer, self.reactor.NEVER)
 
@@ -715,6 +723,17 @@ class AccelHomingWorkflows:
     def note_calibration_halt(self, record, _positions):
         """Retain the current recorded displacement before stock G28 cleanup."""
         axis = record.get("axis")
+        session = self.session
+        if (session is not None and session.get("mode") == "accuracy"
+                and self.in_home and self.home_axis == axis):
+            session["accuracy_halt"] = {
+                "source": record, "generation": self.owner.operation_generation,
+                "attempt": session["attempts"],
+                "trigger": record.get("trigger_travel_mm_signed"),
+                "halt": record.get("halt_travel_mm_signed"),
+                "positions": tuple((sp.stepper, sp.start_pos, sp.trig_pos, sp.halt_pos)
+                                   for sp in _positions)}
+            return
         if not self.calibration_reference(axis):
             return
         quality, reason = self._quality(axis, record)
@@ -781,18 +800,23 @@ class AccelHomingWorkflows:
         grid["explicit_start_threshold"] = gcmd.get("START_THRESHOLD", None) is not None
         return grid
 
-    def _begin(self, gcmd, mode, axis=None, axes=None, calibration_grid=None, save_config_default=1):
-        if self.session is not None:
+    def _begin(self, gcmd, mode, axis=None, axes=None, calibration_grid=None, save_config_default=1,
+               previous_accuracy=None):
+        if self.session is not None and self.session is not previous_accuracy:
             raise gcmd.error("A workflow is already active; use ACCEL_HOMING_CANCEL first")
+        if previous_accuracy is not None:
+            self._check_accuracy_recovery(previous_accuracy)
         if mode == "calibration" and calibration_grid is None:
             calibration_grid = self._calibration_grid(gcmd)
         axes = axes if axes is not None else [axis] if axis else ["x", "y"]
-        self._preflight(axes)
+        self._preflight(axes, continuation=previous_accuracy is not None)
         if mode == "calibration" and self._geometry(axis)[1] <= CALIBRATION_MIN_TRAVEL_MM:
             raise gcmd.error("center-to-endstop travel must exceed 20 mm for impact discovery")
         self._require_unhomed_xy()
         if mode in ("charts", "accuracy") and self.chart_preflight_check is not None:
             self.chart_preflight_check()
+        if previous_accuracy is not None:
+            self._check_accuracy_recovery(previous_accuracy)
         self.session = {"mode": mode, "axis": axis, "state": "starting",
                         "run_id": uuid.uuid4().hex, "successes": 0, "attempts": 0,
                         "candidate_qualified": False, "candidate_attempt": None,
@@ -909,7 +933,9 @@ class AccelHomingWorkflows:
             self._check_running(session)
         if hasattr(self.printer, "is_shutdown") and self.printer.is_shutdown():
             raise self._error("printer is shut down")
-        if self._printing() or self._status("idle_timeout").get("state") == "Printing":
+        continuation = session is not None and bool(session.get("accuracy_recovery"))
+        if self._printing() or (not continuation
+                               and self._status("idle_timeout").get("state") == "Printing"):
             raise self._error("noise measurement requires an idle printer, not printing or paused")
         if self.owner.toolhead is None:
             raise self._error("printer is not connected")
@@ -1089,7 +1115,8 @@ class AccelHomingWorkflows:
         self._begin_noise(session)
         session["calibration_preflight"] = True
         self._chart_preflight()
-        self._preflight([session["axis"]])
+        continuation = bool(session.get("accuracy_recovery"))
+        self._preflight([session["axis"]], continuation=continuation)
         self._require_unhomed_xy()
         self._preflight_noise(session)
         self._check_stopped_noise_context(session)
@@ -1107,7 +1134,7 @@ class AccelHomingWorkflows:
         # Renderer and sensor setup can yield. The initial manual-centering
         # acknowledgement only remains valid while the full context is intact.
         self._check_running(session)
-        self._preflight([session["axis"]])
+        self._preflight([session["axis"]], continuation=continuation)
         self._require_unhomed_xy()
         self._check_stopped_noise_context(session)
         peaks = [item["record"].get("noise_magnitude_peak_g") for item in session["iterations"]]
@@ -1206,6 +1233,13 @@ class AccelHomingWorkflows:
             self.owner.threshold_g[axis] = threshold
         self.owner.back_off_dist = 0.0
         old_record = self.owner.last.get(axis)
+        if session["mode"] == "accuracy":
+            reference = self._accuracy_position_reference()
+            session.update(home_old_record=old_record,
+                           home_generation=self.owner.operation_generation,
+                           accuracy_home_start=reference,
+                           accuracy_started_centered=(reference == session.get("accuracy_center_reference")))
+            session.pop("accuracy_halt", None)
         if session["mode"] == "calibration":
             session.update(axis_touched=True, early_return_cleanup=False,
                            axis_only_cleanup=False,
@@ -1457,7 +1491,9 @@ class AccelHomingWorkflows:
         session = self.session
         if session is not None and session.get("mode") == "accuracy" and "travel_mm_exact" in record:
             exact = record["travel_mm_exact"]
-            if (type(exact) not in (int, float) or not math.isfinite(exact) or exact <= 0):
+            zero_hit = exact == 0 and travel == 0 and result in ("impact", "pressed")
+            if (type(exact) not in (int, float) or not math.isfinite(exact) or exact < 0
+                    or (exact == 0 and not zero_hit)):
                 return "fatal", "invalid exact commanded travel measurement"
         if session is not None and session.get("mode") == "calibration":
             travel = record.get("travel_mm_exact", travel)
@@ -1551,6 +1587,15 @@ class AccelHomingWorkflows:
             self._check_running(session)
             toolhead.wait_moves()
             self._check_running(session)
+        if session["mode"] == "accuracy":
+            start = session["accuracy_home_start"][0]
+            position = toolhead.get_position()
+            trusted = (session["accuracy_started_centered"]
+                       and self.owner.operation_generation == session["accuracy_generation"]
+                       and self.preflight_generation == session["accuracy_preflight_generation"]
+                       and all(position[index] == value for index, value in enumerate(start)
+                               if index != AXES[axis]))
+            session["accuracy_center_reference"] = self._accuracy_position_reference() if trusted else None
 
     def _next_calibration_candidate(self, reason, apply=True):
         session = self.session
@@ -1770,30 +1815,47 @@ class AccelHomingWorkflows:
             metadata["stationary_noise_measurement"] = dict(session["stationary_noise"])
         encoded_metadata = json.dumps(metadata, separators=(",", ":"), allow_nan=False)
         configfile = self.printer.lookup_object("configfile")
+        recovery = session.get("accuracy_recovery")
+        encoded_threshold = ("%.17g" if recovery is not None else "%.6f") % threshold
         configfile.set(self.model_section, "version", "1")
-        configfile.set(self.model_section, axis + "_threshold", "%.6f" % threshold)
+        configfile.set(self.model_section, axis + "_threshold", encoded_threshold)
         configfile.set(self.model_section, axis + "_successes", str(REQUIRED_SUCCESSES))
         configfile.set(self.model_section, axis + "_metadata", encoded_metadata)
+        if recovery is not None and axis in self.manual_axes:
+            # A model alone loses to explicit shared/axis thresholds on reload.
+            # Let native SAVE_CONFIG replace the selected override or report its
+            # own include conflict; never edit config/include files directly.
+            configfile.set(self.config.get_name(), axis + "_threshold", encoded_threshold)
         result = {"result": "calibrated", "axis": axis, "threshold_g": threshold,
                   "successes": REQUIRED_SUCCESSES, "model": self.model_name,
                   "run_id": session["run_id"], "save_config": session["save_config"],
                   "repeatability_spread_mm": spread,
                   "repeatability_limit_mm": CALIBRATION_REPEATABILITY_MM,
                   "algorithm": SIMPLE_CALIBRATION, "restarts": session["restarts"]}
+        if recovery is not None:
+            result.update(accuracy_recovery=dict(recovery), source_accuracy=session["source_accuracy"])
         save = session["save_config"]
         self._finish(result)
         self._info("%s model %s calibrated at %.2f g after ten qualified homes with commanded "
                    "travel spread %s mm <= %.2f mm. %s" % (
             axis.upper(), self.model_name, threshold, spread, CALIBRATION_REPEATABILITY_MM,
-            "Explicit manual threshold overrides remain active." if axis in self.manual_axes
+            "The selected manual override is staged with this model." if recovery is not None and axis in self.manual_axes
+            else "Explicit manual threshold overrides remain active." if axis in self.manual_axes
             else "The saved model supplies this axis threshold after restart."))
         if save:
+            if recovery is not None:
+                self._info("After SAVE_CONFIG succeeds and Klipper restarts, release and manually center XY, "
+                           "then rerun: %s" % recovery["rerun_command"])
             self._info("Saving model to printer.cfg SAVE_CONFIG block; Klipper will restart")
             try:
                 self.gcode.run_script_from_command("SAVE_CONFIG")
-            except Exception:
+            except Exception as exc:
                 self.last_result["result"] = "save_failed"
                 self.last_result["save_config"] = False
+                if recovery is not None:
+                    self.last_result["reason"] = "Recovery calibration passed, but SAVE_CONFIG failed: %s" % exc
+                    self._info("Recovery calibration passed, but SAVE_CONFIG failed; persistence and restart "
+                               "were not confirmed. Resolve the reported save error before rerunning accuracy")
                 raise
         else:
             self._info("Model staged only. Run SAVE_CONFIG to write printer.cfg and restart")
@@ -1819,6 +1881,9 @@ class AccelHomingWorkflows:
             return
         grid = self._calibration_grid(gcmd)
         self._begin(gcmd, "calibration", axis, calibration_grid=grid)
+        self._run_calibration()
+
+    def _run_calibration(self):
         session = self.session
         try:
             self._calibration_noise_preflight(session)
@@ -2604,13 +2669,184 @@ class AccelHomingWorkflows:
             if not error_active:
                 raise self._error("temporary accuracy capture cleanup failed: %s" % exc) from exc
 
+    def _accuracy_position_reference(self):
+        toolhead = self.owner.toolhead
+        return (tuple(toolhead.get_position()),
+                tuple((stepper, stepper.get_mcu_position())
+                      for stepper in toolhead.get_kinematics().get_steppers()),
+                tuple(line.is_motor_enabled() for line in self._xy_enable_lines()))
+
+    def _accuracy_recovery_context(self):
+        # Backoff is deliberately restored by _finish; no movement is permitted
+        # between this snapshot and replacement of the owned accuracy session.
+        snapshot = self._noise_snapshot()
+        return (self._accuracy_position_reference(), snapshot[1:5], snapshot[6:])
+
+    def _prepare_accuracy_recovery(self, session, axis, record, reason):
+        """Return to the confirmed start using current step/halt evidence only."""
+        self._check_running(session)
+        finite = lambda value: type(value) in (int, float) and math.isfinite(value)
+        threshold = session["saved_thresholds"][axis]
+        candidate = float(Decimal(str(threshold)) + Decimal("0.25"))
+        self._validate_calibration_threshold(candidate, "accuracy recovery START_THRESHOLD")
+        if candidate <= threshold or self.max_attempts < REQUIRED_SUCCESSES + 1:
+            raise self._error("accuracy recovery cannot complete a fresh calibration candidate")
+        center, expected = self._geometry(axis)
+        if expected <= CALIBRATION_MIN_TRAVEL_MM:
+            raise self._error("accuracy recovery requires center-to-endstop travel greater than 20 mm")
+        if not callable(getattr(self.printer.lookup_object("configfile", None), "set", None)):
+            raise self._error("accuracy recovery cannot stage a saved calibration")
+        source = self.owner.last.get(axis)
+        terminal, halt = session.get("terminal_home"), session.get("accuracy_halt")
+        if (not isinstance(halt, dict) or terminal is None or terminal[0] != axis
+                or terminal[1] is not record or terminal[2] is not source
+                or halt.get("source") is not source or source is session.get("home_old_record")
+                or halt.get("attempt") != session["attempts"]
+                or not session["accuracy_started_centered"]
+                or record.get("capture_valid") is not True or record.get("pass") != 1
+                or record.get("run_id") != session["run_id"]
+                or record.get("workflow_attempt") != session["attempts"]):
+            raise self._error("early accuracy recovery lacks current halt/capture or confirmed center evidence")
+        travel = source.get("travel_mm_exact")
+        trigger, displacement = halt["trigger"], halt["halt"]
+        info = self.owner.rails_by_axis[axis].get_homing_info()
+        sign = 1 if info.positive_dir else -1
+        if (not all(finite(value) for value in (travel, trigger, displacement)) or travel < 0
+                or travel >= expected * (1.0 - self.travel_tolerance)
+                or trigger * sign < 0 or displacement * sign < trigger * sign
+                or displacement * sign >= expected * (1.0 - self.travel_tolerance)
+                or not math.isclose(abs(trigger), travel, rel_tol=1e-9, abs_tol=1e-6)
+                or record.get("halt_travel_mm_signed") != displacement
+                or source.get("halt_travel_mm_signed") != displacement
+                or source.get("trigger_travel_mm_signed") != trigger):
+            raise self._error("early accuracy recovery requires consistent short signed trigger/halt travel")
+        start, start_steps, _enabled = session["accuracy_home_start"]
+        positions = halt["positions"]
+        active = {stepper for stepper, _position in start_steps if stepper.is_active_axis(axis)}
+        if (len(positions) != len(active) or {item[0] for item in positions} != active
+                or any(not all(finite(value) for value in item[1:]) for item in positions)):
+            raise self._error("early accuracy recovery lacks complete current stepper halt positions")
+        step_positions = {stepper: (first, triggered, stopped)
+                          for stepper, first, triggered, stopped in positions}
+        moved = {stepper.get_name(): 0.0 for stepper, _position in start_steps}
+        triggered = dict(moved)
+        for stepper, first in start_steps:
+            if stepper in active:
+                recorded_start, trig, stopped = step_positions[stepper]
+                if first != recorded_start or stepper.get_mcu_position() != stopped:
+                    raise self._error("early accuracy recovery stepper start/halt evidence changed")
+                distance = stepper.get_step_dist()
+                moved[stepper.get_name()] = (stopped - first) * distance
+                triggered[stepper.get_name()] = (trig - first) * distance
+            elif stepper.get_mcu_position() != first:
+                raise self._error("unrelated axis moved during the rejected accuracy home")
+        index = AXES[axis]
+        kin = self.owner.toolhead.get_kinematics()
+        for measured, reported in ((kin.calc_position(moved)[index], displacement),
+                                   (kin.calc_position(triggered)[index], trigger)):
+            if not finite(measured) or not math.isclose(measured, reported, rel_tol=1e-9, abs_tol=1e-6):
+                raise self._error("early accuracy recovery travel disagrees with stepper halt evidence")
+        toolhead = self.owner.toolhead
+        before = tuple(toolhead.get_position())
+        expected_position = info.position_endstop + displacement - trigger
+        if (not finite(before[index])
+                or not math.isclose(before[index], expected_position, rel_tol=1e-9, abs_tol=1e-6)
+                or any(value != start[number] for number, value in enumerate(before) if number != index)
+                or self.owner._homed(axis) is not True or self.owner.saved_accel is not None):
+            raise self._error("rejected accuracy home lost its commanded start/stop coordinate reference")
+        halted_reference = self._accuracy_position_reference()
+        returning = False
+
+        def current():
+            self._check_running(session)
+            if (self.owner.operation_generation != session["accuracy_generation"]
+                    or halt["generation"] != session["accuracy_generation"]
+                    or self.preflight_generation != session["accuracy_preflight_generation"]
+                    or self.owner.last.get(axis) is not source
+                    or source.get("halt_travel_mm_signed") != displacement
+                    or source.get("trigger_travel_mm_signed") != trigger
+                    or source.get("travel_mm_exact") != travel
+                    or self.owner.homing_active or self.owner.attempt is not None
+                    or getattr(self.owner, "sensor_fault", None) is not None
+                    or (not returning and self._accuracy_position_reference() != halted_reference)
+                    or any(value != before[number] for number, value in enumerate(toolhead.get_position())
+                           if number != index)):
+                raise self._error("early accuracy recovery was cancelled or its halt/center reference changed")
+
+        current()
+        target = before[index] - displacement
+        if not finite(target):
+            raise self._error("early accuracy recovery requires a finite return target")
+        coordinates = [None, None, None]
+        coordinates[index] = target
+        try:
+            self.owner._limit_accel()
+            current()
+            if displacement:
+                returning = True
+                toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
+                current()
+                toolhead.wait_moves()
+                current()
+            if self.calibration_settle_time:
+                toolhead.dwell(self.calibration_settle_time)
+                current()
+                toolhead.wait_moves()
+                current()
+        finally:
+            self.owner._restore_accel()
+        current()
+        if toolhead.get_position()[index] != target or any(
+                abs(stepper.get_mcu_position() - position) > 1 for stepper, position in start_steps):
+            raise self._error("early accuracy recovery did not complete its commanded return")
+        # Discard G28's rejected coordinate assignment without releasing motors
+        # or inventing a midpoint coordinate. Discovery will establish it anew.
+        kin.limits[0] = kin.limits[1] = (1.0, -1.0)
+        session["accuracy_recovery_pending"] = {
+            "axis": axis, "source_run_id": session["run_id"], "reason": reason,
+            "previous_threshold_g": threshold, "start_threshold_g": candidate,
+            "initial_increment_g": 0.25, "threshold_step_g": self.threshold_step,
+            "return_mm_signed": -displacement,
+            "physical_position_verified": False,
+            "rerun_command": "ACCEL_HOMING_ACCURACY AXIS=%s SAMPLES=%d CENTERED=1" % (
+                "".join(session["axes"]).upper(), session["samples_requested"])}
+        session["accuracy_recovery_context"] = self._accuracy_recovery_context()
+        self._info(reason + "; returned by reversing recorded commanded halt travel; "
+                   "finalizing accuracy before one calibration starting at %.6g g" % candidate)
+
+    def _check_accuracy_recovery(self, session):
+        self._check_running(session)
+        pending = session.get("accuracy_recovery_pending")
+        result = self.last_result
+        if (not pending or session.get("finish_interrupted")
+                or self.preflight_generation != session["accuracy_preflight_generation"]
+                or self.owner.operation_generation != session["accuracy_generation"]
+                or getattr(self.owner, "sensor_fault", None) is not None
+                or self._accuracy_recovery_context() != session["accuracy_recovery_context"]
+                or self.owner.last.get(pending["axis"]) is not session["accuracy_halt"]["source"]
+                or result is None or result.get("run_id") != session["run_id"]
+                or result.get("result") != "aborted" or result.get("chart_error")
+                or result.get("capture_cleanup_error")):
+            raise self._error("accuracy recovery interrupted during finalization; manually recenter before retrying")
+
+    def _start_accuracy_recalibration(self, session):
+        self._check_accuracy_recovery(session)
+        pending = session["accuracy_recovery_pending"]
+        source_accuracy = self.last_result
+        params = {"AXIS": pending["axis"].upper(), "START_THRESHOLD": str(pending["start_threshold_g"]),
+                  "SAVE_CONFIG": "1"}
+        gcmd = self.gcode.create_gcode_command("ACCEL_HOMING_CALIBRATE", "ACCEL_HOMING_CALIBRATE", params)
+        grid = self._calibration_grid(gcmd)
+        self._begin(gcmd, "calibration", pending["axis"], calibration_grid=grid, previous_accuracy=session)
+        self.session.update(accuracy_recovery=dict(pending), source_accuracy=source_accuracy)
+        self._run_calibration()
+
     def cmd_ACCURACY(self, gcmd):
         requested = str(gcmd.get("AXIS", "XY")).strip().lower()
         if requested not in ("x", "y", "xy"):
             raise gcmd.error("AXIS must be X, Y or XY")
         samples = gcmd.get_int("SAMPLES", 10, minval=2, maxval=50)
-        # Accuracy never stages/saves a model or restarts Klipper, including if
-        # a SAVE_CONFIG token was copied from a calibration command.
+        # Saving belongs only to a fully successful recovery calibration.
         if gcmd.get("SAVE_CONFIG", None) is not None:
             raise gcmd.error("SAVE_CONFIG is not supported by ACCEL_HOMING_ACCURACY")
         self._require_centered(gcmd)
@@ -2618,6 +2854,7 @@ class AccelHomingWorkflows:
         axes = list(requested)
         temporary = self._accuracy_capture_directory()
         session = None
+        recovery = False
         try:
             self._begin(gcmd, "accuracy", axes=axes)
             session = self.session
@@ -2626,7 +2863,10 @@ class AccelHomingWorkflows:
                            attempt_limit=len(axes) * (samples + 1), sample_index=0,
                            configured_speeds={axis: self.owner.rails_by_axis[axis].get_homing_info().speed
                                               for axis in axes},
-                           pending_record=None, last_arm_time=None,
+                            pending_record=None, last_arm_time=None,
+                            accuracy_generation=self.owner.operation_generation,
+                            accuracy_preflight_generation=self.preflight_generation,
+                            accuracy_center_reference=None,
                            axis_results={axis: {"requested_samples": samples, "complete": False,
                                                 "discovery": None, "discovery_capture_paths": None,
                                                 "trials": [], "statistics": None,
@@ -2636,8 +2876,16 @@ class AccelHomingWorkflows:
                        "confirms manually centered XY with nozzle clearance; each axis's first "
                        "home is discovery only and is excluded from measured statistics")
             try:
+                self._check_running(session)
+                session["accuracy_center_reference"] = self._accuracy_position_reference()
+                self._check_running(session)
                 self._accuracy_trials(session)
                 self._check_running(session)
+                if session.get("accuracy_recovery_pending"):
+                    self._finish({"result": "aborted", "reason": session["accuracy_recovery_pending"]["reason"],
+                                  "recovery": dict(session["accuracy_recovery_pending"])})
+                    recovery = True
+                    return
                 # Validate temporary capture bytes before terminal release.
                 # Final publication follows restoration, so release failures
                 # receive an aborted summary retaining accepted measurements.
@@ -2657,7 +2905,15 @@ class AccelHomingWorkflows:
                     self._finish({"result": "aborted", "reason": str(exc)}, release=True)
                 raise
         finally:
-            self._cleanup_accuracy_captures(temporary, session, sys.exc_info()[0] is not None)
+            error_active = sys.exc_info()[0] is not None
+            try:
+                self._cleanup_accuracy_captures(temporary, session, error_active)
+                if recovery and not error_active:
+                    self._start_accuracy_recalibration(session)
+            finally:
+                if self.session is session and session is not None and session.get("accuracy_recovery_pending"):
+                    self.session = None
+                    self.reactor.update_timer(self.timer, self.reactor.NEVER)
 
     @staticmethod
     def _accuracy_statistics(records):
@@ -2694,6 +2950,12 @@ class AccelHomingWorkflows:
                 self._check_running(session)
                 if quality != "good":
                     axis_result["rejection_capture_paths"] = paths
+                    if quality == "early":
+                        try:
+                            self._prepare_accuracy_recovery(session, axis, record, reason)
+                        except self.printer.command_error as exc:
+                            raise self._error("%s; no automatic move follows this error; manually recenter" % exc) from exc
+                        return
                     raise self._error(reason + "; no automatic move follows this result; manually recenter")
                 if sample_index == 0:
                     axis_result["discovery_capture_paths"] = paths
