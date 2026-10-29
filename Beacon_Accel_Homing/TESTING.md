@@ -1,25 +1,18 @@
 # Offline verification
 
-## Calibration retry bounds — 2026-10-28
+## Simple early-impact return — 2026-10-28
 
 Validation for this change is limited to source inspection and static text/diff
 checks. Regression sources were updated but **not executed or imported**;
 no plugin import, compilation, rendering, printer connection or printer command
 was performed. Historical passing counts below do not verify this revision.
 Earlier sections and the archived `validation/` reports describe their original
-revisions; their threshold ceilings and recovery-count limits are historical.
+revisions. Their recovery-distance/clearance policies, reserved-distance
+metadata, threshold ceilings and recovery-count limits are historical.
 
 Regression sources: `tests/test_calibration_auto_return.py`,
-`tests/test_calibration_validation.py`, `tests/test_calibration_midtravel_recovery.py`,
-`tests/test_calibration_limits.py`, `tests/test_calibration_noise_preflight.py`,
-`tests/test_simple_calibration.py`, `tests/test_manual_thresholds.py`,
-`tests/test_retract_noise.py` and the shared fixture in `tests/test_workflows.py`.
-The limit cases include twelve measured recoveries reaching 4 g with the default
-budget, the reported eight-return state with 58.8375 mm remaining admitting its
-ninth 13.83125 mm halt before advancing from 3 to 3.25 g, and exactly 11 versus
-10 remaining attempts. Starts above 12/15 g, large-range noise seeds, finite
-model reloads, unknown-range explicit starts and ignored legacy settings are
-represented in source. None of these cases was executed for this revision.
+`tests/test_calibration_midtravel_recovery.py`, `tests/test_calibration_limits.py`
+and the new `tests/test_calibration_simple_return.py`.
 The intended cases cover premature impacts at <=20 mm and below the lower
 expected-distance band, including the reported 51.175 mm travel against an
 expected 109.25 mm and lower bound 87.4 mm. Both discovery and validation use
@@ -27,31 +20,38 @@ the same classification in both axes and homing directions. Exactly the lower
 and upper band boundaries remain plausible when beyond 20 mm; above the upper
 bound aborts without return, threshold increase or model write.
 
-Recovery reverses signed start-to-halt commanded travel, including post-trigger
-travel, and retains the existing evidence, direction, overshoot and return-target
-checks. Only a successful return advances the candidate. A new discovery and
-ten fresh validation impacts are still required; >2 mm running spread still
-rejects immediately and exactly 2 mm still passes after all ten checks.
+Recovery reverses the selected axis's recorded signed start-to-halt commanded
+displacement, including post-trigger travel. For 2 mm commanded before the halt,
+the return command is 2 mm in the opposite direction. There is no accumulated
+recovery distance or separate recovery-count/distance cap. The return has no
+overshoot/nominal-clearance gate or extra test of physical arrival. The current
+home record and finite displacement/coordinates
+are still required to calculate the command. Ordinary firmware movement limits
+and errors apply, along with existing sensor/fault/cancellation checks.
 
-The separate eight-recovery cap is removed. All premature reversals still share
-a total reserved absolute halted-distance budget derived from nominal opposite
-clearance, including the original <=20 mm recoveries. Its inclusive limit,
-reservation before return, persistence across candidate resets and same-command
-continuations, and no refund on interruption are unchanged. Zero-distance
-recovery still increments the telemetry count. Qualified-impact midpoint
-returns do not consume this distance budget. `count_limit` and `count_remaining`
-remain present as `null` in recovery status/results/model metadata; distance
-limits and remaining distance stay numeric.
+After the queued move and settling complete, record the return, increase the
+threshold by STEP and retry discovery. A failed/interrupted return does not
+advance the threshold or completed-return count. Zero displacement needs no
+reverse move but still settles and retries. A new discovery and ten fresh
+validation impacts are still required; >2 mm running spread still rejects
+immediately and exactly 2 mm still passes after all ten checks.
+
+The new `recovery` object in active status, final results and saved metadata has
+only `count`, `last_return_mm_signed`, `accounting: completed_commanded_returns`
+and `physical_position_verified: false`. Count includes only completed commanded
+returns; the last signed return is `null` until one completes. There are no
+accumulated-distance, limit/remaining, clearance or margin fields. Old saved
+recovery metadata remains readable as opaque historical data and does not
+restrict a new run.
 
 The existing monitored-home budget, 40 attempts by default, includes discovery,
 validation and retries. Every candidate change requires at least 11 future
 attempts for a fresh discovery and ten checks before any recovery return,
-distance reservation, threshold increase or recentering. Active status and
+threshold increase or recentering. Active status and
 final results expose `attempt_limit`, `attempts_remaining` and
 `candidate_attempts_required` (11). Denial makes no return or threshold increase
 and invalidates only the suspect axis's homed state. More than eight recoveries
-may proceed if the attempt, distance and per-return checks all pass; this does
-not make retries unbounded.
+may proceed within that attempt budget; there is no separate count cap.
 
 The configurable calibration maximum and fixed 15 g calibration/model maximum
 are removed from initial parameters, noise selection, candidate increases and
@@ -69,8 +69,8 @@ representation validation, separate from a configurable g maximum.
 Huge/tiny finite inputs that make that square overflow to infinity or underflow
 to zero are rejected. The guard and its regression sources were not executed.
 
-Faults, uncertain evidence, missing impacts and excessive travel still abort
-without automatic recovery or a threshold increase. These source cases do not
+Faults, a missing current home record, missing impacts and firmware movement
+errors still abort without a threshold increase. These source cases do not
 establish physical return, correct endstop contact or hardware performance.
 There is no encoder feedback or automatic binding diagnosis. See the [current
 sequence, exact limits and metadata](docs/SIMPLE_CALIBRATION.md).

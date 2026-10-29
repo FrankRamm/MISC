@@ -73,14 +73,13 @@ minus min distance <= 2.00 mm**. Discovery is excluded. A larger running spread
 rejects the candidate immediately, raises the threshold one step and restarts
 discovery and all ten checks.
 
-A premature impact can automatically reverse the selected axis's recorded
-start-to-halt travel to its **estimated starting point**, settle and retry
-discovery at the next threshold step. Recovery also covers impacts below the
-expected-distance band after longer commanded travel.
-Retries share the command's attempt budget; premature returns also share a
-total return-distance budget. Each new candidate needs a fresh discovery and
-ten checks. Data faults, no impact, excessive travel, uncertain return
-evidence or exhausted limits abort; manually center XY before a new command.
+A premature impact reverses the selected axis's recorded start-to-halt
+displacement, then settles, raises the threshold one step and retries discovery.
+For **2 mm of commanded travel to the halt, it commands 2 mm back**. This also
+applies to impacts below the expected-distance band after longer travel.
+Retries share the command's attempt budget; every new candidate still needs a
+fresh discovery and ten checks. Data faults, no impact or a failed return abort;
+manually center XY before a new command.
 
 CALIBRATE and ACCURACY midpoint returns use ordinary acceleration and the same
 explicit settling wait. Premature reversals use the homing acceleration cap
