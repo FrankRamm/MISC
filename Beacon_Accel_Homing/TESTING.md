@@ -1,5 +1,45 @@
 # Offline verification
 
+## Bounded recovery for premature calibration impacts — 2026-10-28
+
+Validation for this change is limited to source inspection and static text/diff
+checks. Regression sources were updated but **not executed or imported**;
+no plugin import, compilation, rendering, printer connection or printer command
+was performed. Historical passing counts below do not verify this revision.
+
+Regression sources: `tests/test_calibration_auto_return.py`,
+`tests/test_calibration_validation.py`, `tests/test_calibration_midtravel_recovery.py`,
+`tests/test_simple_calibration.py` and the shared fixture in `tests/test_workflows.py`.
+The intended cases cover premature impacts at <=20 mm and below the lower
+expected-distance band, including the reported 51.175 mm travel against an
+expected 109.25 mm and lower bound 87.4 mm. Both discovery and validation use
+the same classification in both axes and homing directions. Exactly the lower
+and upper band boundaries remain plausible when beyond 20 mm; above the upper
+bound aborts without return, threshold increase or model write.
+
+Recovery reverses signed start-to-halt commanded travel, including post-trigger
+travel, and retains the existing evidence, direction, overshoot and return-target
+checks. Only a successful return advances the candidate. A new discovery and
+ten fresh validation impacts are still required; >2 mm running spread still
+rejects immediately and exactly 2 mm still passes after all ten checks.
+
+All premature reversals share a fixed eight-reservation limit and a total
+reserved absolute halted-distance budget derived from nominal opposite
+clearance, including the original <=20 mm recoveries. Zero-distance recovery
+uses a reservation. Limits are inclusive, persist across candidate resets and
+same-command continuations, and are reserved before returning without refunds
+on interruption. Budget denial makes no return or threshold increase and
+invalidates only the suspect axis's homed state. Status, final results and
+saved metadata expose the reservations and remaining limits. Qualified-impact
+midpoint returns do not consume these recovery budgets; their policy is
+unchanged.
+
+Faults, uncertain evidence, missing impacts and excessive travel still abort
+without automatic recovery or a threshold increase. These source cases do not
+establish physical return, correct endstop contact or hardware performance.
+There is no encoder feedback or automatic binding diagnosis. See the [current
+sequence, exact limits and metadata](docs/SIMPLE_CALIBRATION.md).
+
 ## Running spread, travel plausibility and shared returns — 2026-10-28
 
 This change was reviewed from source only. Regression sources were updated but

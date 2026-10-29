@@ -2,9 +2,9 @@
 """Bounded X/Y workflows. No workflow command ever requests a Z move.
 
 An accelerometer and motor step count cannot establish physical position.
-The operator confirms the initial center. Simple calibration reverses measured
-halted step travel to return there; this still assumes no skipped steps/slip.
-Legacy workflows rely on qualified center-to-stop homes for automatic returns.
+The operator confirms the initial center. Premature calibration triggers reverse
+measured halted step travel under cumulative limits, assuming no skipped steps
+or slip. Qualified homes return to the configured midpoint.
 """
 import datetime
 import configparser
@@ -54,6 +54,8 @@ AXES = {"x": 0, "y": 1}
 CALIBRATION_MIN_TRAVEL_MM = 20.0
 CALIBRATION_REPEATABILITY_MM = 2.0
 CALIBRATION_RETURN_OVERSHOOT_MM = 2.0
+CALIBRATION_RECOVERY_MAX_COUNT = 8
+CALIBRATION_RECOVERY_CLEARANCE_MARGIN = 0.10
 SIMPLE_CALIBRATION = "impact20_vector_v2"
 REQUIRED_SUCCESSES = 10
 REPEATABILITY_LIMIT_MM = 1.5
@@ -507,6 +509,30 @@ class AccelHomingWorkflows:
         center = (low + high) * 0.5
         return center, abs(center - rail.get_homing_info().position_endstop)
 
+    def _calibration_recovery_limits(self, axis):
+        rail = self.owner.rails_by_axis[axis]
+        low, high = rail.get_range()
+        center, _expected = self._geometry(axis)
+        clearance = center - low if rail.get_homing_info().positive_dir else high - center
+        # This is configured geometry from an estimated midpoint, not measured
+        # physical clearance. Bound the entire session's reversals even if a
+        # premature trigger was actually an obstruction and forward steps slipped.
+        nominal = Decimal(str(clearance))
+        margin = max(Decimal(str(CALIBRATION_RETURN_OVERSHOOT_MM)),
+                     nominal * Decimal(str(CALIBRATION_RECOVERY_CLEARANCE_MARGIN)))
+        return {"count": 0, "count_limit": CALIBRATION_RECOVERY_MAX_COUNT,
+                "distance_mm": 0.0, "distance_limit_mm": float(max(Decimal("0"), nominal - margin)),
+                "nominal_opposite_clearance_mm": clearance, "margin_mm": float(margin)}
+
+    @staticmethod
+    def _calibration_recovery_status(session):
+        budget = session["recovery"]
+        return dict(budget, count_remaining=budget["count_limit"] - budget["count"],
+                    distance_remaining_mm=float(max(Decimal("0"),
+                        Decimal(str(budget["distance_limit_mm"])) - Decimal(str(budget["distance_mm"])))),
+                    accounting="reserved_start_to_halt_including_overshoot",
+                    physical_clearance_verified=False)
+
     def _model_context(self, axis):
         rail = self.owner.rails_by_axis[axis]
         low, high = rail.get_range()
@@ -578,6 +604,8 @@ class AccelHomingWorkflows:
                 result = dict(result, **{key: session[key] for key in (
                     "start_threshold_g", "threshold_step_g", "quiet_range_enforced",
                     "calibration_settle_time_s")})
+                result.update(candidate_g=session["candidate"], restarts=session["restarts"],
+                              recovery=self._calibration_recovery_status(session))
                 if session.get("stationary_noise") is not None:
                     result["stationary_noise"] = dict(session["stationary_noise"])
             session["finishing"] = True
@@ -793,15 +821,19 @@ class AccelHomingWorkflows:
             self.session.update(calibration_grid, candidate=calibration_grid["start_threshold_g"],
                                 algorithm=SIMPLE_CALIBRATION, restarts=0,
                                 quiet_range_enforced=False,
-                                calibration_settle_time_s=self.calibration_settle_time)
+                                calibration_settle_time_s=self.calibration_settle_time,
+                                recovery=self._calibration_recovery_limits(axis))
             self._clear_noise_seeds()
 
     def _announce_calibration(self, session):
         self._info("%s calibration starts at %.6g g with %.6g g steps; XYZ magnitude; "
                    "impact after >20 mm then ten centered endstop checks with spread <= 2 mm; "
-                   "no quietness or acceleration-derived motion proof; returns settle for %.3f s" % (
+                   "no quietness or acceleration-derived motion proof; returns settle for %.3f s; "
+                   "premature-return budget %d returns / %.6f mm total halted travel "
+                   "from nominal geometry" % (
                        session["axis"].upper(), session["candidate"], session["threshold_step_g"],
-                       session["calibration_settle_time_s"]))
+                       session["calibration_settle_time_s"], session["recovery"]["count_limit"],
+                       session["recovery"]["distance_limit_mm"]))
 
     def _wait_center(self, reason):
         self._restore()
@@ -1430,7 +1462,11 @@ class AccelHomingWorkflows:
             _center, expected = self._geometry(axis)
             minimum = expected * (1.0 - self.travel_tolerance)
             maximum = expected * (1.0 + self.travel_tolerance)
-            if not math.isfinite(expected) or not minimum <= travel <= maximum:
+            if math.isfinite(expected) and travel < minimum:
+                return "early", ("premature trigger at %.6f mm is below plausible midpoint-to-stop "
+                                 "minimum %.6f mm (expected %.6f mm, tolerance %.1f%%)" % (
+                                     travel, minimum, expected, self.travel_tolerance * 100.0))
+            if not math.isfinite(expected) or travel > maximum:
                 return "implausible", ("commanded travel %.6f mm is outside the plausible "
                                        "midpoint-to-stop range %.6f..%.6f mm "
                                        "(expected %.6f mm, tolerance %.1f%%)" % (
@@ -1505,15 +1541,39 @@ class AccelHomingWorkflows:
             toolhead.wait_moves()
             self._check_running(session)
 
-    def _next_calibration_candidate(self, reason):
+    def _next_calibration_candidate(self, reason, apply=True):
         session = self.session
+        self._check_running(session)
         candidate = float(Decimal(str(session["candidate"])) + Decimal(str(session["threshold_step_g"])))
         if candidate > self._threshold_limit() or session["attempts"] >= self.max_attempts:
             raise self._error(reason + "; calibration threshold/attempt ceiling reached")
-        session.update(candidate=candidate, successes=0, candidate_qualified=False,
-                       candidate_attempt=None, validation_records=[], repeatability_spread_mm=None,
-                       restarts=session["restarts"] + 1)
+        if apply:
+            session.update(candidate=candidate, successes=0, candidate_qualified=False,
+                           candidate_attempt=None, validation_records=[], repeatability_spread_mm=None,
+                           restarts=session["restarts"] + 1)
         return candidate
+
+    def _reserve_calibration_recovery(self, session, record, evidence, distance):
+        # Reserve both independent budgets without yielding. Never refund after
+        # a failed move: software cannot establish whether it physically moved.
+        if evidence.get("recovery_reserved"):
+            raise self._error("this calibration halt already reserved an automatic return")
+        budget = session["recovery"]
+        count = budget["count"] + 1
+        total = Decimal(str(budget["distance_mm"])) + Decimal(str(distance))
+        if count > budget["count_limit"] or total > Decimal(str(budget["distance_limit_mm"])):
+            status = self._calibration_recovery_status(session)
+            raise self._error(
+                "automatic recovery budget exhausted: requested %d/%d returns and %.6f/%.6f mm "
+                "cumulative halted travel; currently reserved %d returns / %.6f mm, remaining "
+                "%d returns / %.6f mm. No automatic return or threshold increase; selected-axis "
+                "home is invalid. Manually recenter XY and start a new ACCEL_HOMING_CALIBRATE "
+                "command with CENTERED=1" % (
+                    count, budget["count_limit"], float(total), budget["distance_limit_mm"],
+                    budget["count"], budget["distance_mm"], status["count_remaining"],
+                    status["distance_remaining_mm"]))
+        budget.update(count=count, distance_mm=float(total))
+        evidence["recovery_reserved"] = record["early_return_budget_reserved"] = True
 
     def _return_early_calibration(self, axis, record):
         """Reverse only the current, complete early pass; never infer physical center."""
@@ -1558,13 +1618,16 @@ class AccelHomingWorkflows:
         sign = 1.0 if info.positive_dir else -1.0
         trigger_distance, halt_distance = sign * signed_trigger, sign * signed_halt
         _center, expected = self._geometry(axis)
+        minimum = expected * (1.0 - self.travel_tolerance)
         target = position[index] - signed_halt
         if (not all(finite(value) for value in (low, high, info.position_endstop, info.speed, expected, target))
                 or low >= high or info.speed <= 0
-                or not 0 <= trigger_distance <= CALIBRATION_MIN_TRAVEL_MM
+                or trigger_distance < 0
+                or not (trigger_distance <= CALIBRATION_MIN_TRAVEL_MM or trigger_distance < minimum)
                 or not trigger_distance <= halt_distance
                 or halt_distance - trigger_distance > CALIBRATION_RETURN_OVERSHOOT_MM
-                or halt_distance > min(CALIBRATION_MIN_TRAVEL_MM + CALIBRATION_RETURN_OVERSHOOT_MM,
+                or halt_distance > min(max(CALIBRATION_MIN_TRAVEL_MM, minimum)
+                                       + CALIBRATION_RETURN_OVERSHOOT_MM,
                                        expected - CALIBRATION_RETURN_OVERSHOOT_MM)
                 or not low <= target <= high
                 or not math.isclose(position[index], info.position_endstop + signed_halt - signed_trigger,
@@ -1603,6 +1666,7 @@ class AccelHomingWorkflows:
                 raise self._error("early return requires an idle motion queue")
 
         current(position)
+        self._reserve_calibration_recovery(session, record, evidence, halt_distance)
         coordinates = [None, None, None]
         coordinates[index] = target
         final_position = tuple(target if i == index else value for i, value in enumerate(position))
@@ -1643,13 +1707,18 @@ class AccelHomingWorkflows:
             if quality == "early":
                 session["early_return_cleanup"] = True
                 try:
-                    # Check both budgets before permitting a return move.
-                    candidate = self._next_calibration_candidate(reason)
+                    # Threshold/attempt checks must not change the candidate
+                    # if provenance or either recovery budget rejects the move.
+                    self._next_calibration_candidate(reason, apply=False)
                     self._return_early_calibration(axis, record)
+                    candidate = self._next_calibration_candidate(reason)
                 finally:
                     self._invalidate_calibration_axis(session)
                 self._info(reason + "; reversed commanded start-to-halt travel to the estimated "
-                           "starting point; restart impact discovery at %.2f g" % candidate)
+                           "starting point; restart impact discovery at %.2f g; reserved "
+                           "%d/%d returns and %.6f/%.6f mm" % (
+                               candidate, session["recovery"]["count"], session["recovery"]["count_limit"],
+                               session["recovery"]["distance_mm"], session["recovery"]["distance_limit_mm"]))
                 continue
             if discovery:
                 session["candidate_qualified"] = True
@@ -1755,6 +1824,7 @@ class AccelHomingWorkflows:
                     "calibration_step_g": session["threshold_step_g"],
                     "calibration_quiet_range_enforced": session["quiet_range_enforced"],
                     "calibration_settle_time_s": session["calibration_settle_time_s"],
+                    "recovery": self._calibration_recovery_status(session),
                     "physical_position_verified": False}
         if session.get("noise_seed") is not None:
             metadata["stationary_noise_seed"] = dict(session["noise_seed"])
@@ -2137,6 +2207,7 @@ class AccelHomingWorkflows:
                     "start_threshold_g", "threshold_step_g", "explicit_calibration_grid", "quiet_range_enforced",
                     "calibration_settle_time_s")})
                 active["attempt_limit"] = self.max_attempts
+                active["recovery"] = self._calibration_recovery_status(session)
                 active.update(algorithm=session.get("algorithm"), restarts=session.get("restarts", 0),
                               minimum_impact_travel_mm=CALIBRATION_MIN_TRAVEL_MM,
                               discovery_impact_required=True, recenter_policy="selected_axis_midpoint",
