@@ -467,6 +467,161 @@ def write_noise(directory, run_id, iterations, recommendation, result, reason=No
     return {"png": path}
 
 
+def beta_motion_statistics(capture, record):
+    """Analyze full beta rows by actual planner phase, never a plot envelope."""
+    _capture_data(capture, record)
+    if capture.get("raw_samples_validated") is not True:
+        raise ValueError("Beta moving noise requires a validated independent raw capture")
+    samples, baseline = capture["samples"], capture["baseline_g"]
+    segments = record.get("segments")
+    if not isinstance(segments, (tuple, list)) or not segments:
+        raise ValueError("Beta moving noise requires actual planner segments")
+    delta = [tuple(row[index + 1] - baseline[index] for index in range(3)) for row in samples]
+    magnitude = [math.sqrt(sum(value * value for value in row)) for row in delta]
+    if not all(_finite(value) for value in magnitude):
+        raise ValueError("Beta moving magnitudes must be finite")
+    seed_indices, phase_indices, phases, previous_end = set(), set(), [], None
+    for number, segment in enumerate(segments):
+        if not isinstance(segment, dict) or segment.get("phase") not in (
+                "startup", "acceleration", "cruise", "braking", "return"):
+            raise ValueError("Invalid beta planner phase")
+        start, end = segment.get("start_time_s"), segment.get("end_time_s")
+        if (not _finite(start) or not _finite(end) or end < start
+                or (previous_end is not None and start < previous_end - 1e-9)):
+            raise ValueError("Beta planner segment times overlap or are invalid")
+        previous_end = end
+        indices = [index for index, row in enumerate(samples)
+                   if start <= row[0] < end or (number == len(segments) - 1 and row[0] == end)]
+        eligible = segment["phase"] in ("startup", "acceleration", "cruise")
+        phase_indices.update(indices)
+        if eligible:
+            seed_indices.update(indices)
+        peak = max(indices, key=lambda index: magnitude[index]) if indices else None
+        phases.append({**segment, "seed_eligible": eligible, "sample_count": len(indices),
+                       "magnitude_peak_g": None if peak is None else magnitude[peak],
+                       "peak_time_s": None if peak is None else samples[peak][0],
+                       "axis_absolute_peak_g": None if not indices else
+                           {axis: max(abs(delta[index][channel]) for index in indices)
+                            for channel, axis in enumerate("xyz")}})
+    if not seed_indices:
+        raise ValueError("Beta moving capture has no startup/acceleration/cruise samples")
+    peak = max(seed_indices, key=lambda index: magnitude[index])
+    phase_peak = max(phase_indices, key=lambda index: magnitude[index])
+    result = {"clock_domain": "sensor_print_time_seconds", "sample_count": len(samples),
+              "first_sample_time_s": samples[0][0], "last_sample_time_s": samples[-1][0],
+              "seed_phases": ["startup", "acceleration", "cruise"],
+              "excluded_seed_phases": ["braking", "return"],
+              "seed_sample_count": len(seed_indices), "seed_magnitude_peak_g": magnitude[peak],
+              "seed_peak_time_s": samples[peak][0],
+              "all_phase_magnitude_peak_g": max(magnitude[index] for index in phase_indices),
+              "all_phase_peak_time_s": samples[phase_peak][0],
+              "capture_magnitude_peak_g": max(magnitude), "phases": phases}
+    _json(result)
+    return result
+
+
+def compact_beta_home(capture, record):
+    """Keep a bounded display trace after exact full-row beta event analysis."""
+    trace, metadata = _capture_data(capture, record)
+    telemetry = record.get("beta_telemetry")
+    if not isinstance(telemetry, dict) or telemetry.get("version") != 1:
+        raise ValueError("Beta home must retain its separately validated exact event telemetry")
+    samples, baseline = capture["samples"], capture["baseline_g"]
+    marked_times = {telemetry["first_crossing"]["time_s"]}
+    for key in ("pre_onset_noise", "onset_window", "post_stop_response"):
+        marked_times.update(telemetry[key].get(field) for field in
+                            ("peak_time_s", "start_time_s", "end_time_s"))
+    # XYZ extrema alone need not preserve a vector-magnitude extremum. Retain
+    # every exact event/peak row in addition to the ordinary display envelope.
+    extra = [(row[0] - samples[0][0],) + tuple(row[index + 1] - baseline[index] for index in range(3))
+             for row in samples if row[0] in marked_times]
+    trace = sorted({tuple(row) for row in tuple(trace) + tuple(extra)})
+    onset = telemetry["first_crossing"]["time_s"]
+    onset_span = telemetry["onset_window"]["end_time_s"] - onset
+    response_end = telemetry["post_stop_response"].get("end_time_s")
+    event_end = max(onset + onset_span, response_end if _finite(response_end) else onset + onset_span)
+    event = [(row[0] - samples[0][0],) + tuple(row[index + 1] - baseline[index] for index in range(3))
+             for row in samples if onset - onset_span <= row[0] <= event_end]
+    event_trace = sorted({tuple(row) for row in tuple(_envelope(event, 256)) + tuple(extra)
+                          if onset - onset_span <= row[0] + samples[0][0] <= event_end})
+    return {"record": json.loads(_json(record)),
+            "capture": {**metadata, "trace": trace,
+                        "event_trace": event_trace,
+                        "plot_data": "extrema_envelope_after_full_sample_beta_analysis",
+                        "beta_compact": True}}
+
+
+def write_beta_motion(directory, run_id, axis, iterations, homes=(), result="complete", reason=None,
+                      proposed_threshold_g=None, simulated=False, renderer=None, check_running=None):
+    """Publish one Beta-branded suggestion PNG; never produce other formats."""
+    _identity(run_id, axis)
+    if (not isinstance(iterations, (tuple, list)) or len(iterations) > 3
+            or not isinstance(homes, (tuple, list)) or len(homes) > 100
+            or result not in ("complete", "beta_proposed", "aborted", "incomplete", "failed", "cancelled")
+            or (reason is not None and (not isinstance(reason, str) or len(reason) > 4000))
+            or (proposed_threshold_g is not None and
+                (not _finite(proposed_threshold_g) or proposed_threshold_g <= 0))):
+        raise ValueError("Invalid Beta calibration PNG report")
+    motions, home_traces, incomplete_homes = [], [], []
+    previous_end, motion_context = None, None
+    for item in iterations:
+        if not isinstance(item, dict) or not isinstance(item.get("record"), dict):
+            raise ValueError("Invalid beta motion item")
+        record, capture = item["record"], item["capture"]
+        if record.get("axis") != axis or record.get("run_id", run_id) != run_id:
+            raise ValueError("Beta motion does not belong to this axis/run")
+        statistics = beta_motion_statistics(capture, record)
+        context = _json(capture.get("sensor_context", capture.get("_noise_context")))
+        if ((previous_end is not None and capture["samples"][0][0] <= previous_end)
+                or (motion_context is not None and context != motion_context)):
+            raise ValueError("Beta moving captures overlap or changed sensor context")
+        previous_end, motion_context = capture["samples"][-1][0], context
+        trace, metadata = _capture_data(capture, record)
+        marked = {statistics["seed_peak_time_s"], statistics["all_phase_peak_time_s"]}
+        marked.update(phase["peak_time_s"] for phase in statistics["phases"])
+        rows, baseline = capture["samples"], capture["baseline_g"]
+        extra = [(row[0] - rows[0][0],) + tuple(row[index + 1] - baseline[index] for index in range(3))
+                 for row in rows if row[0] in marked]
+        trace = sorted({tuple(row) for row in tuple(trace) + tuple(extra)})
+        motions.append({"record": record, "statistics": statistics,
+                        "trace": trace, "capture": metadata})
+    for item in homes:
+        if not isinstance(item, dict) or not isinstance(item.get("record"), dict):
+            raise ValueError("Invalid beta home item")
+        record, capture = item["record"], item["capture"]
+        if not isinstance(record.get("beta_telemetry"), dict):
+            if (result not in ("complete", "beta_proposed")
+                    and record.get("beta_decision") == "incomplete" and record.get("capture_valid") is False
+                    and record.get("axis") == axis and record.get("run_id", run_id) == run_id):
+                incomplete_homes.append({key: record.get(key) for key in
+                                         ("workflow_attempt", "result", "beta_decision", "beta_reason")})
+                continue
+            raise ValueError("Beta home has no valid event telemetry or incomplete-trial marker")
+        if (record.get("axis") != axis or record.get("run_id") != run_id
+                or not isinstance(record.get("beta_telemetry"), dict)):
+            raise ValueError("Beta home does not belong to this axis/run")
+        compact = item if capture.get("beta_compact") is True else compact_beta_home(capture, record)
+        plot = compact["capture"]
+        trace = plot.get("trace")
+        if (not isinstance(trace, (tuple, list)) or not 2 <= len(trace) <= 5000
+                or any(not isinstance(row, (tuple, list)) or len(row) != 4
+                       or not all(_finite(value) for value in row) for row in trace)
+                or any(first[0] >= second[0] for first, second in zip(trace, trace[1:]))
+                or not _finite(plot.get("first_sample_time_s"))):
+            raise ValueError("Invalid beta display envelope")
+        home_traces.append(compact)
+    clock = _clock()
+    title = "Accel Homing Beta %s - Suggested Threshold" % axis.upper()
+    payload = {"kind": "beta", "axis": axis, "motions": motions, "homes": home_traces,
+               "incomplete_homes": incomplete_homes,
+               "proposed_threshold_g": proposed_threshold_g, "result": result, "reason": reason,
+               "title": title, "simulated": bool(simulated), **clock}
+    data = (renderer or PNGRenderer()).render(payload, check_running=check_running)
+    path = _publish(directory, title, clock, data, check_running)
+    _check_running(check_running)
+    return {"png": path}
+
+
 def _finite(value):
     return type(value) in (int, float) and math.isfinite(value)
 
@@ -747,6 +902,8 @@ def _worker_main(source, target, dependency_directory):
             _plot_accuracy(figure, payload)
         elif kind == "noise":
             _plot_noise(figure, payload)
+        elif kind == "beta":
+            _plot_beta(figure, payload)
         else:
             raise ValueError("Unknown PNG chart render kind")
         canvas.print_png(target, metadata={
@@ -857,6 +1014,108 @@ def _plot_capture(figure, payload):
                             _number(record.get("impact_peak_g")), peak_name, _number(abs(peak_value)))])
     axis.legend(loc="best", fontsize=8)
     _finish_layout(figure, "Stationary baseline removed. Commanded travel is not physical stop accuracy.")
+
+
+def _plot_beta(figure, payload):
+    """Beta-only combined diagnostic; ordinary chart styles remain untouched."""
+    figure.set_size_inches(12, 17)
+    suggestion = _number(payload.get("proposed_threshold_g"), 6)
+    _title(figure, payload, "%s: %s g" % (payload["title"], suggestion))
+    axes = figure.subplots(7, 1)
+    colors = {"startup": "#b5c8e3", "acceleration": "#f0cb87", "cruise": "#9bcbb8",
+              "braking": "#d7b2ca", "return": "#c5c5c5"}
+    for number, axis in enumerate(axes[:3]):
+        _axes_style(axis)
+        if number >= len(payload["motions"]):
+            axis.text(.5, .5, "No valid beta motion capture", ha="center", transform=axis.transAxes)
+            _axes_summary(axis, ["Central motion %d" % (number + 1)])
+            continue
+        item = payload["motions"][number]
+        record, stats, trace, captured = item["record"], item["statistics"], item["trace"], item["capture"]
+        _traces(axis, trace)
+        axis.plot([row[0] for row in trace],
+                  [math.sqrt(sum(value * value for value in row[1:])) for row in trace],
+                  color="#202832", linewidth=.8, alpha=.8, label="XYZ magnitude")
+        labels = set()
+        for segment in stats["phases"]:
+            phase = segment["phase"]
+            first = segment["start_time_s"] - captured["first_sample_time_s"]
+            last = segment["end_time_s"] - captured["first_sample_time_s"]
+            label = phase.capitalize() if phase not in labels else None
+            axis.axvspan(first, last, color=colors[phase], alpha=.25, label=label)
+            labels.add(phase)
+        axis.plot([stats["seed_peak_time_s"] - captured["first_sample_time_s"]],
+                  [stats["seed_magnitude_peak_g"]], "o", color="#172b4d", markersize=4,
+                  label="Seed-eligible peak")
+        configured = record.get("configured_speed_mm_s", record.get("configured_homing_speed_mm_s"))
+        effective = record.get("effective_speed_mm_s", record.get("homing_speed_mm_s"))
+        _axes_summary(axis, ["Central motion %d | Configured speed: %s mm/s | Planner speed: %s mm/s" % (
+                                number + 1, _number(configured, 6), _number(effective, 6)),
+                             "Seed-eligible peak: %s g | Braking/return excluded from seed | %d full samples" % (
+                                _number(stats["seed_magnitude_peak_g"], 6), stats["sample_count"])])
+        axis.legend(loc="upper right", ncol=4, fontsize=7)
+    events = axes[3]
+    _axes_style(events, "XYZ magnitude (g)")
+    events.set_xlabel("Beta home, including rejected candidates")
+    homes = payload["homes"]
+    if homes:
+        indices = list(range(1, len(homes) + 1))
+        for key, label, color in (("pre_onset_noise", "Noise strictly before crossing", "#577d34"),
+                                  ("onset_window", "Peak in exact onset window", "#b66b24"),
+                                  ("post_stop_response", "Response after observed queue completion", "#9a5083")):
+            values = [item["record"]["beta_telemetry"][key].get("magnitude_peak_g") for item in homes]
+            events.plot(indices, values, "o-", color=color, linewidth=.8, markersize=3, label=label)
+        events.plot(indices, [item["record"]["beta_telemetry"]["first_crossing"]["magnitude_g"]
+                              for item in homes], "o-", color="#2462a6", linewidth=.8,
+                    markersize=3, label="Exact first crossing")
+        events.plot(indices, [item["record"]["beta_telemetry"]["first_crossing"]["threshold_g"]
+                              for item in homes], "--", color="#333333", linewidth=.8,
+                    label="Temporary candidate threshold")
+        events.legend(loc="best", fontsize=7, ncol=2)
+    else:
+        events.text(.5, .5, "No valid beta home event capture", ha="center", transform=events.transAxes)
+    _axes_summary(events, ["Suggested threshold: %s g | Proposal only | %d captured beta homes" % (
+                            suggestion, len(homes)),
+                          "Event statistics are computed per sample before any display reduction."] +
+                         ["Incomplete attempt %s: %s" % (
+                             _number(item.get("workflow_attempt")), str(item.get("beta_reason") or item.get("result"))[:160])
+                          for item in payload.get("incomplete_homes", [])[:2]])
+    for channel, (axis, letter, color) in enumerate(zip(axes[4:], "XYZ", ("red", "green", "blue")), 1):
+        _axes_style(axis, "%s acceleration (g)" % letter)
+        axis.set_xlabel("Time from each beta home's exact first crossing (s)")
+        for number, item in enumerate(homes):
+            record, captured = item["record"], item["capture"]
+            onset = record["beta_telemetry"]["first_crossing"]["time_s"]
+            trace = captured.get("event_trace") or captured["trace"]
+            last = number == len(homes) - 1
+            axis.plot([row[0] + captured["first_sample_time_s"] - onset for row in trace],
+                      [row[channel] for row in trace], color=color,
+                      linewidth=1.0 if last else .6, alpha=.95 if last else .23,
+                      label="Last beta home" if last else None)
+        axis.axvline(0, color="#2462a6", linestyle=":", linewidth=.8, label="Exact first crossing")
+        if homes:
+            telemetry = homes[-1]["record"]["beta_telemetry"]
+            onset = telemetry["first_crossing"]["time_s"]
+            axis.axvline(telemetry["pre_onset_noise"]["start_time_s"] - onset,
+                         color="#65747e", linestyle=":", linewidth=.7, label="Last detector arm")
+            axis.axvspan(0, telemetry["onset_window"]["end_time_s"] - onset,
+                         color="#f0cb87", alpha=.15, label="Onset window")
+            response = telemetry["post_stop_response"]
+            if _finite(response.get("boundary_time_s")):
+                boundary = response["boundary_time_s"] - onset
+                axis.axvline(boundary, color="#9a5083", linestyle="--", linewidth=.7,
+                             label="Last host-observed queue completion")
+                if _finite(response.get("end_time_s")):
+                    axis.axvspan(boundary, response["end_time_s"] - onset,
+                                 color="#d7b2ca", alpha=.12)
+            _axes_summary(axis, ["Beta home XYZ event traces | Last home emphasized | Resting offset removed"])
+        else:
+            axis.text(.5, .5, "No valid beta home trace", ha="center", transform=axis.transAxes)
+        axis.legend(loc="best", fontsize=7)
+    _finish_layout(figure,
+        "Beta suggestion only; no model staged or saved. Runtime-restoration outcome is in the command diagnostics. "
+        "Exact event metrics use full samples; plotted curves are extrema envelopes. "
+        "Queue completion is host observed, not a measurement of mechanical stopping.", payload.get("reason"))
 
 
 def _plot_accuracy(figure, payload):

@@ -26,12 +26,14 @@ try:
     from .accel_homing_charts import (_accuracy_statistics as accuracy_statistics,
                                       PNGRenderer, default_dependency_directory, preflight_renderer,
                                       validate_accuracy, write_accuracy, write_capture, write_noise,
-                                      write_noise_capture)
+                                      write_noise_capture, beta_motion_statistics,
+                                      compact_beta_home, write_beta_motion)
 except ImportError:
     from accel_homing_charts import (_accuracy_statistics as accuracy_statistics,
                                      PNGRenderer, default_dependency_directory, preflight_renderer,
                                      validate_accuracy, write_accuracy, write_capture, write_noise,
-                                     write_noise_capture)
+                                     write_noise_capture, beta_motion_statistics,
+                                     compact_beta_home, write_beta_motion)
 
 try:
     from .homing import PrinterHoming as _PrinterHoming
@@ -242,6 +244,8 @@ class AccelHomingWorkflows:
         for name, callback, description in (
                 ("ACCEL_HOMING_CALIBRATE", self.cmd_CALIBRATE,
                  "Calibrate one X or Y homing threshold with ten qualified homes"),
+                ("ACCEL_HOMING_BETA_CALIBRATE", self.cmd_BETA_CALIBRATE,
+                 "Beta motion-noise experiment: PNG and threshold proposal only"),
                 ("ACCEL_HOMING_CALIBRATE_NOISE", self.cmd_NOISE,
                  "Measure three stationary one-second noise windows and suggest calibration starts"),
                 ("ACCEL_HOMING_CANCEL", self.cmd_CANCEL,
@@ -602,6 +606,11 @@ class AccelHomingWorkflows:
                 result.update(candidate_g=session["candidate"], restarts=session["restarts"],
                               attempts=session["attempts"], **self._calibration_attempt_status(session),
                               recovery=self._calibration_recovery_status(session))
+                if session.get("beta"):
+                    result.update(beta=True, beta_phase=session.get("beta_phase"),
+                                  motion_noise=session.get("beta_motion_summary"),
+                                  motion_plan=session.get("beta_motion_plan"),
+                                  repeatability_spread_mm=session.get("repeatability_spread_mm"))
                 if session.get("stationary_noise") is not None:
                     result["stationary_noise"] = dict(session["stationary_noise"])
             session["finishing"] = True
@@ -617,7 +626,13 @@ class AccelHomingWorkflows:
                 except Exception:
                     logging.exception("accel_homing: unable to release/invalidate XY during cleanup")
         except Exception as exc:
-            if session is not None and session["mode"] in ("accuracy", "noise"):
+            if session is not None and session.get("beta"):
+                session["beta_cleanup_error"] = str(exc)
+                result = dict(result, result="aborted", proposed_threshold_g=None,
+                              operation_reason=result.get("reason"),
+                              reason="%sBeta cleanup failed: %s" % (
+                                  (str(result["reason"]) + "; ") if result.get("reason") else "", exc))
+            elif session is not None and session["mode"] in ("accuracy", "noise"):
                 result = {"result": "aborted", "reason": "workflow cleanup failed: %s" % exc}
             raise
         finally:
@@ -628,9 +643,14 @@ class AccelHomingWorkflows:
                     result = self._accuracy_result(session, result)
                 elif session is not None and session["mode"] == "noise":
                     result = self._noise_result(session, result)
+                if session is not None and session.get("beta"):
+                    # The command finalizes after central-frame/current cleanup
+                    # unwinds too, including cancellation inside a yielding call.
+                    session["beta_pending_result"] = result
             finally:
                 self.last_result = result
-                self.session = None
+                if session is None or not session.get("beta"):
+                    self.session = None
                 self.reactor.update_timer(self.timer, self.reactor.NEVER)
 
     def _shutdown(self, *args):
@@ -761,7 +781,7 @@ class AccelHomingWorkflows:
         grid["explicit_start_threshold"] = gcmd.get("START_THRESHOLD", None) is not None
         return grid
 
-    def _begin(self, gcmd, mode, axis=None, axes=None, calibration_grid=None):
+    def _begin(self, gcmd, mode, axis=None, axes=None, calibration_grid=None, save_config_default=1):
         if self.session is not None:
             raise gcmd.error("A workflow is already active; use ACCEL_HOMING_CANCEL first")
         if mode == "calibration" and calibration_grid is None:
@@ -781,7 +801,7 @@ class AccelHomingWorkflows:
                         "saved_thresholds": dict(self.owner.threshold_g),
                         "saved_back_off": self.owner.back_off_dist,
                         "save_config": (mode == "calibration" and bool(gcmd.get_int(
-                            "SAVE_CONFIG", 1, minval=0, maxval=1)))}
+                            "SAVE_CONFIG", save_config_default, minval=0, maxval=1)))}
         if mode == "calibration":
             self.session.update(calibration_grid, candidate=calibration_grid["start_threshold_g"],
                                 algorithm=SIMPLE_CALIBRATION, restarts=0,
@@ -1196,7 +1216,10 @@ class AccelHomingWorkflows:
         capture_started = False
         try:
             try:
-                self.owner.start_capture()
+                if session.get("beta"):
+                    self.owner.start_capture(beta=True)
+                else:
+                    self.owner.start_capture()
                 capture_started = True
                 letter = axis.upper()
                 gcmd = self.gcode.create_gcode_command("G28", "G28 " + letter, {letter: ""})
@@ -1207,6 +1230,8 @@ class AccelHomingWorkflows:
                 self._check_running(session)
                 self._stock_g28()(gcmd)
                 self.owner.toolhead.wait_moves()
+                if session.get("beta"):
+                    self.owner.finish_beta_home_capture(lambda: self._check_running(session))
             finally:
                 self.in_home, self.home_axis = False, None
                 try:
@@ -1268,6 +1293,12 @@ class AccelHomingWorkflows:
             self._validate_accuracy_capture(session, axis, source_record, detector_record,
                                             record, capture, record["workflow_threshold_g"])
             record["early_capture_valid"] = True
+        if session.get("beta"):
+            if not early_calibration:
+                self._validate_accuracy_capture(session, axis, source_record, detector_record,
+                                                record, capture, record["workflow_threshold_g"])
+            record["beta_telemetry"] = self.owner.beta_home_telemetry(capture, record)
+            session["beta_homes"].append(compact_beta_home(capture, record))
         if session["mode"] != "accuracy":
             session["records"].append(record)
         self._info("%s home: result %s; onset %s g; peak %s g; threshold %s g; "
@@ -1296,6 +1327,8 @@ class AccelHomingWorkflows:
     def _check_running(self, session):
         if session is None or self.session is not session:
             raise self._error("workflow cancelled or interrupted")
+        if session.get("beta") and session.get("finishing"):
+            raise self._error(session.get("finish_interrupted", "Beta is finishing or was cancelled"))
         if hasattr(self.printer, "is_shutdown") and self.printer.is_shutdown():
             raise self._error("printer is shut down")
         if self._printing():
@@ -1798,6 +1831,679 @@ class AccelHomingWorkflows:
                                       and not session.get("early_return_cleanup", False)
                                       and not session.get("axis_only_cleanup", False)))
             raise
+
+    def _beta_extractor(self):
+        report = self.printer.lookup_object("motion_report", None)
+        for name in ("dtrapqs", "trapqs"):
+            queues = getattr(report, name, {})
+            queue = queues.get("toolhead") if isinstance(queues, dict) else None
+            extractor = getattr(queue, "extract_trapq", None)
+            if callable(extractor):
+                return extractor
+        raise self._error("Beta requires the actual toolhead motion_report trapq extractor before motion")
+
+    def _beta_current_context(self, axis):
+        settings = self._status("configfile").get("settings", {})
+        steppers = {stepper.get_name() for stepper in self.owner.toolhead.get_kinematics().get_steppers()
+                    if stepper.is_active_axis(axis)}
+        configured = {}
+        changed = False
+        for name, values in (settings.items() if isinstance(settings, dict) else ()):
+            if name.split(" ", 1)[-1] not in steppers or not isinstance(values, dict):
+                continue
+            currents = {key: values[key] for key in ("run_current", "hold_current", "homing_current")
+                        if key in values}
+            if currents:
+                configured[name] = currents
+                if values.get("homing_current") is not None \
+                        and values.get("homing_current") != values.get("run_current"):
+                    changed = True
+        native = getattr(_PRINTER_G28, "__globals__", {}).get("Homing")
+        factory = native if isinstance(native, type) else None
+        helper = None
+        if factory is not None and callable(getattr(factory, "_set_homing_current", None)):
+            if not callable(getattr(self.owner.toolhead, "get_active_rails_for_axis", None)):
+                raise self._error("Beta native homing-current helper lacks its active-rail API before motion")
+            state = factory(self.printer)
+            helper = state._set_homing_current
+        context = {"configured": configured, "settings_available": isinstance(settings, dict) and bool(settings),
+                   "native_helper": None if helper is None else native.__module__ + ".Homing._set_homing_current",
+                   "matching": "native_homing_current_helper" if helper is not None else
+                               "no_changed_homing_current_exposed", "physical_current_verified": False}
+        if self.session is not None and self.session.get("beta"):
+            self.session["beta_driver_current_context"] = context
+        if changed and helper is None:
+            context["matching"] = "unsupported_changed_homing_current"
+            raise self._error("Beta found changed homing_current but the installed native homing-current "
+                              "helper is unavailable; current conditions cannot be matched before motion")
+        return helper, context
+
+    def _beta_motion_plan(self, session):
+        axis = session["axis"]
+        toolhead = self.owner.toolhead
+        extractor = self._beta_extractor()
+        for name in ("start_beta_motion_capture", "stop_beta_motion_capture",
+                     "finish_beta_home_capture", "beta_home_telemetry", "_enable_motors", "_set_accel"):
+            if not callable(getattr(self.owner, name, None)):
+                raise self._error("Beta capture capability %s is unavailable before motion" % name)
+        if not callable(getattr(toolhead, "set_position", None)):
+            raise self._error("Beta requires a temporary selected-axis coordinate before motion")
+        current_helper, current_context = self._beta_current_context(axis)
+        velocity, normal_accel = toolhead.get_max_velocity()
+        info = self.owner.rails_by_axis[axis].get_homing_info()
+        speed = min(info.speed, velocity)
+        accel = min(normal_accel, self.owner.homing_accel) if self.owner.homing_accel else normal_accel
+        rail_accel = getattr(info, "accel", None)
+        if rail_accel is not None:
+            accel = rail_accel
+        low, high = self.owner.rails_by_axis[axis].get_range()
+        center = low + (high - low) * 0.5
+        sign = 1.0 if info.positive_dir else -1.0
+        clearance = (info.position_endstop - center) * sign
+        distance = clearance * 0.5
+        target = center + sign * distance
+        if (not all(math.isfinite(value) for value in (center, clearance, distance, target))
+                or clearance <= 0 or not min(center, info.position_endstop) < target < max(center, info.position_endstop)):
+            raise self._error("Beta requires a finite central stroke strictly before the configured directional endstop")
+        status = toolhead.get_status(self.reactor.monotonic())
+        ratio = status.get("minimum_cruise_ratio", getattr(toolhead, "min_cruise_ratio", None))
+        if ratio is None and hasattr(toolhead, "max_accel_to_decel"):
+            ratio = 1.0 - toolhead.max_accel_to_decel / normal_accel
+        if (not all(type(value) in (int, float) and math.isfinite(value) and value > 0
+                    for value in (velocity, normal_accel, speed, accel, distance))
+                or type(ratio) not in (int, float) or not math.isfinite(ratio) or not 0 <= ratio < 1):
+            raise self._error("Beta cannot establish finite speed, acceleration and planner cruise settings")
+        # Include the planner's smoothing/minimum-cruise constraint, not merely
+        # the unsmoothed v^2/a ramp distance. Actual segments are checked again.
+        ramp_distance = speed * speed / (accel * (1.0 - ratio))
+        duration = distance / speed + speed / accel
+        if not math.isfinite(ramp_distance) or distance <= ramp_distance or not math.isfinite(duration):
+            raise self._error("Beta central stroke cannot reach the existing effective homing speed; "
+                              "speed was not reduced")
+        return {"axis": axis, "center_mm": center,
+                "target_mm": target, "selected_endstop_mm": info.position_endstop,
+                "center_to_selected_endstop_mm": clearance,
+                "distance_mm": distance, "configured_speed_mm_s": info.speed,
+                "effective_speed_mm_s": speed, "effective_accel_mm_s2": accel,
+                "rail_homing_accel_override_mm_s2": rail_accel,
+                "original_accel_mm_s2": normal_accel, "minimum_cruise_ratio": ratio,
+                "minimum_duration_s": duration, "extractor": extractor,
+                "current_helper": current_helper, "driver_current_context": current_context}
+
+    def _beta_check(self, session):
+        self._check_running(session)
+        if session.get("finishing"):
+            raise self._error(session.get("finish_interrupted", "Beta is finishing or was cancelled"))
+        if (self.owner.operation_generation != session["beta_generation"]
+                or getattr(self.owner, "sensor_fault", None) is not None):
+            raise self._error("Beta was interrupted or the accelerometer reported a fault")
+
+    def _beta_profile(self, plan, start, end, cutoff):
+        extracted, references = plan["extractor"](start, end)
+        segments = []
+        index = AXES[plan["axis"]]
+        sign = 1.0 if plan["target_mm"] > plan["center_mm"] else -1.0
+        for move in extracted:
+            values = (move.print_time, move.move_t, move.start_v, move.accel,
+                      move.x_r, move.y_r, move.z_r)
+            current_motion = self.session.get("beta_current_motion") if self.session else None
+            if isinstance(current_motion, dict):
+                observed = current_motion.setdefault("observed_planner_segments", [])
+                if len(observed) < 32:
+                    observed.append(dict(zip(("start_time_s", "duration_s", "start_velocity_mm_s",
+                                              "acceleration_mm_s2", "x_direction", "y_direction", "z_direction"), values)))
+            if not all(math.isfinite(value) for value in values) or move.move_t <= 0:
+                raise self._error("Beta received an invalid actual planner segment")
+            direction = (move.x_r, move.y_r, move.z_r)
+            if move.start_v == 0 and move.accel == 0:
+                continue
+            left, right = max(start, move.print_time), min(end, move.print_time + move.move_t)
+            if right <= left:
+                continue
+            if (not math.isclose(direction[index], sign, abs_tol=1e-9)
+                    or any(abs(value) > 1e-9 for i, value in enumerate(direction) if i != index)):
+                raise self._error("Beta actual planner profile contains another axis or direction")
+            velocity = move.start_v + move.accel * (left - move.print_time)
+            phase = "acceleration" if move.accel > 0 else "braking" if move.accel < 0 else "cruise"
+            segments.append({"phase": phase, "axis": plan["axis"],
+                             "start_time_s": left, "end_time_s": right,
+                             "start_velocity_mm_s": velocity, "acceleration_mm_s2": move.accel})
+        # Keep the CFFI backing references alive until all segments are copied.
+        del references
+        segments.sort(key=lambda item: item["start_time_s"])
+        phases = {item["phase"] for item in segments}
+        if phases != {"acceleration", "cruise", "braking"}:
+            raise self._error("Beta actual motion did not contain acceleration, cruise and braking")
+        for previous, current in zip(segments, segments[1:]):
+            if not math.isclose(previous["end_time_s"], current["start_time_s"], abs_tol=1e-6):
+                raise self._error("Beta actual planner profile is discontinuous")
+        for item in segments:
+            if item["phase"] in ("acceleration", "braking") and not math.isclose(
+                    abs(item["acceleration_mm_s2"]), plan["effective_accel_mm_s2"], rel_tol=1e-6, abs_tol=1e-6):
+                raise self._error("Beta actual central motion did not match the effective homing acceleration")
+            if item["phase"] == "cruise" and not math.isclose(
+                    item["start_velocity_mm_s"], plan["effective_speed_mm_s"], rel_tol=1e-6, abs_tol=1e-6):
+                raise self._error("Beta actual central motion did not reach the effective homing speed")
+        if cutoff < segments[0]["start_time_s"]:
+            segments.insert(0, {"phase": "startup", "axis": plan["axis"],
+                                "start_time_s": cutoff, "end_time_s": segments[0]["start_time_s"],
+                                "start_velocity_mm_s": 0.0, "acceleration_mm_s2": 0.0,
+                                "description": "pre-motion startup before commanded acceleration"})
+        return segments
+
+    def _beta_motion_noise(self, session, plan):
+        toolhead = self.owner.toolhead
+        kin = toolhead.get_kinematics()
+        index = AXES[session["axis"]]
+        original_position = toolhead.get_position()[index]
+        original_limit = kin.limits[index]
+        completed = False
+        failure = None
+        current_attempted = False
+        restore = session.setdefault("beta_restore", {})
+        restore.update(central_selected_frame_restored=False, central_selected_limit_restored=False,
+                       central_profile_accel_restored=False,
+                       central_driver_current_restored=plan["current_helper"] is None)
+        session["beta_phase"] = "motion_noise"
+        try:
+            # CENTERED=1 supplies this estimated coordinate. No Z or other-axis
+            # coordinate/limit is rewritten, including during cleanup.
+            position = toolhead.get_position()
+            position[index] = plan["center_mm"]
+            toolhead.set_position(position)
+            self._beta_check(session)
+            kin.limits[index] = self.owner.rails_by_axis[session["axis"]].get_range()
+            self.owner._set_accel(plan["effective_accel_mm_s2"])
+            self._beta_check(session)
+            self.owner._enable_motors(session["axis"])
+            self._beta_check(session)
+            if plan["current_helper"] is not None:
+                current_attempted = True
+                plan["current_helper"]([index], True)
+                self._beta_check(session)
+            toolhead.wait_moves()
+            self._beta_check(session)
+            session["beta_motor_settle_complete_time_s"] = toolhead.get_last_move_time()
+            for iteration in range(1, NOISE_ITERATIONS + 1):
+                session["beta_current_motion"] = {"iteration": iteration, "stage": "baseline",
+                                                   "observed_planner_segments": []}
+                token = None
+                capture = None
+                capture_failure = None
+                try:
+                    token = self.owner.start_beta_motion_capture(lambda: self._beta_check(session))
+                    self._beta_check(session)
+                    rate = token.get("sample_rate_hz")
+                    baseline = token.get("baseline_samples", ())
+                    if (type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0
+                            or len(baseline) < 50):
+                        raise self._error("Beta cannot establish moving-capture sample rate/capacity")
+                    duration = plan["minimum_duration_s"] + 1.0 + 2.0 * self.owner.stream_timeout
+                    if (not math.isfinite(duration * rate)
+                            or math.ceil(duration * rate) >= self.owner.capture_limit):
+                        raise self._error("Beta central stroke exceeds the existing capture capacity")
+                    start = toolhead.get_last_move_time()
+                    session["beta_current_motion"].update(stage="forward_motion", start_time_s=start,
+                        capture_cutoff_time_s=token["capture_cutoff_time_s"], sample_rate_hz=rate)
+                    target = [None, None, None]
+                    target[index] = plan["target_mm"]
+                    toolhead.manual_move(target, plan["effective_speed_mm_s"])
+                    self._beta_check(session)
+                    end = toolhead.get_last_move_time()
+                    token["motion_end_time_s"] = end
+                    session["beta_current_motion"].update(end_time_s=end, stage="waiting_for_motion")
+                    toolhead.wait_moves()
+                    self._beta_check(session)
+                    segments = self._beta_profile(plan, start, end, token["capture_cutoff_time_s"])
+                    session["beta_current_motion"].update(stage="capture_completion", segments=segments)
+                    self._beta_check(session)
+                    closing_token = token
+                    token = None
+                    capture = self.owner.stop_beta_motion_capture(closing_token, lambda: self._beta_check(session))
+                    self._beta_check(session)
+                    samples = capture.get("samples", ())
+                    interval = 1.0 / rate
+                    if (len(samples) < 2
+                            or samples[0][0] > segments[0]["start_time_s"] + 2.0 * interval
+                            or samples[-1][0] < end - interval):
+                        raise self._error("Beta capture does not cover the complete forward motion interval")
+                    record = {key: value for key, value in plan.items() if key not in ("extractor", "current_helper")}
+                    record.update(run_id=session["run_id"], beta=True, iteration=iteration,
+                                  segments=segments, phase_time_source="actual_commanded_trapq",
+                                  motor_settle_complete_time_s=session["beta_motor_settle_complete_time_s"])
+                    record.update(beta_motion_statistics(capture, record))
+                    cruises = [item for item in segments if item["phase"] == "cruise"]
+                    if not any(sum(item["start_time_s"] <= sample[0] < item["end_time_s"]
+                                   for sample in capture["samples"]) >= 2 for item in cruises):
+                        raise self._error("Beta capture does not cover actual full-speed cruise")
+                    session["beta_motion_iterations"].append({"record": record, "capture": capture})
+                    session["beta_current_motion"]["stage"] = "return_to_assumed_center"
+                except Exception as exc:
+                    capture_failure = exc
+                    raise
+                finally:
+                    if token is not None and getattr(self.owner, "beta_motion_capture", None) is token:
+                        try:
+                            self.owner.stop_beta_motion_capture(token, lambda: self._beta_check(session))
+                        except Exception as exc:
+                            session["beta_capture_cleanup_error"] = str(exc)
+                            if capture_failure is None:
+                                raise
+                self._beta_check(session)
+                target = [None, None, None]
+                target[index] = plan["center_mm"]
+                toolhead.manual_move(target, plan["effective_speed_mm_s"])
+                self._beta_check(session)
+                toolhead.wait_moves()
+                self._beta_check(session)
+                if self.calibration_settle_time:
+                    toolhead.dwell(self.calibration_settle_time)
+                    self._beta_check(session)
+                    toolhead.wait_moves()
+                    self._beta_check(session)
+                session["beta_current_motion"]["stage"] = "completed"
+            completed = True
+        except Exception as exc:
+            failure = exc
+            raise
+        finally:
+            cleanup_errors = []
+            try:
+                if current_attempted:
+                    try:
+                        plan["current_helper"]([index], False)
+                        restore["central_driver_current_restored"] = True
+                    except Exception as exc:
+                        cleanup_errors.append("homing current: %s" % exc)
+                try:
+                    self.owner._set_accel(plan["original_accel_mm_s2"])
+                    restore["central_profile_accel_restored"] = True
+                    if completed and not cleanup_errors:
+                        self._beta_check(session)
+                        position = toolhead.get_position()
+                        position[index] = original_position
+                        toolhead.set_position(position)
+                        self._beta_check(session)
+                        restore["central_selected_frame_restored"] = True
+                except Exception as exc:
+                    cleanup_errors.append("acceleration/frame: %s" % exc)
+            finally:
+                # Failure never restores a guessed coordinate over an unknown
+                # displacement, nor leaves the temporary selected axis homed.
+                kin.limits[index] = original_limit
+                restore["central_selected_limit_restored"] = kin.limits[index] == original_limit
+            if cleanup_errors:
+                restore["cleanup_errors"] = cleanup_errors
+                if failure is None:
+                    raise self._error("Beta cleanup failed: " + "; ".join(cleanup_errors))
+
+    def _beta_seed(self, session):
+        peaks = [item["record"]["seed_magnitude_peak_g"] for item in session["beta_motion_iterations"]]
+        if len(peaks) != NOISE_ITERATIONS or any(
+                type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in peaks):
+            raise self._error("Beta requires three valid independent forward-motion noise recordings")
+        peak = max(peaks)
+        start = Decimal(str(session["start_threshold_g"]))
+        step = Decimal(str(session["threshold_step_g"]))
+        required = max(start, Decimal("1.2") * Decimal(str(peak)), Decimal(str(peak)) + Decimal("0.1"))
+        candidate = float(start + math.ceil((required - start) / step) * step)
+        explicit = session["explicit_start_threshold"]
+        selected = session["start_threshold_g"] if explicit else candidate
+        if not explicit and self._threshold_limit() is None:
+            raise self._error("Beta automatic motion-noise seed requires a known sensor range; "
+                              "specify START_THRESHOLD explicitly")
+        self._validate_calibration_threshold(selected, "Beta initial candidate")
+        if not explicit and selected <= peak:
+            raise self._error("Beta motion-noise seed must exceed the measured forward-motion peak")
+        session["beta_motion_summary"] = {
+            "source": "independent_forward_motion_noise", "iterations": NOISE_ITERATIONS,
+            "seed_phases": ["startup", "acceleration", "cruise"],
+            "excluded_seed_phases": ["braking", "return"], "seed_peak_g": peak,
+            "initial_threshold_source": "explicit_start_threshold" if explicit else "motion_noise",
+            "required_threshold_g": float(required), "initial_threshold_g": selected,
+            "step_g": session["threshold_step_g"], "margin_factor": 1.2, "margin_g": 0.1,
+            "phase_records": [item["record"] for item in session["beta_motion_iterations"]]}
+        session.update(candidate=selected, start_threshold_g=selected, beta_phase="homing")
+        self._info("Beta forward-motion peak %.6g g; initial candidate %.6g g (%s). "
+                   "Braking/return peaks are diagnostic only" % (
+                       peak, selected, session["beta_motion_summary"]["initial_threshold_source"]))
+
+    def _beta_return_rejected(self, axis, record):
+        session = self.session
+        terminal = session.get("terminal_home")
+        if (terminal is None or terminal[0] != axis or terminal[1] is not record
+                or self.owner.last.get(axis) is not terminal[2]
+                or record.get("run_id") != session["run_id"]
+                or record.get("workflow_attempt") != session["attempts"]):
+            raise self._error("Beta rejection has no current recorded home")
+        halt = record.get("halt_travel_mm_signed")
+        if (type(halt) not in (int, float) or not math.isfinite(halt)
+                or halt != terminal[2].get("halt_travel_mm_signed")):
+            raise self._error("Beta rejection requires its current finite signed halt displacement")
+        self._require_calibration_candidate_attempts(session)
+        def current():
+            self._beta_check(session)
+            if (self.owner.last.get(axis) is not terminal[2]
+                    or terminal[2].get("halt_travel_mm_signed") != halt):
+                raise self._error("Beta rejected-return result changed")
+        current()
+        toolhead = self.owner.toolhead
+        index = AXES[axis]
+        target = toolhead.get_position()[index] - halt
+        if not math.isfinite(target):
+            raise self._error("Beta rejected-return target must be finite")
+        coordinates = [None, None, None]
+        coordinates[index] = target
+        info = self.owner.rails_by_axis[axis].get_homing_info()
+        try:
+            self.owner._limit_accel()
+            current()
+            if halt:
+                toolhead.manual_move(coordinates, min(self.reposition_speed, info.speed))
+                current()
+                toolhead.wait_moves()
+                current()
+            if self.calibration_settle_time:
+                toolhead.dwell(self.calibration_settle_time)
+                current()
+                toolhead.wait_moves()
+                current()
+        finally:
+            self.owner._restore_accel()
+        current()
+        record["beta_rejected_return_mm_signed"] = -halt
+        session["recovery"].update(count=session["recovery"]["count"] + 1, last_return_mm_signed=-halt)
+
+    def _beta_trials(self):
+        session = self.session
+        axis = session["axis"]
+        while True:
+            discovery = not session["candidate_qualified"]
+            try:
+                record, capture = self._home(axis, session["candidate"])
+            except Exception as exc:
+                source = self.owner.last.get(axis)
+                partial = (dict(source) if isinstance(source, dict)
+                           and source is not session.get("home_old_record") else {"axis": axis})
+                partial.update(axis=axis, run_id=session["run_id"], workflow_attempt=session["attempts"],
+                               workflow_threshold_g=session["candidate"],
+                               workflow_phase="discovery" if discovery else "validation",
+                               beta_decision="incomplete", beta_reason=str(exc), capture_valid=False)
+                if session["beta_homes"] and session["beta_homes"][-1]["record"].get(
+                        "workflow_attempt") == session["attempts"]:
+                    session["beta_homes"][-1]["record"].update(partial)
+                else:
+                    session["beta_homes"].append({"record": partial, "capture": {"samples": []}})
+                raise
+            del capture
+            quality, reason = self._quality(axis, record)
+            record.update(beta_decision="pending", beta_quality=quality, beta_reason=reason)
+            if quality not in ("good", "early"):
+                record["beta_decision"] = "aborted"
+                session["beta_homes"][-1]["record"].update(record)
+                raise self._error(reason + "; Beta aborted without a threshold proposal")
+            reject = quality == "early"
+            if not discovery and not reject:
+                session["validation_records"].append(record)
+                session["successes"] = len(session["validation_records"])
+                session["repeatability_spread_mm"] = self._repeatability_spread(session["validation_records"])
+                reject = session["repeatability_spread_mm"] > CALIBRATION_REPEATABILITY_MM
+                if reject:
+                    reason = "Beta running validation spread %.6g mm exceeds 2 mm" % session["repeatability_spread_mm"]
+            if reject:
+                record.update(beta_decision="rejected", beta_reason=reason,
+                              beta_running_spread_mm=session.get("repeatability_spread_mm"))
+                session["beta_homes"][-1]["record"].update(record)
+                session["early_return_cleanup"] = True
+                try:
+                    self._next_calibration_candidate(reason, apply=False)
+                    self._beta_return_rejected(axis, record)
+                    self._next_calibration_candidate(reason)
+                finally:
+                    session["beta_homes"][-1]["record"].update(record)
+                    self._invalidate_calibration_axis(session)
+                continue
+            if discovery:
+                record["beta_decision"] = "discovery_excluded"
+                session["beta_homes"][-1]["record"].update(record)
+                session.update(candidate_qualified=True, candidate_attempt=record["workflow_attempt"])
+                self._recenter(axis)
+                continue
+            record.update(beta_decision="accepted_validation",
+                          beta_running_spread_mm=session["repeatability_spread_mm"])
+            session["beta_homes"][-1]["record"].update(record)
+            if session["successes"] < REQUIRED_SUCCESSES:
+                self._recenter(axis)
+                continue
+            qualified = self._qualified_validation_records()
+            self._release_terminal_home(axis, qualified[-1])
+            self._qualified_validation_records()
+            self._finish({"result": "beta_proposed", "beta": True,
+                          "proposed_threshold_g": session["candidate"], "axis": axis,
+                          "successes": REQUIRED_SUCCESSES, "save_config": False,
+                          "model_staged": False, "run_id": session["run_id"]})
+            return
+
+    def _beta_result(self, session, result):
+        if session.get("beta_exported"):
+            return result
+        session["beta_exported"] = True
+        result = dict(result, beta=True, save_config=False, model_staged=False)
+        if session.get("finish_interrupted"):
+            primary = result.get("reason")
+            result.update(result="aborted", operation_reason=primary,
+                          reason=(str(primary) + "; " if primary else "") + session["finish_interrupted"],
+                          proposed_threshold_g=None)
+        report_generation, operation = self.preflight_generation, self.owner.operation_generation
+        def check_report():
+            if (self.session is not session or self.preflight_generation != report_generation
+                    or self.owner.operation_generation != operation):
+                raise self._error("Beta report export was cancelled or interrupted")
+        try:
+            paths = write_beta_motion(
+                self.charts_directory, session["run_id"], session["axis"],
+                session["beta_motion_iterations"], homes=session["beta_homes"],
+                result=result.get("result", "aborted"), reason=result.get("reason"),
+                proposed_threshold_g=result.get("proposed_threshold_g"), renderer=self.renderer,
+                check_running=check_report)
+            check_report()
+            result["summary_paths"] = paths
+            self._show_pngs(paths, "Beta calibration experiment")
+        except Exception as exc:
+            logging.exception("accel_homing: Beta PNG export failed")
+            result.update(chart_error=str(exc), result="aborted", proposed_threshold_g=None)
+            result.setdefault("reason", "Beta PNG export failed: %s" % exc)
+        try:
+            diagnostics = self._beta_diagnostics(session, result)
+            result["beta_diagnostics"] = diagnostics
+            self._beta_print_diagnostics(diagnostics)
+        except Exception as exc:
+            # Reporting is optional cleanup. It must never hide a motion,
+            # capture, cancellation or restore failure.
+            result["diagnostic_error"] = str(exc)
+            logging.exception("accel_homing: Beta console diagnostics failed")
+        return result
+
+    def _beta_diagnostics(self, session, result):
+        errors = []
+        def optional(label, getter):
+            try:
+                return getter()
+            except Exception as exc:
+                errors.append("%s: %s" % (label, exc))
+                return None
+        def source_hashes():
+            import hashlib
+            hashes = {}
+            for name in ("accel_homing_workflows.py", "beacon_accel_homing.py", "accel_homing_charts.py",
+                         "accel_homing_backends.py"):
+                with Path(__file__).with_name(name).open("rb") as stream:
+                    content = stream.read(2 * 1024 * 1024 + 1)
+                if len(content) > 2 * 1024 * 1024:
+                    raise ValueError("plugin source exceeds diagnostic hash bound")
+                hashes[name] = hashlib.sha256(content).hexdigest()
+            return hashes
+        backend = getattr(self.owner, "backend", None)
+        firmware = optional("firmware", lambda: {
+            key: value for key, value in self.printer.get_start_args().items()
+            if key in ("software_version", "git_version")})
+        restore = dict(session.get("beta_restore", {}))
+        restore.update(thresholds_restored=self.owner.threshold_g == session["saved_thresholds"],
+                       back_off_restored=self.owner.back_off_dist == session["saved_back_off"],
+                       model_unchanged=self.model is session.get("beta_model_object"),
+                       cleanup_error=session.get("beta_cleanup_error"),
+                       capture_cleanup_error=session.get("beta_capture_cleanup_error"))
+        restore["capture_closed"] = optional("capture restoration", lambda: all((
+            getattr(self.owner, "beta_motion_capture", None) is None,
+            getattr(self.owner, "beta_capture", None) is None,
+            getattr(self.owner, "noise_session", None) is None,
+            getattr(self.owner, "capture_batches", None) is None)))
+        plan = session.get("beta_motion_plan", {})
+        observed = optional("final acceleration", lambda: self.owner.toolhead.get_max_velocity()[1])
+        restore["final_observed_accel_mm_s2"] = observed
+        initial = plan.get("original_accel_mm_s2")
+        restore["final_accel_matches_initial"] = (math.isclose(observed, initial, rel_tol=1e-9)
+            if type(observed) in (int, float) and type(initial) in (int, float) else None)
+        expected = self._geometry(session["axis"])[1]
+        summary = dict(session.get("beta_motion_summary") or {})
+        summary.pop("phase_records", None)
+        trial_keys = ("axis", "pass", "result", "workflow_attempt", "workflow_phase",
+                      "workflow_threshold_g", "threshold_g", "arm_time_s", "onset_time_s",
+                      "trigger_onset_time_s", "capture_clock_shift_s", "travel_mm", "travel_mm_exact",
+                      "trigger_travel_mm_signed", "halt_travel_mm_signed", "beta_decision", "beta_quality",
+                      "beta_reason", "beta_running_spread_mm", "beta_rejected_return_mm_signed",
+                      "beta_telemetry", "capture_valid")
+        trials = [{key: item["record"].get(key) for key in trial_keys if key in item["record"]}
+                  for item in session["beta_homes"][:self.max_attempts]]
+        motions = []
+        for item in session["beta_motion_iterations"][:NOISE_ITERATIONS]:
+            record = dict(item["record"])
+            record["capture_quality"] = item["capture"].get("beta_capture_diagnostics")
+            record["sensor_context"] = item["capture"].get("sensor_context")
+            motions.append(record)
+        diagnostics = {
+            "schema": "accel_homing_beta/v1", "run_id": session["run_id"],
+            "initial_arguments": session["beta_arguments"],
+            "environment": {"kinematics": self.kinematics_name, "firmware": firmware,
+                            "on_disk_plugin_sha256": optional("source identity", source_hashes),
+                            "source_identity_scope": "on-disk bytes; loaded runtime bytes may differ until restart"},
+            "sensor": optional("sensor context", self.owner.noise_sensor_context),
+            "timing_policy": {"stream_timeout_s": getattr(self.owner, "stream_timeout", None),
+                              "reference_max_age_s": optional("reference age", lambda: self.owner._reference_max_age()),
+                              "homing_batch_max_age_s": getattr(backend, "max_age", getattr(self.owner, "stream_timeout", None)),
+                              "max_future_s": 0.005, "report_interval_s": getattr(backend, "interval", None),
+                              "capture_sample_limit": getattr(self.owner, "capture_limit", None)},
+            "motion_plan": plan, "driver_current_context": session.get("beta_driver_current_context"),
+            "seed": summary, "motions": motions, "trials": trials,
+            "current_motion": session.get("beta_current_motion"),
+            "capture_health": optional("capture diagnostics", lambda: self.owner.beta_capture_diagnostics()),
+            "qualification": {"expected_center_travel_mm": expected,
+                              "plausible_min_mm": expected * (1.0 - self.travel_tolerance),
+                              "plausible_max_mm": expected * (1.0 + self.travel_tolerance),
+                              "discovery_excluded": True, "checks_required": REQUIRED_SUCCESSES,
+                              "spread_limit_mm": CALIBRATION_REPEATABILITY_MM,
+                              "running_spread_mm": session.get("repeatability_spread_mm")},
+            "restoration": restore,
+            "outcome": {key: result.get(key) for key in ("result", "reason", "operation_reason", "proposed_threshold_g", "attempts",
+                                                        "attempt_limit", "attempts_remaining", "restarts",
+                                                        "successes", "summary_paths", "chart_error")},
+            "diagnostic_collection_errors": errors, "physical_position_verified": False,
+            "threshold_applied": False, "model_staged": False}
+        def clean(value, depth=0):
+            if depth > 14:
+                return "diagnostic nesting bound reached"
+            if value is None or type(value) in (bool, int):
+                return value
+            if isinstance(value, float):
+                return value if math.isfinite(value) else None
+            if isinstance(value, str):
+                return value[:2048]
+            if isinstance(value, dict):
+                return {str(key): clean(item, depth + 1) for key, item in list(value.items())[:128]
+                        if key not in ("samples", "baseline_samples", "trace", "extractor", "current_helper")}
+            if isinstance(value, (tuple, list)):
+                return [clean(item, depth + 1) for item in value[:128]]
+            return "unavailable diagnostic type"
+        return clean(diagnostics)
+
+    def _beta_print_diagnostics(self, diagnostics):
+        outcome = diagnostics["outcome"]
+        self._info("Beta complete: %s; proposed threshold %s g; no threshold/model saved. PNG %s" % (
+            outcome.get("result"), outcome.get("proposed_threshold_g"), outcome.get("summary_paths")))
+        def emit(section, data):
+            self._info("Beta diagnostic " + json.dumps({
+                "schema": diagnostics["schema"], "run_id": diagnostics["run_id"],
+                "section": section, "data": data}, separators=(",", ":"), allow_nan=False))
+        for key, value in diagnostics.items():
+            if key in ("schema", "run_id", "motions", "trials"):
+                continue
+            emit(key, value)
+        for index, motion in enumerate(diagnostics["motions"], 1):
+            phases = motion.get("phases", [])
+            emit("motion.%d" % index, {key: value for key, value in motion.items() if key != "phases"})
+            for number, phase in enumerate(phases, 1):
+                emit("motion.%d.phase.%d" % (index, number), phase)
+        for index, trial in enumerate(diagnostics["trials"], 1):
+            metrics = trial.get("beta_telemetry", {})
+            emit("attempt.%d" % index, {key: value for key, value in trial.items() if key != "beta_telemetry"})
+            if isinstance(metrics, dict):
+                for key, value in metrics.items():
+                    emit("attempt.%d.%s" % (index, key), value)
+
+    def cmd_BETA_CALIBRATE(self, gcmd):
+        axis = gcmd.get("AXIS", "").lower()
+        if axis not in AXES:
+            raise gcmd.error("AXIS must be X or Y")
+        self._require_centered(gcmd)
+        if gcmd.get_int("SAVE_CONFIG", 0, minval=0, maxval=1):
+            raise gcmd.error("Beta produces a PNG and threshold suggestion only; SAVE_CONFIG=1 is unsupported")
+        if self.session is not None:
+            raise gcmd.error("A workflow is already active; cancel it before starting Beta")
+        grid = self._calibration_grid(gcmd)
+        self._preflight([axis])
+        self._require_unhomed_xy()
+        # No beta path calls _save_model or configfile.set.
+        self._begin(gcmd, "calibration", axis, calibration_grid=grid, save_config_default=0)
+        session = self.session
+        session.update(beta=True, save_config=False, state="running", beta_phase="preflight",
+                       beta_generation=self.owner.operation_generation,
+                       beta_motion_iterations=[], beta_homes=[], beta_model_object=self.model,
+                       beta_arguments={key: gcmd.get(key, None) for key in (
+                           "AXIS", "CENTERED", "START_THRESHOLD", "STEP", "SAVE_CONFIG")})
+        try:
+            self._chart_preflight()
+            self._beta_check(session)
+            self._preflight([axis])
+            self._require_unhomed_xy()
+            plan = self._beta_motion_plan(session)
+            session["beta_motion_plan"] = {key: value for key, value in plan.items()
+                                           if key not in ("extractor", "current_helper")}
+            self._info("Beta %s: configured homing speed %.6g mm/s, effective %.6g mm/s, "
+                       "acceleration %.6g mm/s^2; three central forward recordings, no model save" % (
+                           axis.upper(), plan["configured_speed_mm_s"], plan["effective_speed_mm_s"],
+                           plan["effective_accel_mm_s2"]))
+            self._info("Beta driver/current context: %s; physical current is not measured" %
+                       plan["driver_current_context"]["matching"])
+            self._beta_motion_noise(session, plan)
+            self._beta_check(session)
+            self._require_unhomed_xy()
+            self._beta_seed(session)
+            self._beta_trials()
+        except Exception as exc:
+            if self.session is session:
+                self._finish({"result": "aborted", "reason": str(exc)},
+                             release=bool(session.get("axis_touched")
+                                          and not session.get("early_return_cleanup")
+                                          and not session.get("axis_only_cleanup")))
+            raise
+        finally:
+            pending = session.get("beta_pending_result", {"result": "aborted", "reason": "Beta did not finish"})
+            if self.session is session:
+                try:
+                    self.last_result = self._beta_result(session, pending)
+                finally:
+                    if self.session is session:
+                        self.session = None
 
     def _continue_calibration(self):
         session = self.session

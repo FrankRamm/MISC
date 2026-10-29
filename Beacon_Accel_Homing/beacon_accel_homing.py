@@ -507,6 +507,8 @@ class BeaconAccelHoming:
         self.capture_baseline = None
         self.capture_attempt = None
         self.capture_attempts = 0
+        self.beta_capture = self.beta_motion_capture = None
+        self.beta_last_diagnostics = {}
         self.kinematics_home = None
         self.kinematics_home_owner = None
         self.ordinary_home = None
@@ -603,6 +605,9 @@ class BeaconAccelHoming:
             self.ordinary_home["valid"] = False
         if self.noise_session is not None:
             self.stop_noise_measurement()
+        if self.beta_capture is not None:
+            self.beta_capture["cancelled"] = True
+            self._stop_stream()
 
     def _home_with_retract(self, homing):
         """Retract synchronously after kinematics finishes final coordinate fixes.
@@ -795,7 +800,7 @@ class BeaconAccelHoming:
             toolhead.max_accel = accel
             toolhead._calc_junction_deviation()
 
-    def _end_session(self, *args):
+    def _end_session(self, *args, beta_tail=False):
         """Stop the stream and restore the acceleration. Safe to call any time."""
         self.homing_active = False
         with self.lock:
@@ -803,7 +808,16 @@ class BeaconAccelHoming:
         self.preparing = False
         self.session_axes = {}
         self.reactor.update_timer(self.idle_timer, self.reactor.NEVER)
-        if self.helper is not None:
+        state = self.beta_capture
+        keep_tail = (beta_tail and state is not None and not state.get("cancelled")
+                     and not state.get("fault") and self.sensor_fault is None
+                     and self.capture_batches is not None
+                     and self.capture_attempt is self.last_pass
+                     and self.last_pass is not None and self.last_pass.reason == "impact"
+                     and not (hasattr(self.printer, "is_shutdown") and self.printer.is_shutdown()))
+        if keep_tail:
+            state["tail_retained"] = True
+        elif self.helper is not None:
             self._stop_stream()
         if self.toolhead is not None:
             self._restore_accel()
@@ -998,7 +1012,13 @@ class BeaconAccelHoming:
                             attempt.reason == "pressed" and record.get("kept_origin"))
             if accepted and self.last.get(attempt.axis) is record:
                 context["rails"][attempt.axis] = (self.session_axes[attempt.axis], record)
-        self._end_session()
+        # Only this successful, exact beta home transition may retain a stream
+        # for diagnostics. Error/shutdown callers keep unconditional teardown.
+        if (self.beta_capture is not None and attempt is not None
+                and attempt is self.capture_attempt and attempt.reason == "impact"):
+            self._end_session(beta_tail=True)
+        else:
+            self._end_session()
 
     def _handle_move_begin(self, hmove):
         # A standstill right before every pass (first touch and second touch)
@@ -1747,6 +1767,18 @@ class BeaconAccelHoming:
         attempt = self.attempt
         if attempt is not None and not attempt.done:
             self._fire(attempt, reason, mcu.MCU_trsync.REASON_HOST_REQUEST)
+        # Stop dispatch keeps its original priority. Diagnostics are optional
+        # and use snapshots because main-thread cleanup may replace the owner.
+        state, token = self.beta_capture, self.beta_motion_capture
+        try:
+            if state is not None:
+                quality = state["quality"]
+                quality["fault"] = quality["fault"] or reason
+            if token is not None:
+                quality = token["window"]["beta_quality"]
+                quality["fault"] = quality["fault"] or reason
+        except Exception:
+            logging.exception("accel_homing: beta fault diagnostics could not be retained")
 
     def _record_sample_timing_fault(self, phase, sensor_now, oldest, newest,
                                     cutoff=None, reason=None, sample_time=None, max_age=None):
@@ -1760,7 +1792,8 @@ class BeaconAccelHoming:
         if sample_time is None:
             sample_time = oldest if reason == "too_old" else newest
         window = self.noise_window
-        context = ("stationary_noise" if self.noise_session is not None else
+        context = ("beta_motion_noise" if self.beta_motion_capture is not None else
+                   "stationary_noise" if self.noise_session is not None else
                    "baseline" if self.preparation is not None else
                    "homing" if self.attempt is not None else "stream")
         self.sample_timing_fault = {
@@ -2204,6 +2237,9 @@ class BeaconAccelHoming:
         if window is None or window["complete"] or self.sensor_fault is not None:
             return
         session = self.noise_session
+        quality = window.get("beta_quality")
+        if quality is not None:
+            quality["packet_count"] += 1
         if (self._noise_shared_client() or self.noise_sensor_context() != session["context"]
                 or self.session_scale != self.scale
                 or self.sensor is not session["sensor"] or self.helper is not session["helper"]
@@ -2228,6 +2264,8 @@ class BeaconAccelHoming:
             return
         now = self.reactor.monotonic()
         sensor_now = self.main_mcu.estimated_print_time(now)
+        if quality is not None:
+            self._update_beta_quality_times(quality, start, interval, count, sensor_now)
         max_age = self._reference_max_age()
         mapping = self.noise_session["context"]["capture_axes_map"]
         count_g = self.noise_session["context"]["count_g"]
@@ -2256,6 +2294,8 @@ class BeaconAccelHoming:
                     if (gap > 5.0 * interval + 0.000003
                             or (window["interval"] is not None
                                 and abs(interval - window["interval"]) > max(0.000003, interval * 0.10))):
+                        if quality is not None:
+                            quality["gap_observations"] += 1
                         self._sensor_fault("sample_gap")
                         return
                 values = tuple(axis[number] for axis in raw)
@@ -2263,6 +2303,10 @@ class BeaconAccelHoming:
                         or (self.backend is None and CLIPPED in values)
                         or (full_scale is not None
                             and any(abs(value * count_g) >= full_scale for value in values))):
+                    if quality is not None:
+                        quality["clipped_axis_values"] += sum(value == CLIPPED for value in values) if self.backend is None else 0
+                        quality["saturation_axis_values"] += sum(
+                            abs(value * count_g) >= full_scale for value in values) if full_scale is not None else 0
                     self._sensor_fault("invalid_data")
                     return
                 if len(window["samples"]) >= self.capture_limit:
@@ -2272,14 +2316,161 @@ class BeaconAccelHoming:
                 if window["samples"] and xyz != window["samples"][0][1:]:
                     window["changed"] = True
                 window["samples"].append((when,) + xyz)
+                if quality is not None:
+                    quality["sample_count"] += 1
                 window["last"], window["interval"] = when, interval
                 self.last_batch = now
-                if when - window["samples"][0][0] + 0.000000001 >= window["duration"]:
+                if (window["duration"] is not None
+                        and when - window["samples"][0][0] + 0.000000001 >= window["duration"]):
                     window["complete"] = True
                     return
 
-    def start_capture(self):
+    @staticmethod
+    def _new_beta_quality(context):
+        return {"sensor_context": context, "packet_count": 0, "sample_count": 0,
+                "min_sample_rate_hz": None, "max_sample_rate_hz": None,
+                "maximum_packet_sample_age_s": None, "gap_observations": 0,
+                "clipped_axis_values": 0, "saturation_axis_values": 0, "fault": None}
+
+    @staticmethod
+    def _update_beta_quality_times(quality, start, interval, count, sensor_now):
+        if all(math.isfinite(value) for value in (start, interval, sensor_now)) and interval > 0:
+            rate = 1.0 / interval
+            quality["min_sample_rate_hz"] = min(quality["min_sample_rate_hz"] or rate, rate)
+            quality["max_sample_rate_hz"] = max(quality["max_sample_rate_hz"] or rate, rate)
+            quality["maximum_packet_sample_age_s"] = max(
+                quality["maximum_packet_sample_age_s"] if quality["maximum_packet_sample_age_s"] is not None else
+                sensor_now - start, sensor_now - start)
+
+    def beta_capture_diagnostics(self):
+        """Bounded current/last beta metadata for same-command console reports."""
+        try:
+            state, token = self.beta_capture, self.beta_motion_capture
+            if state is not None:
+                summary = {**state["quality"], "phase": "beta_home", "cancelled": state["cancelled"],
+                           "first_sample_time_s": state["first_sample_time_s"],
+                           "last_sample_time_s": state["last_sample_time_s"],
+                           "stop_response": state["stop_response"], "capture_dropped": self.capture_dropped}
+            elif token is not None:
+                window = token["window"]
+                summary = {**window["beta_quality"], "phase": "beta_motion",
+                           "first_sample_time_s": window["samples"][0][0] if window["samples"] else None,
+                           "last_sample_time_s": window["last"], "capture_dropped": 0,
+                           "baseline_sample_count": len(token["baseline_samples"]),
+                           "baseline_first_sample_time_s": token["baseline_samples"][0][0],
+                           "baseline_last_sample_time_s": token["baseline_samples"][-1][0]}
+            else:
+                summary = self.beta_last_diagnostics
+            return json.loads(json.dumps(summary, allow_nan=False))
+        except Exception:
+            return {"diagnostics_available": False}
+
+    def start_beta_motion_capture(self, check_running):
+        """Acquire a fresh offset, then an independent validated moving trace."""
+        check_running()
+        if self.beta_motion_capture is not None or self.beta_capture is not None:
+            raise self.printer.command_error("accel_homing: beta capture is already active")
+        self.beta_last_diagnostics = {"phase": "beta_motion_start"}
+        context = self.start_noise_measurement()
+        session = self.noise_session
+        self.beta_last_diagnostics = {"phase": "beta_stationary_reference", "sensor_context": context}
+        try:
+            baseline = self.collect_noise_window(check_running, 1.0)
+            check_running()
+            rows = tuple(baseline["samples"])
+            offset = tuple(math.fsum(row[index] for row in rows) / len(rows) for index in (1, 2, 3))
+            cutoff = self.main_mcu.estimated_print_time(self.reactor.monotonic())
+            window = {"index": session["windows_started"] + 1, "cutoff": cutoff,
+                      "duration": None, "samples": [], "last": None, "interval": None,
+                      "complete": False, "changed": False, "beta_quality": self._new_beta_quality(context)}
+            token = {"session": session, "window": window, "sensor_context": context,
+                     "generation": self.operation_generation, "baseline_samples": rows,
+                     "baseline_g": offset, "capture_cutoff_time_s": cutoff,
+                     "sample_rate_hz": (len(rows) - 1) / (rows[-1][0] - rows[0][0]),
+                     "started": self.reactor.monotonic()}
+            with self.lock:
+                self.noise_window = window
+                self.beta_motion_capture = token
+            return token
+        except Exception:
+            self.beta_last_diagnostics.update(fault=self.sensor_fault,
+                                              sample_timing_fault=self.sample_timing_fault)
+            if self.noise_session is session:
+                try:
+                    self.stop_noise_measurement()
+                except Exception:
+                    logging.exception("accel_homing: beta reference stream cleanup failed")
+            raise
+
+    def _check_beta_motion_capture(self, token, check_running):
+        check_running()
+        session, window = token["session"], token["window"]
+        if (self.beta_motion_capture is not token or self.noise_session is not session
+                or self.noise_window is not window or self.operation_generation != token["generation"]
+                or self._noise_shared_client() or self.noise_sensor_context() != token["sensor_context"]
+                or self.session_scale != self.scale or self.sensor is not session["sensor"]
+                or self.helper is not session["helper"]
+                or (self.backend is None and self.helper._scale != session["helper_scale"])):
+            raise self.printer.command_error("accel_homing: beta moving capture was interrupted or changed context")
+        if self.sensor_fault is not None:
+            raise self.printer.command_error("accel_homing: beta moving capture: %s" % FAILURES[self.sensor_fault])
+        now = self.reactor.monotonic()
+        last = window["last"]
+        if ((last is None and now - token["started"] > STREAM_START_TIMEOUT)
+                or (last is not None and self.main_mcu.estimated_print_time(now) - last > self.stream_timeout)):
+            raise self.printer.command_error("accel_homing: beta moving capture stopped receiving fresh samples")
+
+    def stop_beta_motion_capture(self, token, check_running):
+        """Close only this beta subscription; return every validated XYZ row."""
+        try:
+            self._check_beta_motion_capture(token, check_running)
+            window = token["window"]
+            end = token.get("motion_end_time_s")
+            if end is not None:
+                if type(end) not in (int, float) or not math.isfinite(end):
+                    raise self.printer.command_error("accel_homing: beta motion end time must be finite")
+                deadline = self.reactor.monotonic() + STREAM_START_TIMEOUT
+                while window["last"] is None or window["last"] < end:
+                    self._check_beta_motion_capture(token, check_running)
+                    now = self.reactor.monotonic()
+                    if now >= deadline:
+                        raise self.printer.command_error("accel_homing: beta moving capture does not cover motion end")
+                    self.reactor.pause(now + 0.005)
+            with self.lock:
+                rows = tuple(window["samples"])
+            if len(rows) < BASELINE_MIN_SAMPLES or not window["changed"]:
+                raise self.printer.command_error("accel_homing: beta moving capture is insufficient or frozen")
+            baseline = token["baseline_samples"]
+            return {"samples": rows, "baseline_g": token["baseline_g"], "dropped": 0,
+                    "fault": None, "sensor_context": token["sensor_context"],
+                    "_noise_context": token["sensor_context"],
+                    "baseline_first_sample_time_s": baseline[0][0],
+                    "baseline_last_sample_time_s": baseline[-1][0],
+                    "baseline_sample_count": len(baseline), "sample_rate_hz": token["sample_rate_hz"],
+                    "capture_cutoff_time_s": token["capture_cutoff_time_s"],
+                    "first_sample_time_s": rows[0][0], "last_sample_time_s": rows[-1][0],
+                    "raw_samples_validated": True,
+                    "beta_capture_diagnostics": self.beta_capture_diagnostics()}
+        finally:
+            if self.beta_motion_capture is token:
+                self.beta_last_diagnostics = self.beta_capture_diagnostics()
+                self.beta_motion_capture = None
+                if self.noise_session is token["session"]:
+                    failed = sys.exc_info()[0] is not None
+                    try:
+                        self.stop_noise_measurement()
+                    except Exception:
+                        if not failed:
+                            raise
+                        logging.exception("accel_homing: beta moving stream cleanup failed")
+
+    def start_capture(self, beta=False):
         """Capture one requested workflow in memory; no streaming or motion."""
+        beta_context = None
+        if beta:
+            if self._noise_shared_client() or self.beta_motion_capture is not None:
+                raise self.printer.command_error("accel_homing: beta home requires an exclusive sensor capture")
+            beta_context = self.noise_sensor_context()
         with self.lock:
             if self.capture_batches is not None:
                 raise self.printer.command_error("accel_homing: capture already active")
@@ -2288,23 +2479,177 @@ class BeaconAccelHoming:
             self.capture_baseline = None
             self.capture_attempt = None
             self.capture_attempts = 0
+            if beta:
+                self.beta_capture = {"context": beta_context, "generation": self.operation_generation,
+                                     "sensor": self.sensor, "helper": self.helper,
+                                     "helper_scale": dict(self.helper._scale) if self.backend is None else None,
+                                     "first_sample_time_s": None, "last_sample_time_s": None,
+                                     "interval_s": None, "fault": None, "cancelled": False,
+                                     "tail_retained": False, "stop_response": None,
+                                     "quality": self._new_beta_quality(beta_context)}
+
+    def _inspect_beta_capture_batch(self, state, params):
+        """Validate original raw rows after detection, before clip decoding."""
+        reason = None
+        quality = state["quality"]
+        quality["packet_count"] += 1
+        try:
+            context = state["context"]
+            if (state["cancelled"] or self.operation_generation != state["generation"]
+                    or self.sensor is not state["sensor"] or self.helper is not state["helper"]
+                    or self._noise_shared_client() or self.noise_sensor_context() != context
+                    or self.session_scale != self.scale
+                    or (self.backend is None and self.helper._scale != state["helper_scale"])):
+                reason = "scale"
+            elif any(params.get(key, 0) for key in ("errors", "overflows")):
+                reason = "data_error"
+            else:
+                data = params["data"]
+                count = sample_count(data)
+                width = 3 if isinstance(data, tuple) else 6
+                if count < 2 or len(data) % width:
+                    reason = "invalid_data"
+                else:
+                    interval = params["delta_clock"] / (count - 1.0) / self.beacon_freq
+                    start = self.clock_to_time(params["start_clock"])
+                    now = self.main_mcu.estimated_print_time(self.reactor.monotonic())
+                    self._update_beta_quality_times(quality, start, interval, count, now)
+                    rate = 800.0 if self.backend is None else self.backend.min_rate * 0.98
+                    if (not all(math.isfinite(value) for value in (start, interval, now))
+                            or interval <= 0 or 1.0 / interval < rate):
+                        reason = "sample_rate"
+                    elif (now - start > self._reference_max_age()
+                          or start + (count - 1) * interval - now > 0.005):
+                        reason = "stale_data"
+                    elif (state["last_sample_time_s"] is not None
+                          and (start <= state["last_sample_time_s"]
+                               or start - state["last_sample_time_s"] > 5 * interval + 0.000003
+                               or abs(interval - state["interval_s"]) > max(0.000003, interval * 0.10))):
+                        reason = "sample_gap"
+                        quality["gap_observations"] += 1
+                    else:
+                        raw = [axis_values(sample_slice(data, count), index) for index in range(3)]
+                        full_scale, count_g = context["full_scale_g"], context["count_g"]
+                        quality["clipped_axis_values"] += sum(value == CLIPPED for channel in raw for value in channel) if self.backend is None else 0
+                        quality["saturation_axis_values"] += sum(
+                            abs(value * count_g) >= full_scale for channel in raw for value in channel) if full_scale is not None else 0
+                        if any(not math.isfinite(value)
+                               or (self.backend is None and value == CLIPPED)
+                               or (full_scale is not None and abs(value * count_g) >= full_scale)
+                               for channel in raw for value in channel):
+                            reason = "invalid_data"
+                        else:
+                            if state["first_sample_time_s"] is None:
+                                state["first_sample_time_s"] = start
+                            state["last_sample_time_s"] = start + (count - 1) * interval
+                            state["interval_s"] = interval
+                            quality["sample_count"] += count
+        except Exception:
+            reason = "invalid_data"
+        if reason is not None:
+            state["fault"] = state["fault"] or reason
+            quality["fault"] = quality["fault"] or reason
+            # Never invoke _fire while holding the non-reentrant capture lock.
+            if (self.beta_capture is state and self.capture_batches is not None
+                    and self.operation_generation == state["generation"] and not state["cancelled"]):
+                self._sensor_fault(reason)
+
+    def finish_beta_home_capture(self, check_running):
+        """Observe queue completion and collect a bounded diagnostic tail only."""
+        state = self.beta_capture
+        if state is None or self.capture_batches is None or not state["tail_retained"]:
+            raise self.printer.command_error("accel_homing: no completed beta home capture for a response tail")
+        boundary = self.main_mcu.estimated_print_time(self.reactor.monotonic())
+        state["stop_response"] = {"boundary_source": "host_observed_queue_completion",
+                                  "boundary_time_s": boundary, "window_s": IMPACT_WINDOW,
+                                  "complete": False, "available": False}
+        deadline = self.reactor.monotonic() + STREAM_START_TIMEOUT
+        try:
+            while True:
+                check_running()
+                if (self.beta_capture is not state or state["cancelled"]
+                        or self.operation_generation != state["generation"]):
+                    raise self.printer.command_error("accel_homing: beta response capture was interrupted")
+                if state["fault"] or self.sensor_fault is not None:
+                    raise self.printer.command_error("accel_homing: beta response capture has a sensor fault")
+                last = state["last_sample_time_s"]
+                if last is not None and last >= boundary + IMPACT_WINDOW:
+                    state["stop_response"].update(available=True, complete=True)
+                    break
+                now = self.reactor.monotonic()
+                if now >= deadline:
+                    state["stop_response"].update(
+                        available=last is not None and last >= boundary,
+                        reason="bounded_tail_incomplete")
+                    break
+                self.reactor.pause(now + 0.005)
+        except Exception:
+            if self.beta_capture is state:
+                try:
+                    self._stop_stream()
+                except Exception:
+                    logging.exception("accel_homing: beta response stream cleanup failed")
+            raise
 
     def _capture_batch(self, params):
         data = params["data"]
         count = sample_count(data)
+        state = self.beta_capture
         if count < 2:
+            if state is not None:
+                state["fault"] = state["fault"] or "invalid_data"
+                if (self.beta_capture is state and self.operation_generation == state["generation"]
+                        and not state["cancelled"]):
+                    self._sensor_fault("invalid_data")
             return
+        if state is not None:
+            self._inspect_beta_capture_batch(state, params)
+        overflow = False
         with self.lock:
             if self.capture_batches is None:
                 return
+            if self.beta_capture is not state:
+                return
             if self.capture_samples + count > self.capture_limit:
                 self.capture_dropped += count
-                return
-            self.capture_batches.append((params["start_clock"], params["delta_clock"],
-                                         data, self.session_scale["scale"] / 1000.0))
-            self.capture_samples += count
+                overflow = True
+                if state is not None:
+                    state["fault"] = state["fault"] or "capture_overflow"
+            else:
+                self.capture_batches.append((params["start_clock"], params["delta_clock"],
+                                             data, self.session_scale["scale"] / 1000.0))
+                self.capture_samples += count
+        if (overflow and state is not None and self.beta_capture is state
+                and self.operation_generation == state["generation"] and not state["cancelled"]):
+            self._sensor_fault("proof_overflow")
 
     def stop_capture(self):
+        state = self.beta_capture
+        if state is None:
+            return self._stop_capture_data()
+        try:
+            captured = self._stop_capture_data()
+            captured["beta_capture"] = {"version": 1, "sensor_context": state["context"],
+                                        "raw_samples_validated": not state["fault"] and not state["cancelled"],
+                                        "fault": state["fault"], "cancelled": state["cancelled"],
+                                        "stop_response": state["stop_response"],
+                                        "quality": self.beta_capture_diagnostics()}
+            if state["fault"]:
+                captured["fault"] = captured.get("fault") or state["fault"]
+            return captured
+        finally:
+            if self.beta_capture is state:
+                self.beta_last_diagnostics = self.beta_capture_diagnostics()
+                self.beta_capture = None
+                failed = sys.exc_info()[0] is not None
+                try:
+                    self._stop_stream()
+                except Exception:
+                    if not failed:
+                        raise
+                    logging.exception("accel_homing: beta home stream cleanup failed")
+
+    def _stop_capture_data(self):
         """Convert bounded captured batches to machine-axis g off the trigger path.
 
         `samples` include gravity and bias; `baseline_g` must be subtracted when
@@ -2380,6 +2725,90 @@ class BeaconAccelHoming:
                 # Used only for in-process provenance; workflows remove this
                 # reference before exporting metadata or publishing status.
                 "_record": None if attempt is None else attempt.record}
+
+    def beta_home_telemetry(self, capture, record):
+        """Exact beta diagnostics from retained rows; never alter legacy peaks."""
+        finite = lambda value: type(value) in (int, float) and math.isfinite(value)
+        beta = capture.get("beta_capture")
+        detector = capture.get("detector")
+        samples, baseline = capture.get("samples"), capture.get("baseline_g")
+        if (not isinstance(beta, dict) or beta.get("raw_samples_validated") is not True
+                or capture.get("fault") or capture.get("dropped", 0)
+                or not isinstance(detector, dict) or detector.get("impact_metric") != "xyz_magnitude"
+                or detector.get("axis") != record.get("axis") or detector.get("attempt_count") != 1
+                or not isinstance(samples, (tuple, list)) or not 2 <= len(samples) <= self.capture_limit
+                or not isinstance(baseline, (tuple, list)) or len(baseline) != 3
+                or not all(finite(value) for value in baseline)):
+            raise self.printer.command_error("accel_homing: beta event requires its complete raw XYZ capture")
+        onset_index = detector.get("onset_sample_index")
+        arm, threshold = detector.get("arm_time_s"), detector.get("threshold_g")
+        if (type(onset_index) is not int or not 0 <= onset_index < len(samples)
+                or detector.get("onset_sample_matches") != 1 or not finite(arm)
+                or not finite(threshold) or threshold <= 0):
+            raise self.printer.command_error("accel_homing: beta event lacks its exact first-crossing row")
+        levels, deltas, previous = [], [], None
+        for row in samples:
+            if (not isinstance(row, (tuple, list)) or len(row) != 4
+                    or not all(finite(value) for value in row)
+                    or (previous is not None and row[0] <= previous)):
+                raise self.printer.command_error("accel_homing: beta event has invalid raw sample times")
+            previous = row[0]
+            xyz = tuple(row[index + 1] - baseline[index] for index in range(3))
+            level = math.sqrt(sum(value * value for value in xyz))
+            if not finite(level):
+                raise self.printer.command_error("accel_homing: beta event magnitude is not finite")
+            deltas.append(xyz)
+            levels.append(level)
+        onset = samples[onset_index][0]
+        if detector.get("onset_time_s") != onset or onset < arm:
+            raise self.printer.command_error("accel_homing: beta first-crossing identity/time changed")
+        tolerance = max(1e-12, threshold * 1e-12)
+        if levels[onset_index] < threshold - tolerance:
+            raise self.printer.command_error("accel_homing: beta first-crossing row is below its trigger")
+        prefix = [index for index in range(onset_index) if samples[index][0] >= arm]
+        if any(levels[index] > threshold + tolerance for index in prefix):
+            raise self.printer.command_error("accel_homing: beta capture crossed its trigger before the selected row")
+
+        def summary(indices):
+            if not indices:
+                return {"sample_count": 0, "first_sample_time_s": None, "last_sample_time_s": None,
+                        "magnitude_peak_g": None, "peak_time_s": None, "axis_absolute_peak_g": None}
+            peak = max(indices, key=lambda index: levels[index])
+            return {"sample_count": len(indices), "first_sample_time_s": samples[indices[0]][0],
+                    "last_sample_time_s": samples[indices[-1]][0],
+                    "magnitude_peak_g": levels[peak], "peak_time_s": samples[peak][0],
+                    "axis_absolute_peak_g": {axis: max(abs(deltas[index][channel]) for index in indices)
+                                              for channel, axis in enumerate("xyz")}}
+
+        noise = summary(prefix)
+        noise.update(start_time_s=arm, end_time_s=onset, interval="[arm, first_crossing)")
+        end = onset + IMPACT_WINDOW
+        impact = summary([index for index in range(onset_index, len(samples)) if samples[index][0] <= end])
+        impact.update(start_time_s=onset, end_time_s=end, interval="[first_crossing, window_end]",
+                      complete=samples[-1][0] >= end)
+        response = beta.get("stop_response")
+        if (isinstance(response, dict) and response.get("boundary_source") == "host_observed_queue_completion"
+                and finite(response.get("boundary_time_s")) and finite(response.get("window_s"))
+                and response["window_s"] > 0):
+            boundary, until = response["boundary_time_s"], response["boundary_time_s"] + response["window_s"]
+            response = dict(response)
+            response.update(summary([index for index, row in enumerate(samples) if boundary <= row[0] <= until]))
+            response.update(start_time_s=boundary, end_time_s=until,
+                            available=response["sample_count"] > 0,
+                            complete=bool(response.get("complete") and samples[-1][0] >= until))
+            if not response["available"]:
+                response["reason"] = "no_samples_after_host_observed_queue_completion"
+        else:
+            response = {**summary([]), "available": False, "complete": False,
+                        "boundary_source": "host_observed_queue_completion", "boundary_time_s": None,
+                        "reason": "no_host_observed_queue_completion_boundary"}
+        return {"version": 1, "clock_domain": "sensor_print_time_seconds", "impact_metric": "xyz_magnitude",
+                "capture_diagnostics": beta.get("quality", {}),
+                "pre_onset_noise": noise,
+                "first_crossing": {"sample_index": onset_index, "time_s": onset,
+                                   "magnitude_g": levels[onset_index], "xyz_delta_g": deltas[onset_index],
+                                   "threshold_g": threshold},
+                "onset_window": impact, "post_stop_response": response}
 
     def _record(self, attempt):
         to_g = attempt.count_g
