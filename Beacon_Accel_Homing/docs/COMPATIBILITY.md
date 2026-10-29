@@ -6,11 +6,13 @@
 proof workflow for CALIBRATE and its newly saved vector models. It requires
 a discovery impact after >20 mm using verified stock single-axis G28, then
 ten impact measurements from the selected axis's configured midpoint. Merely
-crossing 20 mm never qualifies a candidate. Each impact beyond 20 mm must fit
-the configured midpoint-to-endstop distance within the existing tolerance
-(default 20%). A >2 mm running spread immediately raises the candidate and
-restarts discovery; passing still requires ten checks. An implausible >20 mm
-hit aborts without automatic recentering. Old models/manual overrides retain the
+crossing 20 mm never qualifies a candidate. To qualify, an impact beyond 20 mm
+must fit the configured midpoint-to-endstop distance within the existing
+tolerance (default 20%). A >2 mm running spread immediately raises the
+candidate and restarts discovery; passing still requires ten checks. Premature
+hits, including those beyond 20 mm but below the lower distance limit, can
+reverse signed commanded travel and retry within shared recovery budgets.
+An impact beyond 20 mm above the upper limit aborts without a return. Old models/manual overrides retain the
 legacy algorithms described below. Regression sources cover both paths; neither
 commands nor step counts establish actual physical position.
 
@@ -500,26 +502,34 @@ discovery impact is excluded from the following ten centered checks; their
 max-minus-min spread must be at most 2 mm. The running spread is checked after
 every accepted impact; >2 mm immediately raises the candidate and restarts
 discovery and all ten checks.
-For discovery and every validation impact beyond 20 mm, commanded trigger
-travel must also lie inside the inclusive band
+To qualify, discovery and every validation impact beyond 20 mm must have
+commanded trigger travel inside the inclusive band
 `expected * (1 - calibration_travel_tolerance)` through
 `expected * (1 + calibration_travel_tolerance)`, where `expected` is the absolute
 configured midpoint-to-endstop distance and the existing tolerance defaults
-to 0.20. Outside this band, the endstop coordinate is untrustworthy: the run
-aborts, invalidates only the selected axis's homed state, and requires manual
-XY centering before a new command. It does not return, raise the threshold or
-write a model. Other-axis/Z state is preserved. This checks commanded-travel
-plausibility, not actual position or contact with the intended stop.
-An impact at or before 20 mm instead uses recorded signed start-to-halt travel
-to return only the selected axis to its estimated starting point, settles,
-and retries discovery automatically at the next candidate. It clears the
-selected axis's homed state and the validation window. There is no manual
-fallback when return checks fail. Sensor faults, missing or uncertain evidence
-and homing errors abort; stock homing errors may release all motors.
+to 0.20. An impact beyond 20 mm above the upper limit aborts without a return,
+threshold increase or model write. It invalidates only the selected axis's
+homed state and requires manual XY centering before a new command. Other-axis/Z
+state is preserved. This checks commanded-travel plausibility, not actual
+position or contact with the intended stop.
+
+An impact at or before 20 mm, or strictly below the lower limit, instead uses
+recorded signed start-to-halt travel to return only the selected axis to its
+estimated starting point if all return checks and budgets pass. After a
+successful return it advances one candidate step, clears the selected axis's
+homed state and validation window, and restarts discovery after settling. All
+premature returns share fixed command-wide count and reserved-distance limits,
+including <=20 mm returns. The reservations survive candidate resets and are
+not refunded after an interrupted return. Qualified-impact midpoint returns
+are not included in these recovery budgets. Denial makes no return or threshold
+increase and invalidates only the suspect axis's homed state. There is no
+manual fallback within that run when return checks fail. Sensor faults, missing
+or uncertain evidence and homing errors abort; stock homing errors may release all motors.
 These bounded early reversals retain their existing homing acceleration cap
 and configured settling wait.
-See [SIMPLE_CALIBRATION.md](SIMPLE_CALIBRATION.md) for the per-return bounds
-and commanded-travel limitations.
+See [SIMPLE_CALIBRATION.md](SIMPLE_CALIBRATION.md) for per-return and cumulative
+limits. No encoder measures the carriage position, and these checks do not
+automatically diagnose binding.
 
 TEST/CHARTS use the same manual preparation, with both XY axes unhomed, and
 start directly with `ACCEL_HOMING_TEST CENTERED=1` or

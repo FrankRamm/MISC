@@ -165,8 +165,8 @@ it neither writes the file nor activates the new threshold for ordinary
 homing. The workflow restores the previous active thresholds when it ends.
 The staged model supplies its threshold after saving and reloading, unless a
 manual override takes priority. An ordinary `RESTART` discards unsaved staged
-values. A clean calibration has one
-discovery impact beyond 20 mm and ten validation homes: eleven monitored moves in total.
+values. A clean calibration has one plausible discovery impact beyond 20 mm
+and ten validation homes: eleven monitored moves in total.
 With `SAVE_CONFIG=0`, the completed axis remains homed. Before calibrating the
 other axis, use your machine's appropriate controls to leave both XY axes
 unhomed and physically center XY by hand again.
@@ -300,27 +300,35 @@ use `START_THRESHOLD=1 STEP=0.25`; the noise measurement still runs first.
 
 X or Y selects movement; all three sensor channels contribute to the
 baseline-subtracted magnitude. Discovery continues until an impact; reaching
-20 mm alone never selects a candidate. An impact after strictly more than
-20 mm must fit the configured midpoint-to-endstop distance within the existing
-`calibration_travel_tolerance` (default 20%). This applies to discovery and
+20 mm alone never selects a candidate. To qualify, an impact must be strictly
+beyond 20 mm and within the inclusive configured midpoint-to-endstop band set
+by `calibration_travel_tolerance` (default 20%). This applies to discovery and
 every validation impact. A plausible discovery selects the candidate, then
 only that axis returns to its configured midpoint. Only the following ten
 centered impacts count toward repeatability. The running max-minus-min spread
 is checked after every accepted impact: >2 mm immediately increases by STEP,
 clears the window, recenters that axis and restarts discovery. Passing still
-requires ten checks with spread <=2 mm. An impact at or
-before 20 mm stops immediately, then automatically reverses recorded signed
-halted travel to the estimated starting point if the return checks pass.
-It settles and restarts discovery at the next STEP candidate; START_THRESHOLD/STEP
-cannot change mid-run. The 40-attempt default
-budget includes discovery and validation across all retries; the default
-threshold ceiling remains 12 g or 80% of range. Sensor faults or a move with
-no impact abort instead of raising thresholds. Missing, stale or inconsistent
-return evidence also aborts; it never authorizes automatic fault recovery.
-An impact beyond 20 mm outside the inclusive expected-distance tolerance band
-aborts without a return, threshold increase or model write. Only the suspect
-axis's homed state is invalidated; the operator must physically center XY
-and prepare a new command. This guards plausibility, not physical contact.
+requires ten fresh checks with spread <=2 mm.
+
+An impact at or before 20 mm, or strictly below the lower expected-distance
+limit, is premature. If the return checks and shared recovery budgets pass,
+automatically reverse the selected axis's recorded signed start-to-halt travel,
+including post-trigger travel, to its estimated starting point. After a
+successful return it advances one STEP and restarts discovery after settling;
+START_THRESHOLD/STEP cannot change mid-run. Both short and longer premature
+returns consume the same command-wide count and cumulative commanded-distance
+budgets, which survive candidate resets. Qualified-impact midpoint returns
+are outside these recovery budgets. See the [exact limits and status
+fields](SIMPLE_CALIBRATION.md#automatic-early-impact-returns).
+
+The 40-attempt default budget still includes discovery and validation across
+all retries; the default threshold ceiling remains 12 g or 80% of range. Sensor
+faults, a move with no impact, missing or inconsistent return evidence, and
+budget exhaustion abort without a threshold increase. An impact beyond 20 mm
+and above the upper expected-distance limit also aborts without a return,
+threshold increase or model write. Only the suspect axis's homed state is
+invalidated; the operator must physically center XY and prepare a new command.
+These checks guard commanded-travel plausibility, not physical contact.
 
 The initial physical center is confirmed by the operator while XY is unhomed.
 Discovery and validation both use verified stock axis homing. After a qualifying
@@ -330,8 +338,9 @@ acceleration restored after homing and an explicit `calibration_settle_time`
 wait (default 0.25 s) after the return. Early reversals keep their existing
 homing acceleration cap and settling wait. Homing speed and its cap are unchanged.
 Other axes are not commanded to move. Midpoint centering assumes the
-accepted impact was the endstop; early returns estimate the previous starting
-point from commanded steps. Neither provides encoder feedback. Stock G28 fatal
+accepted impact was the endstop; premature returns estimate the previous
+starting point from commanded steps. Neither provides encoder feedback or
+automatically diagnoses binding. Stock G28 fatal
 errors may disable all motors, so keep Z supported. New saved models preserve
 the same vector detector for ordinary homing; old models/manual overrides
 retain the legacy selected-axis path.

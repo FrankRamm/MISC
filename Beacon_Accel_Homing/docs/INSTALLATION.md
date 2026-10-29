@@ -432,27 +432,34 @@ noise windows and their summary export succeed. The measurement leaves motor
 and fan state unchanged and does not measure the manual position. Its
 XYZ-magnitude peak selects an initial candidate on the configured grid, whose
 default origin/step are 1.0/0.25 g. A failed measurement or export aborts before
-movement. An impact at or before 20 mm automatically returns
-only the tested axis to its estimated starting point, settles, and retries
-discovery at the next threshold step if all return checks pass. No additional
-command is needed. Faults, no impact or uncertain return evidence abort.
+movement. A premature impact, at or before 20 mm or below the configured
+expected-distance band, can automatically reverse the tested axis's signed
+start-to-halt travel to its estimated starting point. It settles and retries
+discovery at the next threshold step if all return checks and shared recovery
+budgets pass. No additional command is needed. Faults, no impact, uncertain
+return evidence or exhausted budgets abort.
 Each retry raises the current candidate by the selected step. An explicit
 `STEP` changes grid spacing without disabling noise selection.
 `START_THRESHOLD=1 STEP=0.25` forces that initial value and step while still
 performing the noise measurement. No prior standalone NOISE result is reused.
 Use `AXIS=Y` to calibrate only Y instead.
 
-Discovery and each validation impact beyond 20 mm must fit the configured
-midpoint-to-endstop distance within `calibration_travel_tolerance` (default
-20%). An implausible >20 mm hit aborts without recentering; physically center
-XY before a new command. A plausible discovery is followed by ten centered
+To qualify, discovery and each validation impact beyond 20 mm must fit the
+configured midpoint-to-endstop distance within `calibration_travel_tolerance`
+(default 20%). A trigger below the lower band can use the bounded recovery
+above, including after more than 20 mm. An impact beyond 20 mm above the upper
+band aborts without a return or threshold increase; physically center XY before
+a new command. A plausible discovery is followed by ten centered
 checks. Their commanded-travel range (`max - min`) must be **at most 2.00 mm**;
 exactly 2 mm passes. A running spread greater than 2 mm rejects the candidate
 immediately and restarts discovery and all ten checks at the next threshold.
 CALIBRATE and ACCURACY midpoint returns use ordinary acceleration and the same
 explicit settling wait, default 0.25 s. Early reversals keep their existing
 cap and wait; homing speed and its acceleration cap are unchanged.
-These checks do not prove physical position or correct endstop contact.
+The recovery count and cumulative commanded-distance budgets persist for the
+whole command, including <=20 mm recoveries; they do not include qualified
+midpoint returns. These checks do not prove physical position or correct
+endstop contact, and do not automatically diagnose binding.
 See the [current calibration sequence and return
 limits](SIMPLE_CALIBRATION.md).
 
